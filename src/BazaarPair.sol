@@ -1565,8 +1565,14 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     ///         sends the order to the back of its new price level; a smaller size at the same
     ///         price keeps its place. An amendment may not cross the book — a price at or through
     ///         the best resting order on the other side is refused, and the caller sends a taker
-    ///         order instead — and the batch is all or nothing. Margin is judged once, on the set
-    ///         the batch leaves, by createOrder's gate (OrderManagementLib.amendOrders).
+    ///         order instead — and the batch is all or nothing, except that an amendment flagged
+    ///         best-effort is skipped, and reported by OrderAmendSkipped, when its order has been
+    ///         filled or canceled or has expired, when the size asked for is at or below what has
+    ///         filled or leaves a remainder under the floor, or when the new price would cross.
+    ///         A relayed batch whose every amendment is skipped still consumes the nonce and pays
+    ///         the relayer fee: its signer asked that the batch not revert on those checks. Margin
+    ///         is judged once, on the set the batch leaves, by createOrder's gate
+    ///         (OrderManagementLib.amendOrders).
     /// @dev Cheaper than a cancel and a create because every write lands in slots the order
     ///      already occupies, and the fixed cost of a call — the price, the margin curve and the
     ///      signature — is paid once for the whole batch. No fill can happen here, so the vault's
@@ -1582,9 +1588,11 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     /// @param amends The batch as triples of words, covered by the EIP-712 payload: for each
     ///        amendment its id word — the order id in the low 64 bits, up to two predecessor
     ///        hints (the order to rest directly behind at the new price, 0 for none) in bits
-    ///        64-127 and 128-191, the top 64 bits zero — then the new price and the new total
-    ///        size (what has filled stays, so the size must exceed it). The hints are signed with
-    ///        the rest, so a relayer cannot refresh them; BazaarPairLens.amendIdWord packs one.
+    ///        64-127 and 128-191, the best-effort flag in bit 192, the bits above it zero — then
+    ///        the new price and the new total size (what has filled stays, so the size must
+    ///        exceed it). The hints and the flag are signed with the rest, so a relayer can neither
+    ///        refresh the one nor set or clear the other; BazaarPairLens.amendIdWord and
+    ///        bestEffortAmendIdWord pack one.
     /// @param priceUpdate Pyth update data; may be empty when the on-chain price is fresh.
     /// @param nonce The signer's meta-tx nonce (ignored for a self-submitted call).
     /// @param deadline Signature expiry timestamp (ignored for a self-submitted call).

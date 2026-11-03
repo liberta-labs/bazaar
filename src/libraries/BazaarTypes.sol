@@ -736,6 +736,19 @@ library BazaarTypes {
     // repair walk — a modest fraction of an Arbitrum block.
     uint256 internal constant MAX_AMENDS_PER_CALL = MAX_ACTIVE_LIMIT_ORDERS_PER_USER;
 
+    // The best-effort flag of an amendment's id word (bit 192, above the order id and its two
+    // predecessor hints). A flagged amendment that fails one of five checks — its order is
+    // canceled, filled or out of the book; it has expired; the size asked for is at or below what
+    // has filled; that size leaves a remainder under the floor; the new price would cross the
+    // other side — is skipped (OrderAmendSkipped) and the batch goes on. Fills, cancels and other
+    // makers' quotes trip those checks while a batch of quotes is in flight, which is what the
+    // flag is for, but a skip does not ask who tripped them: an owner's own sub-floor or zero size
+    // skips too. Every other refusal reverts the batch, including those that can flip in flight:
+    // the placement band against the oracle, the expiry window against the block, the hint walk
+    // against the book. The flag rides inside the signed word, so a relayer cannot set or clear
+    // it. Bits above it must be zero.
+    uint256 internal constant AMEND_BEST_EFFORT_BIT = 1 << 192;
+
     // Shared node-visit ceiling for book walks: caps the matching walk (MatchHints.maxSteps is
     // clamped to it; 0 selects it as the default) and caps OrderBookLib's insert repair walk.
     // Sized so the worst-case arrival — 32 cold settlements in one transaction — stays a modest
@@ -925,6 +938,31 @@ library BazaarTypes {
         uint256 limitPrice,
         uint256 size,
         uint256 prioritySeq
+    );
+
+    /// @notice Why a best-effort amendment (AMEND_BEST_EFFORT_BIT) left its order as it was:
+    ///         the order is no longer live (canceled, filled, or out of the book), it has expired,
+    ///         the size asked for is at or below what has filled, the remainder that size leaves
+    ///         above what has filled is worth less than MIN_ORDER_AMOUNT (and is not a full close
+    ///         of the position), or the new price would cross the best resting order on the other
+    ///         side.
+    enum AmendSkipReason {
+        Inactive,
+        Expired,
+        SizeFilled,
+        BelowMinimum,
+        WouldCross
+    }
+
+    /// @notice A best-effort amendment was skipped: it left the order as it was, with its price,
+    ///         size, queue position and stamps, and emits no OrderAmended. Reported so an owner can
+    ///         tell a quote that moved from one that did not without re-reading the book.
+    /// @dev Reports this amendment, not the order's last state in the transaction: a later
+    ///      amendment of the same id in the batch can still apply, and the batch's margin gate can
+    ///      prune an order skipped as expired. A skip cancels nothing, so whatever remains live
+    ///      rests at its old price until its owner acts.
+    event OrderAmendSkipped(
+        bytes32 indexed pairId, uint256 indexed orderId, address indexed owner, AmendSkipReason reason
     );
 
     event PositionBucketUpdated(

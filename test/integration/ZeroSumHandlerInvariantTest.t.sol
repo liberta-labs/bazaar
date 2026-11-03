@@ -616,19 +616,21 @@ contract ZeroSumHandler is Test {
         } catch {}
     }
 
-    /// @dev Reprice one of an actor's live resting orders by up to $40 either way at its size,
-    ///      the amendment's leg moving in the resting tally; a move that would cross is refused by
-    ///      the pair and counted as nothing.
+    /// @dev Reprice one of an actor's live resting orders at its size, the amendment's leg moving
+    ///      in the resting tally. Half the time the amendment is best-effort and the move is wide
+    ///      enough to reach the other side, so the pair skips it and the order stays as it was;
+    ///      otherwise a move that would cross is refused and counted as nothing.
     function amendResting(uint256 actorSeed, uint256 pickSeed, uint256 deltaSeed) public {
         address a = traders[bound(actorSeed, 0, traders.length - 2)];
         (uint256[] memory ids, uint256 count,,) = lens.getUserActiveLimitOrders(address(pair), a);
         if (count == 0) return;
         uint256 id = ids[bound(pickSeed, 0, count - 1)];
         BazaarTypes.Order memory o = OrderView.order(pair, id);
-        uint256 delta = bound(deltaSeed, 0, 400) * SCALE / 10;
+        bool bestEffort = (deltaSeed >> 8) & 1 == 1;
+        uint256 delta = bound(deltaSeed, 0, bestEffort ? 4_000 : 400) * SCALE / 10;
         uint256 px = deltaSeed & 1 == 0 ? o.limitPrice + delta : o.limitPrice - delta;
         uint256[] memory w = new uint256[](3);
-        (w[0], w[1], w[2]) = (id, px, o.size);
+        (w[0], w[1], w[2]) = (bestEffort ? id | BazaarTypes.AMEND_BEST_EFFORT_BIT : id, px, o.size);
         bytes[] memory pu = _pu(markUsd);
         vm.warp(vm.getBlockTimestamp() + 4);
         vm.prank(a);

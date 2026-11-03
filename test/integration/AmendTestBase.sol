@@ -92,6 +92,28 @@ abstract contract AmendTestBase is IntegrationBase {
         return _lastCreatedOrderId(pair);
     }
 
+    /// @dev alice bids 49k; forty bids from bob (his cap of 32) and carol rest below her, ten
+    ///      dollars apart from 48,990 down, each hinted at the one before it since an unhinted
+    ///      walk from the head cannot reach that deep either. Returns alice's id and the ladder,
+    ///      head first.
+    function _ladderBelowAlice() internal returns (uint256 a, uint256[] memory ids) {
+        _deposit(alice, 20_000 * BAZAAR_SCALE);
+        _deposit(bob, 80_000 * BAZAAR_SCALE);
+        _deposit(carol, 40_000 * BAZAAR_SCALE);
+        a = _placeLimit(alice, true, SIZE, 49_000 * BAZAAR_SCALE);
+        ids = new uint256[](BazaarTypes.MAX_WALK_STEPS + 8);
+        for (uint256 i; i < ids.length; ++i) {
+            address who = i < BazaarTypes.MAX_ACTIVE_LIMIT_ORDERS_PER_USER ? bob : carol;
+            BazaarTypes.MatchHints memory h;
+            h.pred = i == 0 ? 0 : uint64(ids[i - 1]);
+            bytes[] memory pu = _freshPrice();
+            vm.prank(who);
+            pair.createOrder(_limitSpec(true, SIZE, (48_990 - 10 * i) * BAZAAR_SCALE), h, pu, 0, 0, 0, "", "");
+            ids[i] = _lastCreatedOrderId(pair);
+        }
+        assertEq(_bids().length, ids.length + 1);
+    }
+
     // ---------------------------- book readings ----------------------------
 
     function _bidHead() internal view returns (uint64 head) {

@@ -16,6 +16,6 @@ The suite (`test/unit`, `test/integration`) includes zero-sum accounting invaria
 
 ## Reporting
 
-- **Reporting a vulnerability**: please use GitHub's private vulnerability reporting — go to the [Security tab](https://github.com/bazaar-finance/bazaar/security/advisories/new) and select *Report a vulnerability*. Do not open a public issue for security findings.
+- **Reporting a vulnerability**: please use GitHub's private vulnerability reporting — go to the [Security tab](https://github.com/liberta-labs/bazaar/security/advisories/new) and select *Report a vulnerability*. Do not open a public issue for security findings.
 - **No bug-bounty program at this stage.** Valid findings are credited to the reporter in the published advisory. A retroactive reward may be considered for significant findings once the project is funded, but none is promised or guaranteed. The 1% fee skim above is future funding for a program that does not exist yet — it holds nothing and can pay nothing.
-- **Scope and triage**: [`SECURITY.md`](https://github.com/bazaar-finance/bazaar/blob/master/SECURITY.md) in the repository lists what is in scope, what is out of scope, and what makes a report actionable. Reports are triaged on a best-effort basis by a small team; no response time is guaranteed.
+- **Scope and triage**: [`SECURITY.md`](https://github.com/liberta-labs/bazaar/blob/master/SECURITY.md) in the repository lists what is in scope, what is out of scope, and what makes a report actionable. Reports are triaged on a best-effort basis by a small team; no response time is guaranteed.

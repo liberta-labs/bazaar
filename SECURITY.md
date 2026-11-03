@@ -6,7 +6,7 @@
 ## Reporting a vulnerability
 
 Please use GitHub's private vulnerability reporting: go to the
-[Security tab](https://github.com/bazaar-finance/bazaar/security/advisories/new) and select
+[Security tab](https://github.com/liberta-labs/bazaar/security/advisories/new) and select
 *Report a vulnerability*. **Do not open a public issue for security findings.**
 
 A useful report names the affected contract and function, the conditions the attack needs, and what

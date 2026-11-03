@@ -148,7 +148,8 @@ two optional insertion hints packed above it), the new price and the new total s
 amendment names one of the caller's orders and the price and size it should carry afterwards; the order keeps its id, its
 expiry, its integrator and its place in the owner's order set, and nothing about the position or the
 vault moves. Up to `MAX_AMENDS_PER_CALL` (32, the per-user order cap) per call, all or nothing: any
-amendment that fails reverts the whole batch.
+amendment that fails reverts the whole batch, unless it is flagged best-effort (below) and fails one
+of the checks that flag covers.
 
 - **Queue position.** A new price, or a larger size at the same price, is a new claim on a level: the
   order goes to the back, behind every order already resting there. A smaller size at the same price
@@ -201,9 +202,35 @@ amendment that fails reverts the whole batch.
 - **Why it is cheaper.** Every write lands in slots already in use, the owner's tally included, and the fixed cost of
   a call — the price, the margin curve, the signature — is paid once for the batch. No fill can
   happen, so no health check runs.
+- **Best effort.** The batch is all or nothing, with one opt-out. Setting bit 192 of an amendment's
+  id word (`BazaarPairLens.bestEffortAmendIdWord` packs it) marks it best-effort: if, when the batch
+  lands, that order has been filled or canceled or has expired, the size asked for is at or below what
+  has filled or leaves a remainder under the $5 floor, or the new price would cross the other side,
+  the amendment is skipped and the rest of the batch goes through. Fills, cancels and other makers'
+  quotes trip those checks while a requote is in flight, and without the flag any one of them reverts
+  the whole requote and leaves every quote stale, which happens most in the markets that move fastest.
+  A skip does not ask who tripped the check, so your own sub-floor or zero size is skipped too.
+
+  A skipped amendment leaves the order as it was, with its price, size, queue position and stamps, and
+  `OrderAmendSkipped` reports the reason, so a bot can tell a quote that moved from one that did not
+  without re-reading the book. A skip cancels nothing: if a shrink is skipped because a taker got there
+  first, whatever remains stays live at its old price, so a bot that wanted it gone reads the event and
+  cancels it. A later amendment of the same order in the batch can still apply, and the batch's margin
+  gate can prune an order skipped as expired.
+
+  Every other refusal reverts the batch whatever the flag: an order that is not yours or not
+  amendable, a zero price or one outside the band, a move too close to expiry, a hint the repair walk
+  cannot reach the slot from, and the margin verdict on the set the batch leaves. Some of those can
+  also change in flight. The band follows the oracle, and moving an order that has drifted inside the
+  minimum-lifetime window reverts the batch, so leave out orders close to expiry, with a margin for
+  landing. The flag is
+  part of the signed word, so a relayer can neither set nor clear it; a relayed batch whose every
+  amendment is skipped still consumes its nonce and pays its relayer fee, since the signer paid for
+  the batch to be carried, not for its effect — keep a relayed requote's fee small, or submit requotes
+  yourself.
 - **Hints.** Insertion hints are optional and ride inside the id word: bits 64–127 and 128–191 each
   name an order to rest directly behind at the new price (`BazaarPairLens.findPredecessor` finds it,
-  `amendIdWord` packs it), and the top 64 bits must be zero. They are consulted only when the move
+  `amendIdWord` packs it), and the bits above the best-effort flag must be zero. They are consulted only when the move
   changes the order's neighbours; a move that keeps them is written in place and ignores them. The
   caller's hints lead the placement and the order's old neighbours follow as the fallback anchor,
   so a requote by a few ticks needs no hint while a jump across the book takes one. Every
@@ -218,6 +245,8 @@ amendment that fails reverts the whole batch.
   order is as its `OrderUpdated` (`Created`) left it, its fills aside, so an indexer can re-sort its
   book from events alone. A `prioritySeq` above the last one reported means
   the order was queued anew behind its price level; an unchanged one, that it shrank where it stood.
+  A best-effort amendment that was skipped emits `OrderAmendSkipped` with its reason instead, and
+  nothing about the order changed.
 
 ## Cancellation & cleanup
 

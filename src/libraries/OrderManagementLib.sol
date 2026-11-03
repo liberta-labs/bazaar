@@ -476,7 +476,9 @@ library OrderManagementLib {
     ///         a new price and size; the order keeps its id, its expiry, its integrator and its
     ///         place in the owner's order set. A new price, or a larger size, moves the order to
     ///         the back of its new price level; a smaller size at the same price keeps its place.
-    ///         The batch is all or nothing: any amendment that fails reverts the call.
+    ///         The batch is all or nothing: any amendment that fails reverts the call, except that
+    ///         one flagged best-effort (BazaarTypes.AMEND_BEST_EFFORT_BIT) is skipped when it fails
+    ///         one of the five checks that flag names.
     /// @dev Called via DELEGATECALL. The caller resolves the mark, refreshes the margin curve and
     ///      handles the relayer fee; nothing here moves USDC.
     ///
@@ -535,9 +537,12 @@ library OrderManagementLib {
     ///        (BazaarTypes.Order.restedPremiumPpm)
     /// @param amends The batch as triples of words, in order: each amendment's id word — the
     ///        order id in bits 0-63, optional predecessor hints in bits 64-127 and 128-191 (the
-    ///        order to rest directly behind at the new price, 0 for none), bits 192-255 zero —
-    ///        then its new price and its new total size (the filled size stays, so the size must
-    ///        exceed it)
+    ///        order to rest directly behind at the new price, 0 for none), the best-effort flag
+    ///        in bit 192 (BazaarTypes.AMEND_BEST_EFFORT_BIT: skip this amendment, rather than
+    ///        revert the batch, when the order has been filled or canceled or has expired, when
+    ///        the size asked for is at or below what has filled or leaves a remainder under the
+    ///        floor, or when the new price would cross), bits 193-255 zero — then its new price
+    ///        and its new total size (the filled size stays, so the size must exceed it)
     /// @param params Pair state the amendments are judged against (BazaarTypes.AmendOrdersParams)
     /// @param caller The acting user; every order must be theirs
     /// @return newNextOrderId The id counter after the queue positions drawn here
@@ -611,9 +616,11 @@ library OrderManagementLib {
         uint256 seqCounter,
         uint256 stampIndex
     ) private returns (uint256) {
-        // The id word carries the order id in its low 64 bits and two optional predecessor hints
-        // above it; the top 64 bits must be clear so one amendment has exactly one encoding.
-        if (idWord >> 192 != 0) revert OrderManagementLib__InvalidAmendBatch();
+        // The id word carries the order id in its low 64 bits, two optional predecessor hints
+        // above it and the best-effort flag above those; the bits above the flag must be clear so
+        // one amendment has exactly one encoding.
+        if (idWord >> 193 != 0) revert OrderManagementLib__InvalidAmendBatch();
+        bool bestEffort = idWord & BazaarTypes.AMEND_BEST_EFFORT_BIT != 0;
         uint256 orderId = idWord & type(uint64).max;
         BazaarTypes.Order storage o = orders[orderId];
         if (o.creator == address(0)) revert OrderManagementLib__OrderNotFound(orderId);
@@ -624,10 +631,29 @@ library OrderManagementLib {
         if (o.orderType != BazaarTypes.OrderType.Limit || o.tif != BazaarTypes.TimeInForce.GTC) {
             revert OrderManagementLib__NotAmendable(orderId);
         }
+        // A best-effort amendment skips, rather than reverts, on five of the checks that follow: the
+        // order is not live, it has expired, the size asked for is at or below what has filled,
+        // that size leaves a remainder under the floor, the new price would cross. Fills, cancels
+        // and other makers' quotes trip those while a batch is in flight, which is what the flag is
+        // for, but a skip does not ask who tripped them: an owner's own sub-floor or zero size
+        // skips too. Each guards a leg about to be written and a skipped amendment writes nothing,
+        // so none is bypassed. Every other refusal reverts, including those that can flip in
+        // flight: the placement band against the oracle, the expiry window against the block, and
+        // the hint walk against the book (OrderBookLib__HintRepairExhausted, raised after the
+        // unlink, so it could skip only with a locate ahead of every write). So does the margin
+        // gate on the set the batch leaves.
         if (o.canceledBlock != 0 || o.filledBlock != 0 || !o.inBook) {
+            if (bestEffort) {
+                return _skipAmend(params.pairId, orderId, caller, BazaarTypes.AmendSkipReason.Inactive, seqCounter);
+            }
             revert OrderManagementLib__OrderIsNotActive(orderId);
         }
-        if (params.currentBlock > o.expiryBlock) revert OrderManagementLib__OrderAlreadyExpired(orderId);
+        if (params.currentBlock > o.expiryBlock) {
+            if (bestEffort) {
+                return _skipAmend(params.pairId, orderId, caller, BazaarTypes.AmendSkipReason.Expired, seqCounter);
+            }
+            revert OrderManagementLib__OrderAlreadyExpired(orderId);
+        }
 
         if (newPrice == 0) revert OrderManagementLib__ZeroLimitPrice();
         {
@@ -641,15 +667,28 @@ library OrderManagementLib {
             }
         }
         uint256 filled = o.filledSize;
-        if (newSize <= filled) revert OrderManagementLib__AmendSizeNotAboveFilled(orderId);
+        if (newSize <= filled) {
+            if (bestEffort) {
+                return _skipAmend(params.pairId, orderId, caller, BazaarTypes.AmendSkipReason.SizeFilled, seqCounter);
+            }
+            revert OrderManagementLib__AmendSizeNotAboveFilled(orderId);
+        }
         {
             // The remainder is held to the notional floor like a new order, with the same
-            // full-close exemption.
+            // full-close exemption. Both read what has filled and the position as they stand, so a
+            // fill since the signing can take a remainder under the floor or the exemption away.
             uint256 remaining = newSize - filled;
             uint256 notional = Math.mulDiv(remaining, newPrice, BazaarTypes.BAZAAR_SCALE);
             if (notional < MIN_ORDER_AMOUNT) {
                 bool isFullClose = bucket.size > 0 && bucket.isLong != o.isLong && remaining == bucket.size;
-                if (!isFullClose) revert OrderManagementLib__NotionalBelowMinimum(notional, MIN_ORDER_AMOUNT);
+                if (!isFullClose) {
+                    if (bestEffort) {
+                        return _skipAmend(
+                            params.pairId, orderId, caller, BazaarTypes.AmendSkipReason.BelowMinimum, seqCounter
+                        );
+                    }
+                    revert OrderManagementLib__NotionalBelowMinimum(notional, MIN_ORDER_AMOUNT);
+                }
             }
         }
         {
@@ -657,6 +696,12 @@ library OrderManagementLib {
             if (best != 0) {
                 uint256 bestPrice = orders[best].limitPrice;
                 if (o.isLong ? newPrice >= bestPrice : newPrice <= bestPrice) {
+                    if (bestEffort) {
+                        return
+                            _skipAmend(
+                                params.pairId, orderId, caller, BazaarTypes.AmendSkipReason.WouldCross, seqCounter
+                            );
+                    }
                     revert OrderManagementLib__AmendWouldCross(orderId, newPrice, bestPrice);
                 }
             }
@@ -722,6 +767,19 @@ library OrderManagementLib {
         }
         CollateralLib._tallyAdd(tally, o.isLong, false, newSize - filled, newPrice);
         _emitAmended(params.pairId, orderId, caller, o);
+        return seqCounter;
+    }
+
+    /// @dev Report a best-effort amendment that left its order as it was, and hand back the id
+    ///      counter unchanged: a skipped amendment draws no queue position and writes nothing.
+    function _skipAmend(
+        bytes32 pairId,
+        uint256 orderId,
+        address owner,
+        BazaarTypes.AmendSkipReason reason,
+        uint256 seqCounter
+    ) private returns (uint256) {
+        emit BazaarTypes.OrderAmendSkipped(pairId, orderId, owner, reason);
         return seqCounter;
     }
 

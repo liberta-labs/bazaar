@@ -37,7 +37,7 @@ the disagreement as a finding.
 
 | Item | Value |
 |---|---|
-| Repository | https://github.com/bazaar-finance/bazaar |
+| Repository | https://github.com/liberta-labs/bazaar |
 | Tag | `v1.0.0-rc1` |
 | Commit | `182d354c01458bbcda8db5ce67a177520048d787` |
 | Target chain | Arbitrum One (chain id 42161) |
@@ -178,7 +178,7 @@ All files: 27, 11,032 lines (9,903 in scope + 1,129 out of scope).
 ### Commands
 
 ```bash
-git clone --recursive https://github.com/bazaar-finance/bazaar.git bazaar
+git clone --recursive https://github.com/liberta-labs/bazaar.git bazaar
 ```
 
 ```bash

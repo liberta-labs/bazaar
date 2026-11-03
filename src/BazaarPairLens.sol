@@ -1362,6 +1362,16 @@ contract BazaarPairLens {
         return uint256(orderId) | (uint256(pred) << 64) | (uint256(pred2) << 128);
     }
 
+    /// @notice amendIdWord with the best-effort flag set (BazaarTypes.AMEND_BEST_EFFORT_BIT): the
+    ///         amendment is skipped, and reported by OrderAmendSkipped, rather than reverting the
+    ///         batch, when its order has been filled or canceled or has expired, when the size asked
+    ///         for is at or below what has filled or leaves a remainder under the floor, or when
+    ///         the new price would cross. A maker requoting a ladder in a moving market flags every
+    ///         amendment, so the quotes that can still move do.
+    function bestEffortAmendIdWord(uint64 orderId, uint64 pred, uint64 pred2) external pure returns (uint256) {
+        return uint256(orderId) | (uint256(pred) << 64) | (uint256(pred2) << 128) | BazaarTypes.AMEND_BEST_EFFORT_BIT;
+    }
+
     /// @notice Hint helper for MatchHints.pred: the orderId an order entering the book at
     ///         limitPrice should rest directly behind on its side (0 = it belongs at the head).
     ///         Whatever enters — a new order, an amended one, or a StopLimit a keeper arms — takes
