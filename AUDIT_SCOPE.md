@@ -38,8 +38,8 @@ the disagreement as a finding.
 | Item | Value |
 |---|---|
 | Repository | https://github.com/liberta-labs/bazaar |
-| Tag | `v1.0.0-rc1` |
-| Commit | `182d354c01458bbcda8db5ce67a177520048d787` |
+| Tag | `v1.0.0-rc2` |
+| Commit | `d745cd04eb22e30cd6020c47d2f5cee4b5298259` |
 | Target chain | Arbitrum One (chain id 42161) |
 | Compiler | solc 0.8.34 |
 | Optimizer | on, `optimizer_runs = 150` for every contract |
@@ -94,7 +94,7 @@ Counts are non-blank, non-comment lines (natspec included in "comment"), compute
 tokenizer that skips `//` comments and `/* */` blocks and does not mistake `//` inside a string
 literal for a comment.
 
-### Tier 1 — full scope (21 files, 9,903 lines)
+### Tier 1 — full scope (21 files, 9,951 lines)
 
 | File | Lines | Role |
 |---|---:|---|
@@ -105,9 +105,9 @@ literal for a comment.
 | `src/libraries/MatchingEngineLib.sol` | 1,428 | Arrival walk, trigger execution, vault unload, per-fill margin checks, fees |
 | `src/libraries/AdlLib.sol` | 1,113 | ADL batches, deferred liquidations, winner closes, executor rewards |
 | `src/libraries/RiskParamsLib.sol` | 725 | Margin curve, insurance target, reserve, unload planner, fund-ledger helpers, bounties |
-| `src/libraries/OrderManagementLib.sol` | 632 | Order creation, cancel, amend, expiry sweep; the creation and amendment margin gates |
+| `src/libraries/OrderManagementLib.sol` | 669 | Order creation, cancel, amend (with the best-effort flag), expiry sweep; the creation and amendment margin gates |
 | `src/libraries/CollateralLib.sol` | 607 | Deposits, withdrawals, books-vs-cash check, fee claims, terminal settlement, resting-order tally |
-| `src/libraries/BazaarTypes.sol` | 523 | Structs, constants, events |
+| `src/libraries/BazaarTypes.sol` | 534 | Structs, constants, events |
 | `src/libraries/InsuranceVaultLib.sol` | 397 | Insurance shares, deposits, forward-priced redemptions, rate limits |
 | `src/libraries/LiquidationLib.sol` | 370 | Seizure, netting against the vault inventory, deferral, rewards |
 | `src/libraries/OrderBookLib.sol` | 218 | Sorted doubly-linked book lists, in-place rewrite of a resting order |
@@ -119,9 +119,9 @@ literal for a comment.
 | `src/libraries/MmrSampleLib.sol` | 66 | Lagged-MMR ring buffer |
 | `src/libraries/BazaarMathLib.sol` | 62 | Fixed point, exponent conversion |
 | `src/libraries/FeeEscrowLib.sol` | 36 | Claimable-balance escrow for every third-party payout |
-| **Total** | **9,903** | |
+| **Total** | **9,951** | |
 
-### Tier 2 — riskiest subset for a competition (12 files, 6,730 lines)
+### Tier 2 — riskiest subset for a competition (12 files, 6,767 lines)
 
 | File | Lines |
 |---|---:|
@@ -129,7 +129,7 @@ literal for a comment.
 | `src/libraries/AdlLib.sol` | 1,113 |
 | `src/BazaarPairTerminator.sol` | 961 |
 | `src/libraries/RiskParamsLib.sol` | 725 |
-| `src/libraries/OrderManagementLib.sol` | 632 |
+| `src/libraries/OrderManagementLib.sol` | 669 |
 | `src/libraries/CollateralLib.sol` | 607 |
 | `src/libraries/InsuranceVaultLib.sol` | 397 |
 | `src/libraries/LiquidationLib.sol` | 370 |
@@ -137,7 +137,7 @@ literal for a comment.
 | `src/libraries/TerminationLib.sol` | 112 |
 | `src/libraries/BucketLib.sol` | 99 |
 | `src/libraries/VaultHealthLib.sol` | 68 |
-| **Total** | **6,730** |
+| **Total** | **6,767** |
 
 This covers the matching engine and order management, liquidation and ADL, the insurance vault, the
 termination lifecycle, collateral accounting with the resting-order tally, and the risk library
@@ -148,11 +148,11 @@ reserve (`adlReserve`) and the margin curve (`calculateIMRandMMR`, `liquidationI
 `BazaarPair`, `FundingLib` and `BazaarTypes` are required reading for it, since the tier's files are
 called from the pair.
 
-### Out of scope (6 files, 1,129 lines)
+### Out of scope (6 files, 1,132 lines)
 
 | File | Lines | Reason |
 |---|---:|---|
-| `src/BazaarPairLens.sol` | 850 | Read-only views for frontends and keepers. No contract calls it on-chain: the factory stores its address and reads `factory()` from it once in the constructor as a wiring check. Known limitation: `getMaxWithdrawable` does not reproduce the liquidation-exposure refusal a position holder's withdrawal can meet before an ADL window latches, as its natspec states. |
+| `src/BazaarPairLens.sol` | 853 | Read-only views for frontends and keepers. No contract calls it on-chain: the factory stores its address and reads `factory()` from it once in the constructor as a wiring check. Known limitation: `getMaxWithdrawable` does not reproduce the liquidation-exposure refusal a position holder's withdrawal can meet before an ADL window latches, as its natspec states. |
 | `src/libraries/ClaimTextLib.sol` | 179 | Static UMA claim text (pure functions returning bytes); its correctness as prose matters to UMA verifiers, not to the contracts' state. |
 | `src/interfaces/IUmaOptimisticOracleV3.sol` | 55 | Interface |
 | `src/interfaces/IBazaarPair.sol` | 22 | Interface |
@@ -164,7 +164,7 @@ themselves (OpenZeppelin, Pyth SDK, UMA, forge-std). How Bazaar integrates its d
 scope, including whether the local interface `IUmaOptimisticOracleV3` matches the deployed oracle's
 ABI, since the factory decodes `getAssertion` results to decide proposal outcomes.
 
-All files: 27, 11,032 lines (9,903 in scope + 1,129 out of scope).
+All files: 27, 11,083 lines (9,951 in scope + 1,132 out of scope).
 
 ## 4. Build and test
 
@@ -182,7 +182,7 @@ git clone --recursive https://github.com/liberta-labs/bazaar.git bazaar
 ```
 
 ```bash
-git checkout v1.0.0-rc1
+git checkout v1.0.0-rc2
 ```
 
 ```bash
@@ -456,8 +456,9 @@ in scope whatever its profit.
    rests crossed, and holds no two orders that tie; every fill executes at the resting maker's limit
    price against the best-priced, earliest-queued maker. An amendment that keeps the order's
    neighbours is rewritten where it stands and leaves the book exactly as an unlink and an insert
-   would (`OrderBookLib.staysInPlace`). A fill out of priority, or at a price the book did not offer,
-   is a finding (matching.md, orders.md).
+   would (`OrderBookLib.staysInPlace`). A best-effort amendment that is skipped writes nothing: the
+   order, the book, the account's tally and the id counter stand as they did. A fill out of priority,
+   or at a price the book did not offer, is a finding (matching.md, orders.md).
 5. **Only an order's owner bounds its execution.** A caller's hints, step budget and price update
    can make the caller's own call fail or do less, but never mis-place, shrink or cancel another
    owner's order; a trigger order a keeper's walk cannot finish keeps its fills and stays live
@@ -544,16 +545,21 @@ found most of their defects.
    with each other at any price inside the placement band (`MAX_PLACEMENT_DEVIATION_BP`, ±50%); and
    margin can leave a bucket by routes other than `withdrawCollateral` (a realized loss to a sibling,
    fees, bounties).
-5. **The resting-order tally and in-place amends.** `CollateralLib._restingBound`,
+5. **The resting-order tally, in-place amends and best-effort skips.** `CollateralLib._restingBound`,
    `_sweepRestingReserve`, `_tallyAdd`, `_tallySub`, `withdrawCollateral`;
    `OrderManagementLib._requireCreationAffordable`, `_requireAmendedSetAffordable`,
-   `_exactAmendReserve`, `_amendOne`, `cancelOrder`; `OrderBookLib.staysInPlace`, `restamp`. This is
-   the newest code in scope. The creation, amendment and withdrawal gates pass an account on an upper
-   bound from a per-account tally without reading its orders, so any path that lets the tally
-   understate the set is a margin bypass. Check every writer of an active order against the tally,
+   `_exactAmendReserve`, `_amendOne`, `_skipAmend`, `cancelOrder`; `OrderBookLib.staysInPlace`,
+   `restamp`. This is the newest code in scope. The creation, amendment and withdrawal gates pass an
+   account on an upper bound from a per-account tally without reading its orders, so any path that
+   lets the tally understate the set is a margin bypass. Check every writer of an active order against the tally,
    the rounding slack (`RESTING_BOUND_SLACK`), saturation and the invalid marker, and the fallback to
    the exact sweep. An amendment written in place must leave the book, the order's queue position
-   and its exposure stamps exactly as an unlink and an insert would.
+   and its exposure stamps exactly as an unlink and an insert would. An amendment flagged best-effort
+   (`BazaarTypes.AMEND_BEST_EFFORT_BIT`, bit 192 of the signed id word) skips on five checks instead of
+   reverting its batch, each before the amendment's first write, and the margin gate then judges the
+   set the batch actually leaves. Check that no skip can follow a partial write, that the flag cannot
+   be set or cleared by a relayer, and that the gate holds for any mix of skipped and applied
+   amendments, including the same order named twice in a batch.
 6. **The termination lifecycle.** `BazaarPairTerminator.proposeTermination`,
    `_handleTerminationResolution`, `terminateScheduledPair`, `settlementRule`, `_settleByChain`,
    `_insurerSettlementBounds`, `_umaCutoffInForce`, `proposeInsurerTermination`,
@@ -841,13 +847,36 @@ without a new consequence (a larger impact, a cheaper path, or a broken bound) a
     (`ghostMaxDeficit`), but no assertion reads it, so whether a fuzzed sequence reaches the bad-debt
     regime is unmeasured; that regime is pinned by deterministic tests.
 
+### Best-effort amendments
+
+35. **A best-effort amendment skips by which check fired, not by who caused it.** With
+    `AMEND_BEST_EFFORT_BIT` set, `_amendOne` skips rather than reverts when the order is not live or has
+    expired, when the size asked for is at or below what has filled or leaves a remainder under
+    `MIN_ORDER_AMOUNT`, or when the new price would cross. An owner's own sub-floor or zero size
+    therefore skips too, and a zero size cancels nothing. A skip leaves the order as it was, so a shrink
+    skipped because a taker got there first leaves more open than the owner signed for, at the old
+    price, until the owner acts on `OrderAmendSkipped`. Every other refusal reverts the batch, including
+    three that can change while a batch is in flight: the placement band against the oracle, the
+    `MIN_ORDER_LIFETIME_BLOCKS` floor on a move against the block, and the hint walk against the book.
+    Accepted: a skip writes nothing, the margin gate judges the set the batch leaves, the owner chose
+    the flag, and the docs tell bots to read the event and to leave out orders close to expiry. Making
+    the hint walk skippable would need a locate ahead of every write.
+36. **A relayed batch whose every amendment is skipped still pays its relayer.** `amendOrders` consumes
+    the nonce and pulls the signed `relayerFee` whatever the batch did, so a relayer earns the fee on a
+    batch that moved nothing, and can bring that about by quoting through the batch's prices just ahead
+    of it or by holding it until a fill lands. Accepted: the loss is the fee the signer chose, at most
+    `MAX_RELAYER_FEE` ($1) per batch, the signature lapses within `MAX_DEADLINE_WINDOW` (10 s), quoting
+    through the batch exposes the relayer's own order to fills, and an owner can submit requotes itself.
+
 ## 10. Prior review
 
 The codebase has been through eight rounds of internal security review. The later rounds split the
 code by subsystem, traced every candidate finding against the source with worked numbers, and, in
 the most recent round, reproduced every Medium with a forge proof of concept before it was fixed.
-Every finding from those rounds is fixed or listed in section 9. The test suite holds 1,773 test
-functions in 112 files under `test/unit` and `test/integration` at the time of writing, including
+Every finding from those rounds is fixed or listed in section 9. The best-effort amendment flag
+(section 8, item 5) came after them and has had two focused internal reviews rather than a full
+round. The test suite holds 1,796 test
+functions in 113 files under `test/unit` and `test/integration` at the time of writing, including
 fuzz tests, fixed zero-sum scenarios and the handler-based invariant suite. **The protocol has not
 had a professional audit.** The internal review reports can be shared with the selected auditor on
 request.
