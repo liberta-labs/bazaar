@@ -38,8 +38,8 @@ the disagreement as a finding.
 | Item | Value |
 |---|---|
 | Repository | https://github.com/liberta-labs/bazaar |
-| Tag | `v1.0.0-rc2` |
-| Commit | `d745cd04eb22e30cd6020c47d2f5cee4b5298259` |
+| Tag | `v1.0.0-rc3` |
+| Commit | `3cf9dc3b6fa38f6cba71b662568db1278e0aa22e` |
 | Target chain | Arbitrum One (chain id 42161) |
 | Compiler | solc 0.8.34 |
 | Optimizer | on, `optimizer_runs = 150` for every contract |
@@ -94,7 +94,7 @@ Counts are non-blank, non-comment lines (natspec included in "comment"), compute
 tokenizer that skips `//` comments and `/* */` blocks and does not mistake `//` inside a string
 literal for a comment.
 
-### Tier 1 — full scope (21 files, 9,951 lines)
+### Tier 1 — full scope (21 files, 9,954 lines)
 
 | File | Lines | Role |
 |---|---:|---|
@@ -104,7 +104,7 @@ literal for a comment.
 | `src/BazaarOracle.sol` | 377 | Pyth adapter, composite feeds, confidence and staleness rules |
 | `src/libraries/MatchingEngineLib.sol` | 1,428 | Arrival walk, trigger execution, vault unload, per-fill margin checks, fees |
 | `src/libraries/AdlLib.sol` | 1,113 | ADL batches, deferred liquidations, winner closes, executor rewards |
-| `src/libraries/RiskParamsLib.sol` | 725 | Margin curve, insurance target, reserve, unload planner, fund-ledger helpers, bounties |
+| `src/libraries/RiskParamsLib.sol` | 728 | Margin curve, insurance target, reserve, unload planner, fund-ledger helpers, bounties |
 | `src/libraries/OrderManagementLib.sol` | 669 | Order creation, cancel, amend (with the best-effort flag), expiry sweep; the creation and amendment margin gates |
 | `src/libraries/CollateralLib.sol` | 607 | Deposits, withdrawals, books-vs-cash check, fee claims, terminal settlement, resting-order tally |
 | `src/libraries/BazaarTypes.sol` | 534 | Structs, constants, events |
@@ -119,16 +119,16 @@ literal for a comment.
 | `src/libraries/MmrSampleLib.sol` | 66 | Lagged-MMR ring buffer |
 | `src/libraries/BazaarMathLib.sol` | 62 | Fixed point, exponent conversion |
 | `src/libraries/FeeEscrowLib.sol` | 36 | Claimable-balance escrow for every third-party payout |
-| **Total** | **9,951** | |
+| **Total** | **9,954** | |
 
-### Tier 2 — riskiest subset for a competition (12 files, 6,767 lines)
+### Tier 2 — riskiest subset for a competition (12 files, 6,770 lines)
 
 | File | Lines |
 |---|---:|
 | `src/libraries/MatchingEngineLib.sol` | 1,428 |
 | `src/libraries/AdlLib.sol` | 1,113 |
 | `src/BazaarPairTerminator.sol` | 961 |
-| `src/libraries/RiskParamsLib.sol` | 725 |
+| `src/libraries/RiskParamsLib.sol` | 728 |
 | `src/libraries/OrderManagementLib.sol` | 669 |
 | `src/libraries/CollateralLib.sol` | 607 |
 | `src/libraries/InsuranceVaultLib.sol` | 397 |
@@ -137,7 +137,7 @@ literal for a comment.
 | `src/libraries/TerminationLib.sol` | 112 |
 | `src/libraries/BucketLib.sol` | 99 |
 | `src/libraries/VaultHealthLib.sol` | 68 |
-| **Total** | **6,767** |
+| **Total** | **6,770** |
 
 This covers the matching engine and order management, liquidation and ADL, the insurance vault, the
 termination lifecycle, collateral accounting with the resting-order tally, and the risk library
@@ -164,7 +164,7 @@ themselves (OpenZeppelin, Pyth SDK, UMA, forge-std). How Bazaar integrates its d
 scope, including whether the local interface `IUmaOptimisticOracleV3` matches the deployed oracle's
 ABI, since the factory decodes `getAssertion` results to decide proposal outcomes.
 
-All files: 27, 11,083 lines (9,951 in scope + 1,132 out of scope).
+All files: 27, 11,086 lines (9,954 in scope + 1,132 out of scope).
 
 ## 4. Build and test
 
@@ -182,7 +182,7 @@ git clone --recursive https://github.com/liberta-labs/bazaar.git bazaar
 ```
 
 ```bash
-git checkout v1.0.0-rc2
+git checkout v1.0.0-rc3
 ```
 
 ```bash
@@ -259,7 +259,7 @@ UMA's oracle (listed at the end).
 | Trigger keeper | `executeTriggeredOrders` (up to `MAX_TRIGGER_EXECS_PER_CALL`, 20) | The owner-chosen bounty, escrowed from the owner's wallet at creation and paid pro rata to what an execution fills | The bounty goes to the owner when the order's own creation walk executes it, or when an execution lands in the creation block of an order the stale fallback left unarmed |
 | Liquidator | `liquidate` | `MIN_LIQUIDATOR_REWARD` ($0.05) per seized or deferred account, at most the account's equity below $5 of notional; a netting earns max($0.05, 2 bp of the overlap) (`LIQUIDATION_FEE_EBP`); the inline unload pays 2 bp on what it sells beyond that | Capped at insurance free capital; a stored price older than `MAX_LIQUIDATION_PRICE_AGE` (10 minutes) needs a fresh update |
 | Vault unloader | `unloadVault` | 2 bp of unloaded notional, raised to `UNLOAD_BOUNTY_MIN` ($0.25) when at least `UNLOAD_BOUNTY_MIN_NOTIONAL` ($1,250) unloads or the inventory clears | Capped by `RiskParamsLib.unloadRewardPayable`; fills nothing and pays nothing on the stale fallback |
-| Price refresher | `refreshPrice` | `REFRESH_BOUNTY` ($0.10) for a newer stored price | At most once per `REFRESH_BOUNTY_MIN_GAP` (5 minutes) while the vault holds at least $1,250 of inventory, otherwise once per `REFRESH_BOUNTY_HEARTBEAT` (1 day); only while free capital exceeds `REFRESH_BOUNTY_MIN_INSURANCE` ($5,000) |
+| Price refresher | `refreshPrice` | `REFRESH_BOUNTY` ($0.10) for a newer stored price | At most once per `REFRESH_BOUNTY_MIN_GAP` (5 minutes) while the vault holds at least $1,250 of inventory and free capital exceeds `REFRESH_BOUNTY_FAST_MIN_INSURANCE` ($5,000), otherwise once per `REFRESH_BOUNTY_HEARTBEAT` (1 day); only while free capital exceeds `REFRESH_BOUNTY_HEARTBEAT_MIN_INSURANCE` ($1,000) |
 | ADL executor | `executeAdl` (up to `MAX_ADL_WINNERS_PER_BATCH`, 25, per list) | For the inventory's own exposure closed (at most what the fund could not carry as the batch began, less every deferred account the batch absorbs), max(2 bp of the notional at the mark, `ADL_EXECUTOR_REWARD_BP` (0.1%) of the bad debt the close averts), nothing for units closed only so deferred accounts can be absorbed; per deferred account it seizes, max($0.05, 2 bp of what it retires) plus 0.1% of the bad debt its cohort close averts ($0.05 alone for one moved into the inventory) | Capped at free capital; refuses the stale fallback |
 | Expiry janitor | `sweepExpired` | Nothing | |
 | Terminal settler | `liquidate` once the settlement price is fixed (settlement mode, through `CollateralLib.settleTerminalPositions`), then `finalizeTermination` | `TERMINAL_SETTLEMENT_TIP` ($0.05) per position settled for someone else, from that position's collateral, topped up from insurance for positions of at least $5 | `finalizeTermination` runs once open interest is zero, or after `TERMINAL_SETTLEMENT_ESCAPE` (14 days) |
@@ -549,7 +549,8 @@ found most of their defects.
    `_sweepRestingReserve`, `_tallyAdd`, `_tallySub`, `withdrawCollateral`;
    `OrderManagementLib._requireCreationAffordable`, `_requireAmendedSetAffordable`,
    `_exactAmendReserve`, `_amendOne`, `_skipAmend`, `cancelOrder`; `OrderBookLib.staysInPlace`,
-   `restamp`. This is the newest code in scope. The creation, amendment and withdrawal gates pass an
+   `restamp`. Apart from the refresh bounty's two floors (section 9, item 37), this is the newest code
+   in scope. The creation, amendment and withdrawal gates pass an
    account on an upper bound from a per-account tally without reading its orders, so any path that
    lets the tally understate the set is a margin bypass. Check every writer of an active order against the tally,
    the rounding slack (`RESTING_BOUND_SLACK`), saturation and the invalid marker, and the fallback to
@@ -635,7 +636,7 @@ without a new consequence (a larger impact, a cheaper path, or a broken bound) a
    quiet pair on a feed that still publishes off-chain can therefore be settled at a price at least
    21 days old. Accepted: one on-chain Pyth push resets the clock, and the refresh bounty's daily
    heartbeat (`REFRESH_BOUNTY_HEARTBEAT`) pays keepers to push while the fund's free capital exceeds
-   `REFRESH_BOUNTY_MIN_INSURANCE` ($5,000).
+   `REFRESH_BOUNTY_HEARTBEAT_MIN_INSURANCE` ($1,000), which every listing seed clears.
 
 ### Margin and risk parameters
 
@@ -649,8 +650,9 @@ without a new consequence (a larger impact, a cheaper path, or a broken bound) a
    applies at once through `BucketLib.effectiveMmrBp` (the lower of lagged and current).
 7. **The reopen-gap estimator can be timed on quiet session pairs.** It measures the move between
    two stores separated by at least `REOPEN_GAP_MIN_STALENESS` (1 hour). On a session pair nobody
-   trades, where the refresh bounty pays only its daily heartbeat (too little vault inventory) or
-   nothing (free capital at or below `REFRESH_BOUNTY_MIN_INSURANCE`), stores can be hours apart
+   trades, where the refresh bounty pays only its daily heartbeat (too little vault inventory, or
+   free capital at or below `REFRESH_BOUNTY_FAST_MIN_INSURANCE`) or nothing (free capital at or
+   below `REFRESH_BOUNTY_HEARTBEAT_MIN_INSURANCE`), stores can be hours apart
    inside a session, and whoever ends the silence picks the instant, so an intraday
    extreme can read as a reopen gap. The reading is capped at `REOPEN_GAP_EMA_CAP_BP` (2,500 bp),
    decays with `REOPEN_GAP_EMA_TAU` (130 days), and raises IMR at once while maintenance follows only
@@ -868,6 +870,22 @@ without a new consequence (a larger impact, a cheaper path, or a broken bound) a
     `MAX_RELAYER_FEE` ($1) per batch, the signature lapses within `MAX_DEADLINE_WINDOW` (10 s), quoting
     through the batch exposes the relayer's own order to fills, and an owner can submit requotes itself.
 
+### Refresh bounty floors
+
+37. **The refresh bounty's two free-capital floors leave some upkeep unpaid.**
+    `RiskParamsLib.payRefreshBounty` pays every `REFRESH_BOUNTY_MIN_GAP` (5 minutes) only while the
+    vault holds at least `UNLOAD_BOUNTY_MIN_NOTIONAL` ($1,250) of inventory and free capital exceeds
+    `REFRESH_BOUNTY_FAST_MIN_INSURANCE` ($5,000). Otherwise it pays once per
+    `REFRESH_BOUNTY_HEARTBEAT` (1 day), and at or below `REFRESH_BOUNTY_HEARTBEAT_MIN_INSURANCE`
+    ($1,000) of free capital it pays nothing. So the health check on inventory held by a fund under
+    the fast floor is paid for once a day, and a dormant pair at or below the heartbeat floor can
+    reach `ORACLE_DEAD_THRESHOLD` with no paid store (item 5). Inventory nobody bids for holds the fast
+    cadence on, at up to $28.80 a day, until the fund reaches the fast floor. A pair that has never
+    stored a price passes the age gate, so its first store pays, and a deposit after it mints slightly
+    more than 1:1. Accepted: `refreshPrice` stays open to anyone whatever the bounty pays, anyone who
+    bids near the mark and calls `unloadVault` ends the fast cadence and earns the unload reward, and
+    the heartbeat costs at most $36.50 a year, under 4% of its floor.
+
 ## 10. Prior review
 
 The codebase has been through eight rounds of internal security review. The later rounds split the
@@ -875,7 +893,8 @@ code by subsystem, traced every candidate finding against the source with worked
 the most recent round, reproduced every Medium with a forge proof of concept before it was fixed.
 Every finding from those rounds is fixed or listed in section 9. The best-effort amendment flag
 (section 8, item 5) came after them and has had two focused internal reviews rather than a full
-round. The test suite holds 1,796 test
+round. The refresh bounty's two floors (section 9, item 37) came after them too and have had no
+separate review. The test suite holds 1,799 test
 functions in 113 files under `test/unit` and `test/integration` at the time of writing, including
 fuzz tests, fixed zero-sum scenarios and the handler-based invariant suite. **The protocol has not
 had a professional audit.** The internal review reports can be shared with the selected auditor on
