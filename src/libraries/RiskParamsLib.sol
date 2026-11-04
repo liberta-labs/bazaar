@@ -63,8 +63,8 @@ library RiskParamsLib {
     ///         session pair whose vault holds inventory it is also one in which none could have —
     ///         the refresh bounty stores a price every REFRESH_BOUNTY_MIN_GAP there whenever the
     ///         feed publishes — so twelve silent hours mean a shut venue. Where that cadence is off
-    ///         (no inventory held, or REFRESH_BOUNTY_MIN_INSURANCE unmet) an open market can go
-    ///         this long with nothing stored, so a quiet stretch
+    ///         (no inventory held, or REFRESH_BOUNTY_FAST_MIN_INSURANCE unmet) an open market can
+    ///         go this long with nothing stored, so a quiet stretch
     ///         around a closure is skipped whole, trading hours included, which errs toward
     ///         holding a reading up rather than releasing it early.
     ///
@@ -108,11 +108,12 @@ library RiskParamsLib {
     ///         full closures (overnight ≈ 17.5h, weekend ≈ 65h), trading-halt reopens, and
     ///         lunch/maintenance breaks. The threshold's only job is to exclude routine on-chain
     ///         call sparsity: trades store prices on an active pair, and while the vault holds
-    ///         inventory the refresh bounty holds the pair to a REFRESH_BOUNTY_MIN_GAP cadence,
+    ///         inventory and free capital exceeds REFRESH_BOUNTY_FAST_MIN_INSURANCE the refresh
+    ///         bounty holds the pair to a REFRESH_BOUNTY_MIN_GAP cadence,
     ///         so an hour without a stored price on such a pair is a genuine market
     ///         discontinuity, not keeper latency — while returns across shorter gaps are
-    ///         diffusion the variance EMA already prices. On a pair with no inventory and no
-    ///         trades, stores can be as far apart as REFRESH_BOUNTY_HEARTBEAT, so a gap there is
+    ///         diffusion the variance EMA already prices. On any other pair with no trades,
+    ///         stores can be REFRESH_BOUNTY_HEARTBEAT apart or further, so a gap there is
     ///         not a clean closure: its return spans trading hours as well as any closure inside
     ///         it, which can read above the closure's own jump, or below it where the session
     ///         reversed the jump before the next store. The |return| across
@@ -218,10 +219,14 @@ library RiskParamsLib {
     // -------------------- Price-refresh bounty constants --------------------
     uint256 internal constant REFRESH_BOUNTY = BAZAAR_SCALE / 10; // $0.10
     // The cadence the bounty buys while the vault holds inventory worth at least
-    // UNLOAD_BOUNTY_MIN_NOTIONAL, and the heartbeat it keeps otherwise (see payRefreshBounty).
+    // UNLOAD_BOUNTY_MIN_NOTIONAL and free capital exceeds REFRESH_BOUNTY_FAST_MIN_INSURANCE, and
+    // the heartbeat it keeps otherwise (see payRefreshBounty).
     uint256 internal constant REFRESH_BOUNTY_MIN_GAP = 5 minutes;
     uint256 internal constant REFRESH_BOUNTY_HEARTBEAT = 1 days;
-    uint256 internal constant REFRESH_BOUNTY_MIN_INSURANCE = 5_000 * BAZAAR_SCALE; // $5,000
+    // The free capital each cadence stops at. The heartbeat's sits under
+    // BazaarTypes.MIN_INSURANCE_SEED, so a pair listed at the minimum starts out earning it.
+    uint256 internal constant REFRESH_BOUNTY_FAST_MIN_INSURANCE = 5_000 * BAZAAR_SCALE; // $5,000
+    uint256 internal constant REFRESH_BOUNTY_HEARTBEAT_MIN_INSURANCE = 1_000 * BAZAAR_SCALE; // $1,000
 
     // -------------------- IMR/MMR --------------------
 
@@ -452,8 +457,9 @@ library RiskParamsLib {
     }
 
     /// @notice Pays a refreshPrice caller REFRESH_BOUNTY ($0.10) from the insurance fund for
-    ///         ending a price-staleness gap. The fund buys freshness at the rate it needs it:
-    ///         every REFRESH_BOUNTY_MIN_GAP while the vault holds inventory, because the health
+    ///         ending a price-staleness gap. The fund buys freshness at the rate it needs it and
+    ///         can spare it: every REFRESH_BOUNTY_MIN_GAP while the vault holds inventory and free
+    ///         capital exceeds REFRESH_BOUNTY_FAST_MIN_INSURANCE, because the health
     ///         check a refresh runs at the price it stores is what opens an ADL window when that
     ///         inventory drifts past the trigger on a book too thin to trade; otherwise once per
     ///         REFRESH_BOUNTY_HEARTBEAT, which keeps the pair's stored price well inside
@@ -471,21 +477,28 @@ library RiskParamsLib {
     ///      - The pre-refresh stored price must be older than the cadence the vault's state
     ///        earns: REFRESH_BOUNTY_MIN_GAP while the inventory the vault holds is worth at
     ///        least UNLOAD_BOUNTY_MIN_NOTIONAL at the fresh spot (the same line below which the
-    ///        unload reward treats inventory as dust), REFRESH_BOUNTY_HEARTBEAT otherwise. The
+    ///        unload reward treats inventory as dust) and free capital exceeds
+    ///        REFRESH_BOUNTY_FAST_MIN_INSURANCE ($5,000), REFRESH_BOUNTY_HEARTBEAT otherwise. The
     ///        gap hard-caps insurance spend at REFRESH_BOUNTY x (1 day / gap) per pair per day no
     ///        matter how aggressively keepers race the gate. Inventory is the gate because it is
     ///        what a fresh mark protects and because it costs something to create: open
     ///        interest alone would not do, since a long and a short held in two wallets meet any
     ///        open-interest floor at no cost beyond the margin they lock, which would let one
-    ///        party draw the fast cadence from a dormant pair indefinitely.
-    ///      - The fund's free capital must exceed REFRESH_BOUNTY_MIN_INSURANCE ($5,000), so a
-    ///        small fund is not drained for freshness. Free capital rather than the balance,
-    ///        because the seizure earmarked against inventory the vault still holds settles that
-    ///        inventory and never pays a keeper. There is no open-interest floor: the heartbeat
-    ///        is what keeps a pair with positions but no trades from reaching
-    ///        BazaarPairTerminator.ORACLE_DEAD_THRESHOLD, and an open-interest floor would
-    ///        switch it off on exactly the quiet pairs that need it, while open interest itself
-    ///        is the figure a parked long and short can meet for nothing.
+    ///        party draw the fast cadence from a dormant pair indefinitely. Free capital gates it
+    ///        too because inventory nobody bids for keeps it running, and a small fund must not
+    ///        be drained for freshness.
+    ///      - The fund's free capital must exceed REFRESH_BOUNTY_HEARTBEAT_MIN_INSURANCE ($1,000),
+    ///        so the heartbeat can never run a small fund down to nothing. It can sit this far
+    ///        under the fast floor because a year of heartbeats costs under 4% of it, and it sits
+    ///        under BazaarTypes.MIN_INSURANCE_SEED so that a pair listed at the minimum earns the
+    ///        heartbeat from the start. A pair at or below it gets no paid store, so a dormant one
+    ///        can reach BazaarPairTerminator.ORACLE_DEAD_THRESHOLD.
+    ///      Both floors read free capital rather than the balance, because the seizure earmarked
+    ///      against inventory the vault still holds settles that inventory and never pays a
+    ///      keeper. There is no open-interest floor: the heartbeat is what keeps a pair with
+    ///      positions but no trades from reaching BazaarPairTerminator.ORACLE_DEAD_THRESHOLD, and
+    ///      an open-interest floor would switch it off on exactly the quiet pairs that need it,
+    ///      while open interest itself is the figure a parked long and short can meet for nothing.
     ///      The insurance deduction and the escrow credit happen together, so the fund's claim
     ///      on the pair's USDC and the escrow's move in lockstep. The keeper pulls the bounty
     ///      via BazaarPair.claimFees; no token transfer runs inside the refresh, so nothing a
@@ -503,12 +516,14 @@ library RiskParamsLib {
         uint256 prevUpdateTs
     ) external {
         if (lastPrice.updateTs <= prevUpdateTs) return;
+        uint256 freeCapital = insuranceFreeCapital(vault);
         uint256 inventoryNotional = Math.mulDiv(vault.pendingLiqSize, lastPrice.spotPrice, BAZAAR_SCALE);
         uint256 minGap = inventoryNotional >= BazaarTypes.UNLOAD_BOUNTY_MIN_NOTIONAL
+                && freeCapital > REFRESH_BOUNTY_FAST_MIN_INSURANCE
             ? REFRESH_BOUNTY_MIN_GAP
             : REFRESH_BOUNTY_HEARTBEAT;
         if (block.timestamp <= prevUpdateTs + minGap) return;
-        if (insuranceFreeCapital(vault) <= REFRESH_BOUNTY_MIN_INSURANCE) return;
+        if (freeCapital <= REFRESH_BOUNTY_HEARTBEAT_MIN_INSURANCE) return;
 
         vault.insuranceFundBalance -= REFRESH_BOUNTY;
         FeeEscrowLib.credit(feeEscrow, pairId, msg.sender, REFRESH_BOUNTY);
@@ -836,9 +851,9 @@ library RiskParamsLib {
     ///      reopen restores, and the lagged-MMR ring would carry the understated rate into the
     ///      next day's liquidation checks. Every estimator in the stress move ages this way — the
     ///      variance EMA and the reopen peak-hold also move only when a price is stored — and
-    ///      while the vault holds inventory the lag is at most the refresh bounty's
+    ///      while the refresh bounty's fast cadence runs the lag is at most
     ///      REFRESH_BOUNTY_MIN_GAP; otherwise it runs to the next store, which on a pair nobody
-    ///      trades can be REFRESH_BOUNTY_HEARTBEAT away.
+    ///      trades can be REFRESH_BOUNTY_HEARTBEAT away or further.
     ///
     ///      Every reader takes these values, and updateLiquidationGapEmaBatch blends the next
     ///      batch against the same fade at full precision, so the store and the curves never

@@ -2636,8 +2636,9 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
             // able to make. Left alone, the first keeper after a reopen meets a fully decayed gate
             // and may deleverage any profitable account, including ones a live auction would never
             // have reached. The bound is the pair's own discontinuity threshold, calibrated so the
-            // refresh bounty's cadence — live through a window, since the vault holds inventory
-            // then — separates a shut venue from ordinary call sparsity.
+            // refresh bounty's fast cadence — live through a window while the fund can spare it,
+            // since the vault holds inventory then — separates a shut venue from ordinary call
+            // sparsity.
             //
             // Restarting rather than crediting only the gap forfeits whatever the auction had
             // already spent, which is bounded by the decay's own length; what it buys is a clock
@@ -2813,7 +2814,7 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     ///      once is what makes it a deadline rather than a snooze button: refreshing on every
     ///      stored price would push termination out indefinitely, and the refresh bounty pays
     ///      keepers to store a price every few minutes while the vault holds inventory, as it does
-    ///      through a window, so honest upkeep alone would keep a
+    ///      through a window, and the fund can spare it, so honest upkeep alone would keep a
     ///      failed auction pending forever. Cleared only when the auction resolves and the exposure
     ///      is back under the release level, so a later window on the same pair arms afresh
     ///      instead of inheriting a deadline already in the past.

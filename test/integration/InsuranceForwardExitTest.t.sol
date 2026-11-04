@@ -316,6 +316,7 @@ contract InsuranceForwardExitTest is IntegrationBase {
         vm.startPrank(carol);
         usdc.approve(address(aaplPair), 1_000 * USDC_SCALE);
         aaplPair.depositToInsurance(1_000 * BAZAAR_SCALE, new bytes[](0), 0, 0, 0, "", "");
+        uint256 shares = aaplPair.insuranceShares(carol); // the first store's bounty moved the share price
         aaplPair.requestInsuranceWithdrawal(200 * BAZAAR_SCALE, 0, 0, 0, "", "");
         vm.stopPrank();
         vm.warp(vm.getBlockTimestamp() + InsuranceVaultLib.INSURANCE_WITHDRAWAL_COOLDOWN + 1);
@@ -358,7 +359,7 @@ contract InsuranceForwardExitTest is IntegrationBase {
         uint256 before = usdc.balanceOf(carol);
         _executeRedemption(aaplPair, carol, _priceUpdateFor(AAPL_USD_FEED_ID, 150, uint64(vm.getBlockTimestamp())));
         assertGt(usdc.balanceOf(carol), before, "paid once the reopen delay passed");
-        assertEq(aaplPair.insuranceShares(carol), 800 * BAZAAR_SCALE, "requested shares burned");
+        assertEq(aaplPair.insuranceShares(carol), shares - 200 * BAZAAR_SCALE, "requested shares burned");
     }
 
     // ---------------------------------------------------------------- window and request

@@ -3,16 +3,19 @@ pragma solidity 0.8.34;
 
 import {StdStorage, stdStorage} from "forge-std/Test.sol";
 import {IntegrationBase} from "./IntegrationBase.sol";
+import {BazaarPair} from "../../src/BazaarPair.sol";
 import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
+import {PythSeed} from "../PythSeed.sol";
 
 /// @title RefreshBountyTest
 /// @notice Covers the insurance-funded refreshPrice bounty (RiskParamsLib.payRefreshBounty):
-///         a caller whose refresh stores a fresh price on a pair with more than $5,000 of free
+///         a caller whose refresh stores a fresh price on a pair with more than $1,000 of free
 ///         insurance capital earns $0.10, debited from the fund and accrued to its claimable
 ///         balance. The gap the stored price must have aged past follows what the fund has at
-///         stake: 5 minutes while the vault holds at least $1,250 of inventory, a day otherwise.
-///         Open interest is not a gate. Each gate is exercised, plus the books invariant (the
-///         deduction and the escrow liability must move together).
+///         stake and can spare: 5 minutes while the vault holds at least $1,250 of inventory and
+///         free capital exceeds $5,000, a day otherwise. Open interest is not a gate. Each gate is
+///         exercised, plus the books invariant (the deduction and the escrow liability must move
+///         together).
 contract RefreshBountyTest is IntegrationBase {
     using stdStorage for StdStorage;
 
@@ -20,8 +23,11 @@ contract RefreshBountyTest is IntegrationBase {
     uint256 constant BOUNTY_USDC = 0.1e6;
     uint256 constant GAP = 5 minutes; // = RiskParamsLib.REFRESH_BOUNTY_MIN_GAP
     uint256 constant HEARTBEAT = 1 days; // = RiskParamsLib.REFRESH_BOUNTY_HEARTBEAT
+    uint256 constant FAST_FLOOR = 5_000e18; // = RiskParamsLib.REFRESH_BOUNTY_FAST_MIN_INSURANCE
+    uint256 constant HEARTBEAT_FLOOR = 1_000e18; // = RiskParamsLib.REFRESH_BOUNTY_HEARTBEAT_MIN_INSURANCE
     uint256 constant INVENTORY_FLOOR_USD = 1_250; // = BazaarTypes.UNLOAD_BOUNTY_MIN_NOTIONAL
     uint256 constant SPOT_USD = 50_000; // what _freshPrice() stores
+    bytes32 constant ETH_USD_FEED_ID = 0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace;
 
     address keeper;
 
@@ -31,14 +37,14 @@ contract RefreshBountyTest is IntegrationBase {
     }
 
     /// @dev Qualifying baseline: a live book (0.5 BTC each side at $50k) and $10,000 insurance on
-    ///      top of the deployment seed, well past the $5,000 free-capital floor.
+    ///      top of the deployment seed, well past both free-capital floors.
     function _qualifyPair() internal {
         _openPosition(alice, bob, true, BAZAAR_SCALE / 2);
         _depositInsurance(carol, 10_000 * BAZAAR_SCALE);
     }
 
     /// @dev Stage vault inventory worth `notionalUsd` at the $50k spot, with a 4% seizure behind
-    ///      it, so the fund stays healthy and well above its free-capital floor.
+    ///      it, so the fund stays healthy and well above the fast cadence's free-capital floor.
     function _holdInventory(uint256 notionalUsd) internal {
         uint256 notional = notionalUsd * BAZAAR_SCALE;
         _stageHeldInventory(pair, notional / SPOT_USD, notional, notional / 25);
@@ -181,6 +187,72 @@ contract RefreshBountyTest is IntegrationBase {
         assertEq(_escrowOwed(keeper), BOUNTY, "the heartbeat still pays");
     }
 
+    // ==================== floors ====================
+
+    /// @notice The fast cadence stops at its floor and the pair falls back to the heartbeat, rather
+    ///         than to nothing. Free capital starts one bounty above the floor, so the first payment
+    ///         lands it there exactly. The balance stays far above the floor throughout, since most
+    ///         of it is earmarked against the $50,000 of inventory: the floor reads free capital.
+    function test_RefreshBounty_FastCadenceFallsBackToHeartbeatAtItsFloor() public {
+        _qualifyPair();
+        uint256 fund = _insuranceBal();
+        _stageHeldInventory(60_000 * BAZAAR_SCALE, fund - (FAST_FLOOR + BOUNTY));
+        assertGt(fund - BOUNTY, FAST_FLOOR, "setup: the balance alone would clear the floor");
+
+        vm.warp(vm.getBlockTimestamp() + GAP + 1);
+        _refreshAsKeeper();
+        assertEq(_escrowOwed(keeper), BOUNTY, "above the floor: the 5-minute cadence pays");
+
+        vm.warp(vm.getBlockTimestamp() + GAP + 1);
+        _refreshAsKeeper();
+        assertEq(_escrowOwed(keeper), BOUNTY, "at the floor: the 5-minute cadence is off");
+
+        vm.warp(vm.getBlockTimestamp() + HEARTBEAT + 1);
+        _refreshAsKeeper();
+        assertEq(_escrowOwed(keeper), 2 * BOUNTY, "the heartbeat still pays");
+    }
+
+    /// @notice A fund between the two floors earns the heartbeat. The fixture's $4,000 seed is real
+    ///         money, so the books stay settled through the payment.
+    function test_RefreshBounty_HeartbeatPaysBelowTheFastFloor() public {
+        _openPosition(alice, bob, true, BAZAAR_SCALE / 2);
+        uint256 insuranceBefore = _insuranceBal();
+        assertLt(insuranceBefore, FAST_FLOOR, "setup: fund under the fast floor");
+        assertGt(insuranceBefore, HEARTBEAT_FLOOR, "setup: fund over the heartbeat floor");
+
+        vm.warp(vm.getBlockTimestamp() + HEARTBEAT + 1);
+        _refreshAsKeeper();
+
+        assertEq(_escrowOwed(keeper), BOUNTY, "the heartbeat pays a small fund");
+        assertEq(_insuranceBal(), insuranceBefore - BOUNTY, "insurance debited the bounty");
+        _assertBooksSettled("after the heartbeat bounty");
+    }
+
+    /// @notice A pair listed at the minimum seed earns the heartbeat from the start, which is what
+    ///         keeps the smallest listing's stored price inside the stale-termination threshold.
+    function test_RefreshBounty_MinimumListing_EarnsHeartbeat() public {
+        PythSeed.seed(address(mockPyth), ETH_USD_FEED_ID);
+        uint256 total = factory.MIN_DEPLOYMENT_AMOUNT();
+        vm.startPrank(carol);
+        usdc.approve(address(factory), total * USDC_SCALE / BAZAAR_SCALE);
+        bytes32 assertionId = factory.proposePairDeployment(ETH_USD_FEED_ID, true, total, "ETH/USD");
+        vm.stopPrank();
+        (,,,,,, bytes32 pairId,,,) = factory.deploymentProposals(assertionId);
+        vm.warp(vm.getBlockTimestamp() + factory.DEPLOYMENT_LIVENESS() + 1);
+        factory.settleDeploymentProposal(assertionId);
+        BazaarPair eth = BazaarPair(payable(factory.getPairAddress(pairId)));
+        assertEq(eth.insuranceShares(carol), BazaarTypes.MIN_INSURANCE_SEED, "setup: listed at the minimum seed");
+
+        for (uint256 i = 1; i <= 2; i++) {
+            bytes[] memory pu = _priceUpdateFor(ETH_USD_FEED_ID, 3_000, uint64(vm.getBlockTimestamp()));
+            vm.prank(keeper);
+            eth.refreshPrice(pu);
+            (uint256 owed,) = lens.claimableFees(address(eth), keeper);
+            assertEq(owed, i * BOUNTY, "each day-old store is paid");
+            vm.warp(vm.getBlockTimestamp() + HEARTBEAT + 1);
+        }
+    }
+
     // ==================== withheld paths ====================
 
     function test_RefreshBounty_NotPaidWithinGap() public {
@@ -210,33 +282,34 @@ contract RefreshBountyTest is IntegrationBase {
         _assertBooksSettled("after the heartbeat bounty");
     }
 
-    function test_RefreshBounty_NotPaidWhenInsuranceBelowFloor() public {
-        // A live book, but the fund sits under the $5,000 floor: the balance is written to $4,500
-        // directly, so the case does not depend on the size of the deployment seed (a withheld
-        // path moves nothing, so the unbacked bookkeeping is harmless here).
-        _openPosition(alice, bob, true, BAZAAR_SCALE / 2);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(5).checked_write(4_500 * BAZAAR_SCALE);
-        uint256 insuranceBefore = _insuranceBal();
-        assertLt(insuranceBefore, 5_000 * BAZAAR_SCALE, "setup: fund below floor");
+    /// @notice The heartbeat runs a fund down to its floor and stops there: a fund one bounty above
+    ///         the floor pays once, which lands it on the floor, and from there nothing pays
+    ///         however old the stored price gets. The balance is written below what the pair
+    ///         holds, so the pair stays over-backed throughout.
+    function test_RefreshBounty_HeartbeatStopsAtItsFloor() public {
+        _stdstore.target(address(pair)).sig("pairVault()").depth(5).checked_write(HEARTBEAT_FLOOR + BOUNTY);
 
         vm.warp(vm.getBlockTimestamp() + HEARTBEAT + 1);
         _refreshAsKeeper();
+        assertEq(_escrowOwed(keeper), BOUNTY, "one bounty above the floor: paid");
+        assertEq(_insuranceBal(), HEARTBEAT_FLOOR, "the payment lands on the floor");
 
-        assertEq(_escrowOwed(keeper), 0, "no bounty from a small fund");
-        assertEq(_insuranceBal(), insuranceBefore, "insurance untouched");
+        vm.warp(vm.getBlockTimestamp() + HEARTBEAT + 1);
+        _refreshAsKeeper();
+        assertEq(_escrowOwed(keeper), BOUNTY, "at the floor: nothing more");
+        assertEq(_insuranceBal(), HEARTBEAT_FLOOR, "the floor holds");
     }
 
-    function test_RefreshBounty_NotPaidWhenFreeCapitalBelowFloor() public {
-        // The balance clears the floor, but most of it is the seizure earmarked against inventory
-        // the vault still holds. The gate reads free capital, so no bounty, although the inventory
-        // ($50,000 of it) would otherwise earn the 5-minute cadence.
+    /// @notice The heartbeat's floor reads free capital: a balance far above it pays nothing when
+    ///         all but $900 of it is the seizure earmarked against inventory the vault holds.
+    function test_RefreshBounty_NotPaidWhenFreeCapitalBelowHeartbeatFloor() public {
         _qualifyPair();
         uint256 fund = _insuranceBal();
-        assertGt(fund, 5_000 * BAZAAR_SCALE, "setup: balance above the floor");
-        _stageHeldInventory(60_000 * BAZAAR_SCALE, fund - 4_000 * BAZAAR_SCALE); // free capital $4,000
+        assertGt(fund, FAST_FLOOR, "setup: balance above both floors");
+        _stageHeldInventory(60_000 * BAZAAR_SCALE, fund - 900 * BAZAAR_SCALE);
         uint256 insuranceBefore = _insuranceBal();
 
-        vm.warp(vm.getBlockTimestamp() + GAP + 1);
+        vm.warp(vm.getBlockTimestamp() + HEARTBEAT + 1);
         _refreshAsKeeper();
 
         assertEq(_escrowOwed(keeper), 0, "no bounty: the earmark is not free capital");

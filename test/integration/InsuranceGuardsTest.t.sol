@@ -314,6 +314,7 @@ contract InsuranceGuardsTest is IntegrationBase {
         vm.startPrank(carol);
         usdc.approve(address(aaplPair), 1_000 * USDC_SCALE);
         aaplPair.depositToInsurance(1_000 * BAZAAR_SCALE, new bytes[](0), 0, 0, 0, "", "");
+        uint256 shares = aaplPair.insuranceShares(carol); // the first store's bounty moved the share price
         aaplPair.requestInsuranceWithdrawal(200 * BAZAAR_SCALE, 0, 0, 0, "", "");
         vm.stopPrank();
         // Ages the cache past MAX_PRICE_STALENESS: empty calldata now resolves the stale fallback.
@@ -322,7 +323,7 @@ contract InsuranceGuardsTest is IntegrationBase {
         vm.prank(carol);
         vm.expectRevert(BazaarPair.BazaarPair__InsuranceWithdrawalRequiresFreshPrice.selector);
         aaplPair.executeInsuranceWithdrawal(new bytes[](0), 0, 0, 0, "", "");
-        assertEq(aaplPair.insuranceShares(carol), 1_000 * BAZAAR_SCALE, "shares retained while frozen");
+        assertEq(aaplPair.insuranceShares(carol), shares, "shares retained while frozen");
 
         // The reopen: the first fresh print locks the same matured request and pays nothing.
         bytes[] memory fresh = _priceUpdateFor(AAPL_USD_FEED_ID, 150, uint64(vm.getBlockTimestamp()));
@@ -330,7 +331,7 @@ contract InsuranceGuardsTest is IntegrationBase {
         vm.prank(carol);
         aaplPair.executeInsuranceWithdrawal(fresh, 0, 0, 0, "", "");
         assertEq(usdc.balanceOf(carol), before, "the reopen print only locks");
-        assertEq(aaplPair.insuranceShares(carol), 1_000 * BAZAAR_SCALE, "nothing burned at the lock");
+        assertEq(aaplPair.insuranceShares(carol), shares, "nothing burned at the lock");
 
         // That print ended the closure, so the paying call opens a reopen delay after it rather
         // than a claim delay after the lock.
@@ -345,7 +346,7 @@ contract InsuranceGuardsTest is IntegrationBase {
         vm.prank(carol);
         aaplPair.executeInsuranceWithdrawal(fresh, 0, 0, 0, "", "");
         assertGt(usdc.balanceOf(carol), before, "redeemed once the claim opened");
-        assertEq(aaplPair.insuranceShares(carol), 800 * BAZAAR_SCALE, "requested shares burned");
+        assertEq(aaplPair.insuranceShares(carol), shares - 200 * BAZAAR_SCALE, "requested shares burned");
     }
 
     /// @notice A redemption that discovers a books-vs-balance shortfall is frozen with everyone

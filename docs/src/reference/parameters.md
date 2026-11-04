@@ -90,9 +90,10 @@ All constants live in `src/libraries/BazaarTypes.sol`, `src/libraries/RiskParams
 | `LIMBO_LEAD` | 6 s, two settlement windows: how long before any scheduled cutoff limbo begins, so the last block that trades is stamped a window and a second before the settlement window opens; a cutoff is scheduled at least `MIN_CUTOFF_LEAD` (7 s) after the scheduling block |
 | `MAX_CONFIDENCE_BP` | 200 (2% confidence cap) |
 | `REFRESH_BOUNTY` | $0.10 per `refreshPrice` call, paid from insurance |
-| `REFRESH_BOUNTY_MIN_GAP` | 5 min — the pre-refresh stored price must be older than this while the vault holds inventory worth ≥ $1,250 (`UNLOAD_BOUNTY_MIN_NOTIONAL`) |
+| `REFRESH_BOUNTY_MIN_GAP` | 5 min — the pre-refresh stored price must be older than this while the vault holds inventory worth ≥ $1,250 (`UNLOAD_BOUNTY_MIN_NOTIONAL`) and free capital exceeds `REFRESH_BOUNTY_FAST_MIN_INSURANCE` |
 | `REFRESH_BOUNTY_HEARTBEAT` | 1 day — the gap that applies otherwise: a heartbeat that keeps a quiet pair's stored price well inside `ORACLE_DEAD_THRESHOLD`, so a long and a short parked in two wallets draw at most one bounty per day |
-| `REFRESH_BOUNTY_MIN_INSURANCE` | $5,000 — the bounty pays only while the fund's free capital exceeds this; there is no open-interest floor, so a pair with positions but no trades still gets its heartbeat |
+| `REFRESH_BOUNTY_FAST_MIN_INSURANCE` | $5,000 — the free capital the 5-minute cadence stops at, since inventory nobody bids for keeps it running; at or below it the pair falls back to the heartbeat |
+| `REFRESH_BOUNTY_HEARTBEAT_MIN_INSURANCE` | $1,000 — the bounty pays only while the fund's free capital exceeds this, so the heartbeat cannot run a small fund down to nothing; it sits under `MIN_INSURANCE_SEED`, and there is no open-interest floor, so a pair with positions but no trades still gets its heartbeat |
 
 ## Meta-transactions
 

@@ -119,7 +119,7 @@ contract RefreshPriceHealthTest is IntegrationBase {
     ///         and is still paid for the fresh mark it stored; the next refresh is not.
     function test_refreshPrice_discoveringShortfall_fixesSettlement_bountyPaidOnce() public {
         _openPosition(alice, bob, true, BAZAAR_SCALE / 2); // a live book for the shortfall to strand
-        _depositInsurance(carol, 10_000 * BAZAAR_SCALE); // fund past the bounty floor
+        _depositInsurance(carol, 10_000 * BAZAAR_SCALE); // fund past both bounty floors
         // The vault holds no inventory, so the bounty's gap is its one-day heartbeat.
         vm.warp(vm.getBlockTimestamp() + 1 days + 1 minutes);
         vm.prank(address(pair));
