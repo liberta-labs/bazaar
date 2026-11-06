@@ -20,9 +20,9 @@ contract InsuranceWithdrawalBudgetTest is IntegrationBase {
 
     // BazaarPair storage slots, from `forge inspect BazaarPair storage-layout`. The tests below
     // write and read through these directly, so a stale value fails an absolute assertion.
-    uint256 internal constant SLOT_LIQUIDATION_GAP_EMA = 48;
-    uint256 internal constant SLOT_INSURANCE_RATE_LIMIT = 62;
-    uint256 internal constant SLOT_REOPEN_GAP_EMA = 109;
+    uint256 internal constant SLOT_LIQUIDATION_GAP_EMA = 46;
+    uint256 internal constant SLOT_INSURANCE_RATE_LIMIT = 60;
+    uint256 internal constant SLOT_REOPEN_GAP_EMA = 107;
 
     // ------------------------------------------------------------------ helpers
 

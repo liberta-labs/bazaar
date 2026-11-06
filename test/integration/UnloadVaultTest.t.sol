@@ -85,7 +85,7 @@ contract UnloadVaultTest is IntegrationBase {
     ///      packed cursor (head | count << 8 | lastSampleTs << 16 | intervalMinBp << 80 |
     ///      intervalMinOi << 112). `getLaggedMmr` is asserted after the write, so a stale pin
     ///      fails loudly.
-    uint256 internal constant SLOT_MMR_BUFFER = 71;
+    uint256 internal constant SLOT_MMR_BUFFER = 69;
 
     /// @dev Lay a single ring sample `mmrBp` stamped `ts`, the day's only and therefore lowest one.
     function _seedLaggedMmr(uint256 mmrBp, uint256 ts) internal {
@@ -124,7 +124,7 @@ contract UnloadVaultTest is IntegrationBase {
     /// @dev Storage slot of the pair's liquidation-outcome EMAs, the same pin BazaarPairLens reads
     ///      them by: +0 slippage line, +1 drift line (RiskParamsLib.GAP_EMA_SCALE units per bp),
     ///      +2 their anchors and the batch clock, +3 accumulated weight.
-    uint256 internal constant SLOT_LIQUIDATION_GAP_EMA = 48;
+    uint256 internal constant SLOT_LIQUIDATION_GAP_EMA = 46;
 
     /// @dev The stored EMAs as the last batch wrote them, in whole basis points. On a pair's first
     ///      batch each line is anchored at that batch, where the stored value is the reading.

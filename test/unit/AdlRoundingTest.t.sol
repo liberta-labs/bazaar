@@ -62,7 +62,7 @@ contract AdlRoundingHarness {
         b.entryNotional = entryNotional;
         b.bankruptcyNotional = bankruptcyNotional;
         b.seized = seized;
-        b.entryFundingIndex = entryFundingIndex;
+        b.entryFundingIndex = int192(entryFundingIndex);
     }
 
     function _marginReqs() internal pure returns (BazaarTypes.MarginRequirements memory) {

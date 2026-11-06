@@ -74,7 +74,7 @@ contract MarkRatioAttackTest is IntegrationBase {
         BazaarTypes.AuxState memory a = pair.auxState();
         s.lastMarkUpdateTs = a.lastMarkUpdateTs;
         s.rollingVolume = a.rollingVolume;
-        s.premiumNotional = int256(uint256(vm.load(address(pair), bytes32(uint256(68)))));
+        s.premiumNotional = int256(uint256(vm.load(address(pair), bytes32(uint256(66)))));
     }
 
     /// @dev The volume tally the line reads now.

@@ -52,7 +52,7 @@ contract TerminationHarness {
         b.seized = pendingLiqEntryNotional > pendingLiqBankruptcyNotional
             ? pendingLiqEntryNotional - pendingLiqBankruptcyNotional
             : pendingLiqBankruptcyNotional - pendingLiqEntryNotional;
-        b.entryFundingIndex = pendingLiqEntryFundingIndex;
+        b.entryFundingIndex = int192(pendingLiqEntryFundingIndex);
     }
 
     function setTallies(uint256 totalProfitClaims, uint256 terminalBadDebt) external {
@@ -1840,7 +1840,7 @@ contract Phase2InsurerVoteTest is Test {
         pair.executeAdl(new address[](0), new address[](0), new bytes[](0));
     }
 
-    uint256 constant PAIR_SLOT_SHARE_EPOCH = 97; // mirror of BazaarPairTerminator's pin
+    uint256 constant PAIR_SLOT_SHARE_EPOCH = 95; // mirror of BazaarPairTerminator's pin
 
     function _pairEpoch() internal view returns (uint256) {
         return uint256(vm.load(address(pair), bytes32(PAIR_SLOT_SHARE_EPOCH)));

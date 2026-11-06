@@ -2,6 +2,8 @@
 pragma solidity 0.8.34;
 
 import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
+import {Vm} from "forge-std/Vm.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {BazaarTypes} from "../src/libraries/BazaarTypes.sol";
 
 interface IVaultRead {
@@ -34,10 +36,20 @@ interface IVaultRead {
 ///      3 shortWeightedEntrySum, 4 totalCollateralDeposited, 5 insuranceFundBalance, 6 deficit,
 ///      7 targetInsuranceRatioBp, 8 ledgerArrears, 9 trailingOiSize, 10..15 longInv (size,
 ///      entryNotional, bankruptcyNotional, seized, entryFundingIndex, seizedTs), 16..21 shortInv
-///      in the same order. Every bucket field sits alone in its slot, so no write clobbers a
-///      neighbour.
+///      in the same order. A bucket's first four fields each fill a slot and are written through
+///      stdstore. The last two share the slot after them, entryFundingIndex (int192) in its low
+///      24 bytes and seizedTs (uint64) in the 8 above, and stdstore's packed write cannot set a
+///      negative index there, so this library composes that word itself, writes it four slots past
+///      the bucket's size (the slot stdstore locates for it), and reads both back through the
+///      getter.
 library VaultStore {
     using stdStorage for StdStorage;
+
+    Vm private constant VM = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
+
+    /// @dev Slots from a bucket's size to the word that packs its entryFundingIndex and seizedTs.
+    uint256 internal constant PACKED_SLOT_OFFSET = 4;
+    uint256 internal constant INDEX_MASK = (uint256(1) << 192) - 1;
 
     uint256 internal constant DEPTH_TOTAL_COLLATERAL_DEPOSITED = 4;
     uint256 internal constant DEPTH_INSURANCE_FUND_BALANCE = 5;
@@ -60,8 +72,17 @@ library VaultStore {
         s.target(pair).sig("pairVault()").depth(b + 1).checked_write(inv.entryNotional);
         s.target(pair).sig("pairVault()").depth(b + 2).checked_write(inv.bankruptcyNotional);
         s.target(pair).sig("pairVault()").depth(b + 3).checked_write(inv.seized);
-        s.target(pair).sig("pairVault()").depth(b + 4).checked_write_int(inv.entryFundingIndex);
-        s.target(pair).sig("pairVault()").depth(b + 5).checked_write(uint256(inv.seizedTs));
+        _writePacked(s, pair, isLong, inv.entryFundingIndex, inv.seizedTs);
+    }
+
+    /// @dev Write a bucket's packed entryFundingIndex and seizedTs, and check the getter reads both
+    ///      back.
+    function _writePacked(StdStorage storage s, address pair, bool isLong, int256 index, uint64 ts) private {
+        uint256 slot = s.target(pair).sig("pairVault()").depth(base(isLong)).find() + PACKED_SLOT_OFFSET;
+        uint256 word = (uint256(ts) << 192) | (uint256(int256(SafeCast.toInt192(index))) & INDEX_MASK);
+        VM.store(pair, bytes32(slot), bytes32(word));
+        BazaarTypes.Inventory memory inv = read(pair, isLong);
+        require(inv.entryFundingIndex == index && inv.seizedTs == ts, "VaultStore: packed slot write did not land");
     }
 
     /// @dev Stage a bucket from its size, entry basis and seizure, with a bankruptcy notional the
@@ -86,7 +107,7 @@ library VaultStore {
                 entryNotional: entryNotional,
                 bankruptcyNotional: isLong ? entryNotional - seized : entryNotional + seized,
                 seized: seized,
-                entryFundingIndex: entryFundingIndex,
+                entryFundingIndex: SafeCast.toInt192(entryFundingIndex),
                 seizedTs: 0
             })
         );
@@ -109,11 +130,11 @@ library VaultStore {
     }
 
     function setEntryFundingIndex(StdStorage storage s, address pair, bool isLong, int256 v) internal {
-        s.target(pair).sig("pairVault()").depth(base(isLong) + 4).checked_write_int(v);
+        _writePacked(s, pair, isLong, v, read(pair, isLong).seizedTs);
     }
 
     function setSeizedTs(StdStorage storage s, address pair, bool isLong, uint256 v) internal {
-        s.target(pair).sig("pairVault()").depth(base(isLong) + 5).checked_write(v);
+        _writePacked(s, pair, isLong, read(pair, isLong).entryFundingIndex, SafeCast.toUint64(v));
     }
 
     /// @dev Empty one bucket.

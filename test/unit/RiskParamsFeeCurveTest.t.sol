@@ -46,7 +46,7 @@ contract FeeCurveHarness {
         BazaarTypes.Inventory storage b = isLong ? pairVault.longInv : pairVault.shortInv;
         b.size = size;
         b.entryNotional = entryNotional;
-        b.entryFundingIndex = entryFundingIndex;
+        b.entryFundingIndex = int192(entryFundingIndex);
     }
 
     function setFundingIndex(int256 i) external {

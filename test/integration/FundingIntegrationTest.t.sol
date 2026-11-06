@@ -71,7 +71,7 @@ contract FundingIntegrationTest is IntegrationBase {
         BazaarTypes.AuxState memory a = pair.auxState();
         s.lastMarkUpdateTs = a.lastMarkUpdateTs;
         s.rollingVolume = a.rollingVolume;
-        s.premiumNotional = int256(uint256(vm.load(address(pair), bytes32(uint256(68)))));
+        s.premiumNotional = int256(uint256(vm.load(address(pair), bytes32(uint256(66)))));
     }
 
     /// @dev Per-side open interest, counting the vault's inventory on its side, as the floor is

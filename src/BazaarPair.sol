@@ -1231,7 +1231,7 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     /// @dev A window still pending when the pair terminates is cleared by finalize instead, and
     ///      PairTerminated is the only event marking its end.
     /// @param pairId The pair
-    /// @param adlEpoch The epoch of the window's last cohort, as its latest AdlTriggered reported
+    /// @param adlEpoch The epoch the window opened with, the one its AdlTriggered reported
     event AdlResolved(bytes32 indexed pairId, uint64 indexed adlEpoch);
 
     // -------------------- Functions --------------------

@@ -512,7 +512,7 @@ contract NettingHarness {
         b.entryNotional = entryNotional;
         b.bankruptcyNotional = bankruptcyNotional;
         b.seized = seized;
-        b.entryFundingIndex = entryFundingIndex;
+        b.entryFundingIndex = int192(entryFundingIndex);
     }
 
     function liquidate(address user, uint256 price, int256 fundingIndex)
@@ -1513,7 +1513,7 @@ contract AdlHarness {
         b.entryNotional = entryNotional;
         b.bankruptcyNotional = bankruptcyNotional;
         b.seized = seized;
-        b.entryFundingIndex = entryFundingIndex;
+        b.entryFundingIndex = int192(entryFundingIndex);
     }
 
     function bucket(bool isLong) external view returns (BazaarTypes.Inventory memory) {
@@ -1983,7 +1983,7 @@ contract VaultHealthHarness {
 
     function setEntryFundingIndex(bool isLong, int256 i) external {
         BazaarTypes.Inventory storage b = isLong ? vault.longInv : vault.shortInv;
-        b.entryFundingIndex = i;
+        b.entryFundingIndex = int192(i);
     }
 
     /// @dev Stage the entry basis independently of the bankruptcy notional, for fixtures where
@@ -2026,7 +2026,7 @@ contract VaultHealthHarness {
         b.entryNotional = entryNotional;
         b.bankruptcyNotional = bankruptcyNotional;
         b.seized = seized;
-        b.entryFundingIndex = entryFundingIndex;
+        b.entryFundingIndex = int192(entryFundingIndex);
     }
 }
 

@@ -813,10 +813,10 @@ contract BazaarPairTest is Test {
 
     // ==================== withdrawCollateral With Open Position Tests ====================
 
-    /// @dev isAdlPending is PACKED (slot 33, byte offset 20 — see `forge inspect BazaarPair
+    /// @dev isAdlPending is PACKED (slot 31, byte offset 20 — see `forge inspect BazaarPair
     ///      storage-layout`), which stdstore can't write; set the single byte via vm.store.
     function _setAdlPending(bool v) internal {
-        bytes32 slot = bytes32(uint256(33));
+        bytes32 slot = bytes32(uint256(31));
         bytes32 cur = vm.load(address(btcPair), slot);
         bytes32 mask = bytes32(uint256(0xff) << (20 * 8));
         vm.store(address(btcPair), slot, (cur & ~mask) | bytes32(uint256(v ? 1 : 0) << (20 * 8)));
@@ -987,7 +987,7 @@ contract BazaarPairTest is Test {
     // storage-layout`: adding or resizing a state variable declared earlier in BazaarPair shifts
     // every slot below it. The helpers assert a public getter afterward where one exists, so a
     // stale slot fails loudly rather than silently writing an unrelated word.
-    uint256 constant SLOT_SCHEDULED_TERMINATION_TS = 36;
+    uint256 constant SLOT_SCHEDULED_TERMINATION_TS = 34;
 
     /// @dev Terminate the pair for real at `termPrice`: fix the price, settle `user`'s position at
     ///      it (a flat user settles nothing), and finalize. Every scenario using this is

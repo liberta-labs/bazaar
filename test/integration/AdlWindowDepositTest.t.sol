@@ -11,8 +11,8 @@ contract AdlWindowDepositTest is IntegrationBase {
     // adlDepositEpoch / adlWindowDeposits are internal mappings (no getter); slots from
     // `forge inspect BazaarPair storage-layout`. The guard assertions below fail loudly if the
     // layout ever shifts, so hardcoding the slot can't silently read the wrong word.
-    uint256 constant SLOT_ADL_DEPOSIT_EPOCH = 100;
-    uint256 constant SLOT_ADL_WINDOW_DEPOSITS = 101;
+    uint256 constant SLOT_ADL_DEPOSIT_EPOCH = 98;
+    uint256 constant SLOT_ADL_WINDOW_DEPOSITS = 99;
 
     function _adlDepositEpoch(address u) internal view returns (uint256) {
         return uint256(vm.load(address(pair), keccak256(abi.encode(u, SLOT_ADL_DEPOSIT_EPOCH))));

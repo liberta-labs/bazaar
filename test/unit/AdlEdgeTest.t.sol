@@ -63,7 +63,7 @@ contract AdlEdgeHarness {
         b.entryNotional = entryNotional;
         b.bankruptcyNotional = bankruptcyNotional;
         b.seized = seized;
-        b.entryFundingIndex = entryFundingIndex;
+        b.entryFundingIndex = int192(entryFundingIndex);
         b.seizedTs = 0;
     }
 

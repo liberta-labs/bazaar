@@ -119,22 +119,22 @@ contract BazaarPairLens {
     // these hold for every pair that implementation deploys; a layout change needs them re-read,
     // and the budget view's tests pin them against the contract's own behaviour.
     uint256 internal constant SLOT_USER_ACTIVE_LIMIT_ORDERS = 2; // mapping(user => EnumerableSet.UintSet)
-    uint256 internal constant SLOT_NEXT_ORDER_ID = 28; // the counter ids and queue positions are drawn from
-    uint256 internal constant SLOT_MARK_PREMIUM_NOTIONAL = 68;
-    uint256 internal constant SLOT_ADL_EPOCH = 99; // uint64 in the low bits
-    uint256 internal constant SLOT_FEE_ESCROW_TOTAL = 110; // FeeEscrow.total
-    uint256 internal constant SLOT_FEE_ESCROW_CLAIMABLE = 111; // FeeEscrow.claimable: mapping(recipient => owed)
-    uint256 internal constant SLOT_ADL_TERMINATION_TS = 113;
+    uint256 internal constant SLOT_NEXT_ORDER_ID = 26; // the counter ids and queue positions are drawn from
+    uint256 internal constant SLOT_MARK_PREMIUM_NOTIONAL = 66;
+    uint256 internal constant SLOT_ADL_EPOCH = 97; // uint64 in the low bits
+    uint256 internal constant SLOT_FEE_ESCROW_TOTAL = 108; // FeeEscrow.total
+    uint256 internal constant SLOT_FEE_ESCROW_CLAIMABLE = 109; // FeeEscrow.claimable: mapping(recipient => owed)
+    uint256 internal constant SLOT_ADL_TERMINATION_TS = 111;
     // +0 slippage line, +1 drift line, +2 their anchors and the weight's (low to high, 64 bits
     // each), +3 weight (BazaarTypes.LiquidationGapEma)
-    uint256 internal constant SLOT_LIQUIDATION_GAP_EMA = 48;
-    uint256 internal constant SLOT_INSURANCE_RATE_LIMIT = 62; // +0 withdrawn, +1 period start, +2 OI term
-    uint256 internal constant SLOT_REOPEN_GAP_EMA = 109; // lastObsTs bits 0-63, gapEmaBp 64-191, lastJumpTs 192-255
-    uint256 internal constant SLOT_TRIGGER_BOUNTY = 112; // FeeEscrow.bounty: mapping(orderId => held bounty)
-    uint256 internal constant SLOT_INSURANCE_WITHDRAWAL_LOCK = 115; // mapping(user => lockedAmount << 64 | lockTs)
+    uint256 internal constant SLOT_LIQUIDATION_GAP_EMA = 46;
+    uint256 internal constant SLOT_INSURANCE_RATE_LIMIT = 60; // +0 withdrawn, +1 period start, +2 OI term
+    uint256 internal constant SLOT_REOPEN_GAP_EMA = 107; // lastObsTs bits 0-63, gapEmaBp 64-191, lastJumpTs 192-255
+    uint256 internal constant SLOT_TRIGGER_BOUNTY = 110; // FeeEscrow.bounty: mapping(orderId => held bounty)
+    uint256 internal constant SLOT_INSURANCE_WITHDRAWAL_LOCK = 113; // mapping(user => lockedAmount << 64 | lockTs)
     // mapping(user => BazaarTypes.RestingTally): +0 bidSize bits 0-95, askSize 96-191, stopCount
     // 192-223; +1 bidLimitNotional low half, askLimitNotional high; +2 highestBid low, lowestAsk high
-    uint256 internal constant SLOT_RESTING_TALLY = 116;
+    uint256 internal constant SLOT_RESTING_TALLY = 114;
 
     error BazaarPairLens__ZeroAddress();
 

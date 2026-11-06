@@ -2,6 +2,7 @@
 pragma solidity 0.8.34;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {BazaarTypes} from "./BazaarTypes.sol";
 import {BucketLib} from "./BucketLib.sol";
 import {FeeEscrowLib} from "./FeeEscrowLib.sol";
@@ -327,12 +328,14 @@ library LiquidationLib {
             b.entryNotional = e.entryNotional;
             b.bankruptcyNotional = e.bankruptcyNotional;
             b.seized = e.seized;
-            b.entryFundingIndex = e.entryFundingIndex;
+            b.entryFundingIndex = SafeCast.toInt192(e.entryFundingIndex);
             b.seizedTs = uint64(block.timestamp);
         } else {
             uint256 newTotalSize = size + e.size;
-            b.entryFundingIndex =
-                (b.entryFundingIndex * int256(size) + e.entryFundingIndex * int256(e.size)) / int256(newTotalSize);
+            b.entryFundingIndex = SafeCast.toInt192(
+                (int256(b.entryFundingIndex) * int256(size) + e.entryFundingIndex * int256(e.size))
+                    / int256(newTotalSize)
+            );
             b.seizedTs = _blendSeizedTs(b.seizedTs, size, e.size, newTotalSize);
             b.size = newTotalSize;
             b.entryNotional += e.entryNotional;

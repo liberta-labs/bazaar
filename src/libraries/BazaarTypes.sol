@@ -355,6 +355,11 @@ library BazaarTypes {
     /// @param entryFundingIndex The size-weighted average of the estates' ENTRY funding indices.
     ///        Settlement realizes funding over entry → close as one signed term, so the estates'
     ///        pre-liquidation balances and the vault's holding window reach insurance together.
+    ///        Held as int192 so that seizedTs shares its storage slot, and seeding a bucket writes
+    ///        one slot fewer. The index accrues at most the pair's funding-rate ceiling, 0.5% of
+    ///        the price an hour (FundingLib.MAX_FUNDING_RATE_SESSION), so it stays inside int192
+    ///        for a century at any price below 7e53 in BAZAAR_SCALE precision; the writes are
+    ///        checked regardless (LiquidationLib.absorb).
     /// @param seizedTs When the inventory was seized, as a size-weighted mean over the estates in
     ///        it. The unload walk opens its floor from the band edge toward the fund-neutral price
     ///        over UNLOAD_FLOOR_DECAY measured from here, so the estates' residual equity is offered
@@ -367,7 +372,7 @@ library BazaarTypes {
         uint256 entryNotional;
         uint256 bankruptcyNotional;
         uint256 seized;
-        int256 entryFundingIndex;
+        int192 entryFundingIndex;
         uint64 seizedTs;
     }
 

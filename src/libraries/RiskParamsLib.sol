@@ -1007,7 +1007,9 @@ library RiskParamsLib {
         pnl = int256(shortEntry) - int256(longEntry);
         // The long pays (idx − fL)·o of funding and the short receives (idx − fS)·o; the live index
         // cancels and (fL − fS)·o is left. The index carries the price factor, so this is USD.
-        pnl += BazaarMathLib.signedMulDiv(l.entryFundingIndex - s.entryFundingIndex, int256(o), int256(BAZAAR_SCALE));
+        pnl += BazaarMathLib.signedMulDiv(
+            int256(l.entryFundingIndex) - int256(s.entryFundingIndex), int256(o), int256(BAZAAR_SCALE)
+        );
         seized = Math.mulDiv(l.seized, o, l.size) + Math.mulDiv(s.seized, o, s.size);
     }
 

@@ -44,8 +44,8 @@ library VaultHealthLib {
     ///      One rule for both buckets. An estate seized onto the side opposite the inventory,
     ///      because the fund could not afford to net it, is inventory like any other: its loss
     ///      beyond its seizure counts here, and nothing else about the window changes. Both of a
-    ///      batch's legs rank their cohort at the live price, so a bucket that appears while a
-    ///      window is open needs no side re-targeted and no snapshot retaken.
+    ///      batch's legs rank their cohort at the price the call resolves, so the window holds no
+    ///      side and no ranking price that a bucket appearing while it is open could leave stale.
     /// @param pairVault The pair's vault aggregates
     /// @param currentPrice Price to value the inventory at (BAZAAR_SCALE precision)
     /// @param isAdlPending Whether a window is open

@@ -57,9 +57,9 @@ contract MockPairForLens {
     // Raw storage the lens reads through extsload, at BazaarPair's slots.
     mapping(bytes32 => bytes32) internal slots;
     uint256 internal constant SLOT_USER_ACTIVE_LIMIT_ORDERS = 2;
-    uint256 internal constant SLOT_MARK_PREMIUM_NOTIONAL = 68;
-    uint256 internal constant SLOT_FEE_ESCROW_TOTAL = 110;
-    uint256 internal constant SLOT_FEE_ESCROW_CLAIMABLE = 111;
+    uint256 internal constant SLOT_MARK_PREMIUM_NOTIONAL = 66;
+    uint256 internal constant SLOT_FEE_ESCROW_TOTAL = 108;
+    uint256 internal constant SLOT_FEE_ESCROW_CLAIMABLE = 109;
 
     function extsload(bytes32 slot) external view returns (bytes32) {
         return slots[slot];
@@ -235,7 +235,7 @@ contract MockPairForLens {
     }
 
     function setPendingLiqFundingIndex(int256 idx_) external {
-        _staged().entryFundingIndex = idx_;
+        _staged().entryFundingIndex = int192(idx_);
     }
 
     uint256 internal targetInsuranceRatioBp_;
