@@ -125,6 +125,28 @@ contract FundingIntegrationTest is IntegrationBase {
         assertLt(expected, int256(10 * BAZAAR_SCALE), "a few dollars a BTC for the half hour");
     }
 
+    /// @notice The lens projects the next accrual exactly: read in the block a price is stored, at
+    ///         the price stored before it, the projected funding index is the index the store leaves.
+    ///         Afterwards the window is empty and the rate the mark implies is unchanged, since a store
+    ///         moves neither the mark line nor the floor.
+    function test_e2e_Funding_LensProjectsTheNextAccrual() public {
+        _openPosition(alice, bob, true, 1 * BAZAAR_SCALE);
+        vm.warp(vm.getBlockTimestamp() + 20 minutes);
+
+        (int256 currentRate, int256 accruingRate, int256 projected) = lens.fundingRate(address(pair));
+        assertGt(currentRate, 0, "fixture: a premium, so longs pay");
+        assertGt(accruingRate, 0, "fixture: the window since the fill is charged");
+        assertGt(projected, pair.currentFundingIndex(), "fixture: the index will rise");
+
+        _refreshIndex(50_000);
+        assertEq(pair.currentFundingIndex(), projected, "the store lands on the projection");
+
+        (int256 rateAfter, int256 accruingAfter, int256 indexAfter) = lens.fundingRate(address(pair));
+        assertEq(accruingAfter, 0, "nothing left to charge in this block");
+        assertEq(indexAfter, projected, "the stored index");
+        assertEq(rateAfter, currentRate, "the rate the mark implies");
+    }
+
     /// @notice A price gap beyond MAX_FUNDING_GAP (12h) accrues no funding for the outage window —
     ///         the clock advances but the index does not back-charge over the gap.
     function test_e2e_Funding_StaleGapAccruesNothing() public {

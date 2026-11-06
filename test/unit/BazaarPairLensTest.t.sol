@@ -135,6 +135,17 @@ contract MockPairForLens {
         isContinuouslyTraded = v;
     }
 
+    function setScheduledTerminationTs(uint256 ts) external {
+        scheduledTerminationTs = ts;
+    }
+
+    // When the funding index last accrued, which the lens reads through auxState.
+    uint256 internal lastFundingUpdateTs_;
+
+    function setLastFundingUpdateTs(uint256 ts) external {
+        lastFundingUpdateTs_ = ts;
+    }
+
     function setMarginReqs(uint256 imrBp, uint256 mmrBp, uint256 laggedMmrBp) external {
         imrBp_ = imrBp;
         mmrBp_ = mmrBp;
@@ -322,6 +333,7 @@ contract MockPairForLens {
     }
 
     function auxState() external view returns (BazaarTypes.AuxState memory a) {
+        a.lastFundingUpdateTs = lastFundingUpdateTs_;
         a.lastMarkUpdateTs = markAnchor_;
         a.rollingVolume = markVolume_;
         a.settlementPrice = fixedSettlementPrice;
@@ -482,6 +494,133 @@ contract BazaarPairLensTest is Test {
             "the library's reading, under the floor"
         );
         assertEq(lens.markPrice(address(pair)), 201_25e16, "0.625% over $200");
+    }
+
+    // ---------------- funding rate ----------------
+
+    /// @dev The state the funding tests share: a $200 stored price, $4,000 of open interest a side
+    ///      (an $80 floor), a stored funding index of 1, and a mark line anchored ten minutes ago with
+    ///      $100 of volume, which stays above the floor past this block, carrying `premiumNotional`.
+    function _fundingFixture(int256 premiumNotional) internal {
+        vm.warp(1_700_000_000);
+        pair.setMark(200e18);
+        pair.setOpenInterest(20e18, 20e18);
+        pair.setFundingIndex(1e18);
+        pair.setMarkLine(premiumNotional, block.timestamp - 10 minutes, 100e18);
+    }
+
+    /// @notice A 3% premium on a continuously traded pair: the rate now is the premium over the
+    ///         continuous dampener, and a window that opened ten minutes before the line formed is
+    ///         charged its average, half the premium, on the stored price for twenty minutes.
+    function test_fundingRate_projectsTheLibraryAccrual() public {
+        _fundingFixture(3e18);
+        pair.setLastFundingUpdateTs(block.timestamp - 20 minutes);
+
+        (int256 currentRate, int256 accruingRate, int256 index) = lens.fundingRate(address(pair));
+        assertEq(currentRate, 75e13, "3% / 40: 0.075% an hour");
+        assertEq(accruingRate, 375e12, "half of it: the line covers half the window");
+        assertEq(index, 1e18 + 25e15, "0.0375% an hour of $200 for a third of an hour");
+
+        uint256 floorVolume = FundingLib.floorVolumeOf(20e18, 200e18);
+        FundingLib.MarkState memory line = FundingLib.MarkState(3e18, block.timestamp - 10 minutes, 100e18);
+        int256 dampener = int256(FundingLib.FUNDING_DAMPENER_CONTINUOUS);
+        assertEq(
+            currentRate,
+            FundingLib.currentPremium(line.premiumNotional, line.rollingVolume, line.lastMarkUpdateTs, floorVolume)
+                / dampener,
+            "the library's premium, damped"
+        );
+        assertEq(
+            accruingRate,
+            FundingLib.averagePremium(line, floorVolume, block.timestamp - 20 minutes, block.timestamp) / dampener,
+            "the library's average, damped"
+        );
+    }
+
+    /// @notice A pair with trading hours damps the same premium by its own, smaller dampener.
+    function test_fundingRate_sessionPairUsesItsCalendar() public {
+        _fundingFixture(3e18);
+        pair.setLastFundingUpdateTs(block.timestamp - 20 minutes);
+        pair.setContinuouslyTraded(false);
+
+        (int256 currentRate, int256 accruingRate, int256 index) = lens.fundingRate(address(pair));
+        assertEq(currentRate, 375e13, "3% / 8: 0.375% an hour");
+        assertEq(accruingRate, 1875e12, "half of it");
+        assertEq(index, 1e18 + 125e15, "0.1875% an hour of $200 for a third of an hour");
+    }
+
+    /// @notice A discount charges the other way, and a premium beyond the band reads at the band's
+    ///         edge, where the rate is exactly the ceiling.
+    function test_fundingRate_signAndCeiling() public {
+        _fundingFixture(-3e18);
+        pair.setLastFundingUpdateTs(block.timestamp - 20 minutes);
+        (int256 currentRate,, int256 index) = lens.fundingRate(address(pair));
+        assertEq(currentRate, -75e13, "a discount: shorts pay");
+        assertEq(index, 1e18 - 25e15, "the index falls");
+
+        pair.setMarkLine(10e18, block.timestamp - 10 minutes, 100e18);
+        (currentRate,,) = lens.fundingRate(address(pair));
+        assertEq(currentRate, int256(FundingLib.MAX_FUNDING_RATE_CONTINUOUS), "10% reads as 4%: the ceiling");
+    }
+
+    /// @notice The window bounds updateFundingIndex applies: a store more than MAX_FUNDING_GAP after
+    ///         the last accrual charges nothing, one more than MAX_FUNDING_AGE after it charges only
+    ///         the last MAX_FUNDING_AGE, and one in the same second charges nothing. The rate the mark
+    ///         implies does not depend on the window.
+    function test_fundingRate_followsTheWindowBounds() public {
+        _fundingFixture(3e18);
+
+        pair.setLastFundingUpdateTs(block.timestamp - 13 hours);
+        (int256 currentRate, int256 accruingRate, int256 index) = lens.fundingRate(address(pair));
+        assertEq(currentRate, 75e13, "the mark's rate");
+        assertEq(accruingRate, 0, "past the gap: nothing");
+        assertEq(index, 1e18, "the stored index");
+
+        pair.setLastFundingUpdateTs(block.timestamp - 2 hours);
+        (, accruingRate, index) = lens.fundingRate(address(pair));
+        assertEq(accruingRate, 25e13, "the last half hour, a third of it on the line");
+        assertEq(index, 1e18 + 25e15, "0.025% an hour of $200 for half an hour");
+
+        pair.setLastFundingUpdateTs(block.timestamp);
+        (, accruingRate, index) = lens.fundingRate(address(pair));
+        assertEq(accruingRate, 0, "an empty window");
+        assertEq(index, 1e18, "the stored index");
+    }
+
+    /// @notice A price published after the scheduled cutoff, or once the settlement price is fixed,
+    ///         is never stored, so nothing accrues; one published at the cutoff itself still is.
+    function test_fundingRate_stopsWhereThePairStoresNoPrice() public {
+        _fundingFixture(3e18);
+        pair.setLastFundingUpdateTs(block.timestamp - 20 minutes);
+
+        pair.setScheduledTerminationTs(block.timestamp);
+        (int256 currentRate, int256 accruingRate, int256 index) = lens.fundingRate(address(pair));
+        assertEq(currentRate, 75e13, "at the cutoff: still charged");
+        assertEq(index, 1e18 + 25e15, "at the cutoff: still charged");
+
+        pair.setScheduledTerminationTs(block.timestamp - 1);
+        (currentRate, accruingRate, index) = lens.fundingRate(address(pair));
+        assertEq(currentRate, 0, "past the cutoff: no rate");
+        assertEq(accruingRate, 0, "past the cutoff: no charge");
+        assertEq(index, 1e18, "past the cutoff: the stored index");
+
+        pair.setScheduledTerminationTs(0);
+        pair.setTerminal(200e18, block.timestamp, 1e18, 1e18);
+        (currentRate, accruingRate, index) = lens.fundingRate(address(pair));
+        assertEq(currentRate, 0, "settlement fixed: no rate");
+        assertEq(accruingRate, 0, "settlement fixed: no charge");
+        assertEq(index, 1e18, "settlement fixed: the stored index");
+    }
+
+    /// @notice A pair with no mark line and no stored price has nothing to charge.
+    function test_fundingRate_zeroWithoutAMarkOrAPrice() public {
+        vm.warp(1_700_000_000);
+        pair.setFundingIndex(1e18);
+        pair.setLastFundingUpdateTs(block.timestamp - 20 minutes);
+        (int256 currentRate, int256 accruingRate, int256 index) = lens.fundingRate(address(pair));
+        assertEq(currentRate, 0, "no premium");
+        assertEq(accruingRate, 0, "no charge");
+        assertEq(index, 1e18, "the stored index");
     }
 
     function test_getMinCollateralAmount() public view {

@@ -1035,6 +1035,85 @@ contract BazaarPairLens {
         return FundingLib.currentMark(premiumNotional, aux.rollingVolume, aux.lastMarkUpdateTs, floorVolume, spot);
     }
 
+    /// @notice The pair's funding at this block: the rate its mark implies now, the rate a price
+    ///         stored now would charge for the window since the index last accrued, and the funding
+    ///         index that charge would leave. Rates are signed fractions of the index per
+    ///         FundingLib.FUNDING_INTERVAL (BAZAAR_SCALE = 100%), positive when longs pay shorts.
+    /// @dev Evaluates FundingLib.updateFundingIndex for a price published at this block at the
+    ///      pair's last stored price: the same window bounds, the same average of the mark's premium
+    ///      over the window, the same dampener and ceiling for the pair's trading calendar. The next
+    ///      price the pair stores accrues on its own index, which sizes the floor the premium is read
+    ///      over and scales the charge, so the projected index is exact only for a store at the same
+    ///      price in the same block. A price published at this block is not stored once the
+    ///      settlement price is fixed or the scheduled cutoff has passed, so nothing accrues: both
+    ///      rates are 0 and the index is the stored one. A pair with trading hours accrues nothing
+    ///      while its oracle is stale, and these figures then say what a fresh price published at
+    ///      this block would charge: a window older than FundingLib.MAX_FUNDING_GAP charges nothing,
+    ///      and one older than FundingLib.MAX_FUNDING_AGE charges only its last MAX_FUNDING_AGE.
+    /// @param pair The pair
+    /// @return currentRate The rate the mark's premium at this block implies
+    /// @return accruingRate The rate a price stored at this block would charge: the premium's
+    ///         average over the window since the index last accrued; 0 for an empty window
+    /// @return fundingIndex The cumulative funding index after that charge, in price units: a
+    ///         position's funding PnL is Δindex × size / BAZAAR_SCALE, paid by a long and received
+    ///         by a short when Δindex is positive (BucketLib)
+    function fundingRate(address pair)
+        external
+        view
+        returns (int256 currentRate, int256 accruingRate, int256 fundingIndex)
+    {
+        IBazaarPairLens p = IBazaarPairLens(pair);
+        fundingIndex = p.currentFundingIndex();
+        uint256 cutoff = p.scheduledTerminationTs();
+        if (p.settlementPriceFixedTs() != 0 || (cutoff != 0 && block.timestamp > cutoff)) {
+            return (0, 0, fundingIndex);
+        }
+
+        BazaarTypes.AuxState memory aux = p.auxState();
+        (uint256 spot,,,,) = p.lastPairPrice();
+        FundingLib.MarkState memory line = FundingLib.MarkState({
+            premiumNotional: int256(uint256(p.extsload(bytes32(SLOT_MARK_PREMIUM_NOTIONAL)))),
+            lastMarkUpdateTs: aux.lastMarkUpdateTs,
+            rollingVolume: aux.rollingVolume
+        });
+        uint256 floorVolume;
+        {
+            (uint256 longOI, uint256 shortOI,,,,,,,,, BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) =
+                p.pairVault();
+            floorVolume =
+                FundingLib.floorVolumeOf(RiskParamsLib.openInterestSizeOf(longOI, shortOI, l.size, s.size), spot);
+        }
+        bool continuous = p.isContinuouslyTraded();
+        currentRate = _rateOf(
+            FundingLib.currentPremium(line.premiumNotional, line.rollingVolume, line.lastMarkUpdateTs, floorVolume),
+            continuous
+        );
+
+        // The window updateFundingIndex accrues over when the price it stores was published now.
+        uint256 start = aux.lastFundingUpdateTs;
+        if (block.timestamp > start + FundingLib.MAX_FUNDING_GAP) {
+            start = block.timestamp;
+        } else if (block.timestamp > start + FundingLib.MAX_FUNDING_AGE) {
+            start = block.timestamp - FundingLib.MAX_FUNDING_AGE;
+        }
+        if (start >= block.timestamp || spot == 0) return (currentRate, 0, fundingIndex);
+
+        accruingRate = _rateOf(FundingLib.averagePremium(line, floorVolume, start, block.timestamp), continuous);
+        fundingIndex += accruingRate * int256(spot) * int256(block.timestamp - start) / int256(BAZAAR_SCALE)
+            / int256(FundingLib.FUNDING_INTERVAL);
+    }
+
+    /// @dev updateFundingIndex's rate for a premium: divided by the dampener of the pair's trading
+    ///      calendar, then held to that calendar's ceiling.
+    function _rateOf(int256 premium, bool continuous) internal pure returns (int256 rate) {
+        (uint256 ceiling, uint256 dampener) = continuous
+            ? (FundingLib.MAX_FUNDING_RATE_CONTINUOUS, FundingLib.FUNDING_DAMPENER_CONTINUOUS)
+            : (FundingLib.MAX_FUNDING_RATE_SESSION, FundingLib.FUNDING_DAMPENER_SESSION);
+        rate = premium / int256(dampener);
+        if (rate > int256(ceiling)) rate = int256(ceiling);
+        else if (rate < -int256(ceiling)) rate = -int256(ceiling);
+    }
+
     /// @notice The mark-price constants, for showing how much of a resting order's fills would
     ///         enter the mark and how far a print can move it.
     /// @return makerExposureBlocks L2 blocks a maker must have rested at its current price and
