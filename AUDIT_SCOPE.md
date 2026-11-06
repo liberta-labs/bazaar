@@ -38,8 +38,8 @@ the disagreement as a finding.
 | Item | Value |
 |---|---|
 | Repository | https://github.com/liberta-labs/bazaar |
-| Tag | `v1.0.0-rc3` |
-| Commit | `3cf9dc3b6fa38f6cba71b662568db1278e0aa22e` |
+| Tag | `v1.0.0-rc4` |
+| Commit | `60cbbde2654f966a1531720f61cecb874a849d1d` |
 | Target chain | Arbitrum One (chain id 42161) |
 | Compiler | solc 0.8.34 |
 | Optimizer | on, `optimizer_runs = 150` for every contract |
@@ -94,65 +94,67 @@ Counts are non-blank, non-comment lines (natspec included in "comment"), compute
 tokenizer that skips `//` comments and `/* */` blocks and does not mistake `//` inside a string
 literal for a comment.
 
-### Tier 1 — full scope (21 files, 9,954 lines)
+### Tier 1 — full scope (21 files, 9,373 lines)
 
 | File | Lines | Role |
 |---|---:|---|
-| `src/BazaarPair.sol` | 1,256 | Market contract: entry points, price resolution, vault-health verdict, termination glue |
+| `src/BazaarPair.sol` | 1,221 | Market contract: entry points, price resolution, vault-health verdict, termination glue |
 | `src/BazaarPairTerminator.sol` | 961 | UMA, insurer-vote, scheduled and stale-oracle termination paths |
 | `src/BazaarFactory.sol` | 574 | UMA-gated listing, identifier governance, clone deployment |
 | `src/BazaarOracle.sol` | 377 | Pyth adapter, composite feeds, confidence and staleness rules |
-| `src/libraries/MatchingEngineLib.sol` | 1,428 | Arrival walk, trigger execution, vault unload, per-fill margin checks, fees |
-| `src/libraries/AdlLib.sol` | 1,113 | ADL batches, deferred liquidations, winner closes, executor rewards |
-| `src/libraries/RiskParamsLib.sol` | 728 | Margin curve, insurance target, reserve, unload planner, fund-ledger helpers, bounties |
+| `src/libraries/MatchingEngineLib.sol` | 1,435 | Arrival walk, trigger execution, vault unload (one bucket per walk), per-fill margin checks, fees |
+| `src/libraries/RiskParamsLib.sol` | 791 | Margin curve, insurance target, reserve, the two-bucket read model and netting gate, unload planner, fund-ledger helpers, bounties |
+| `src/libraries/AdlLib.sol` | 690 | ADL batches over the two buckets: on-chain ranking, losing leg first, paired and fallback sizing, winner closes, executor rewards |
 | `src/libraries/OrderManagementLib.sol` | 669 | Order creation, cancel, amend (with the best-effort flag), expiry sweep; the creation and amendment margin gates |
 | `src/libraries/CollateralLib.sol` | 607 | Deposits, withdrawals, books-vs-cash check, fee claims, terminal settlement, resting-order tally |
-| `src/libraries/BazaarTypes.sol` | 534 | Structs, constants, events |
+| `src/libraries/BazaarTypes.sol` | 533 | Structs, constants, events |
 | `src/libraries/InsuranceVaultLib.sol` | 397 | Insurance shares, deposits, forward-priced redemptions, rate limits |
-| `src/libraries/LiquidationLib.sol` | 370 | Seizure, netting against the vault inventory, deferral, rewards |
 | `src/libraries/OrderBookLib.sol` | 218 | Sorted doubly-linked book lists, in-place rewrite of a resting order |
 | `src/libraries/FundingLib.sol` | 212 | Mark tallies and funding-index accrual |
-| `src/libraries/TerminationLib.sol` | 112 | Finalize: total owed, payout ratios |
+| `src/libraries/LiquidationLib.sol` | 206 | Seizure into the estate's own bucket, netting of the buckets' overlap, rewards |
+| `src/libraries/TerminationLib.sol` | 109 | Finalize: total owed, payout ratios |
 | `src/libraries/BucketLib.sol` | 99 | Position solvency math |
-| `src/libraries/VaultHealthLib.sol` | 68 | Liquidation-exposure (ADL gate) check |
 | `src/libraries/MetaTxLib.sol` | 67 | EIP-712 relayed calls, nonces |
 | `src/libraries/MmrSampleLib.sol` | 66 | Lagged-MMR ring buffer |
 | `src/libraries/BazaarMathLib.sol` | 62 | Fixed point, exponent conversion |
+| `src/libraries/VaultHealthLib.sol` | 43 | Liquidation-exposure (ADL gate) check over both buckets |
 | `src/libraries/FeeEscrowLib.sol` | 36 | Claimable-balance escrow for every third-party payout |
-| **Total** | **9,954** | |
+| **Total** | **9,373** | |
 
-### Tier 2 — riskiest subset for a competition (12 files, 6,770 lines)
+### Tier 2 — riskiest subset for a competition (12 files, 6,225 lines)
 
 | File | Lines |
 |---|---:|
-| `src/libraries/MatchingEngineLib.sol` | 1,428 |
-| `src/libraries/AdlLib.sol` | 1,113 |
+| `src/libraries/MatchingEngineLib.sol` | 1,435 |
 | `src/BazaarPairTerminator.sol` | 961 |
-| `src/libraries/RiskParamsLib.sol` | 728 |
+| `src/libraries/RiskParamsLib.sol` | 791 |
+| `src/libraries/AdlLib.sol` | 690 |
 | `src/libraries/OrderManagementLib.sol` | 669 |
 | `src/libraries/CollateralLib.sol` | 607 |
 | `src/libraries/InsuranceVaultLib.sol` | 397 |
-| `src/libraries/LiquidationLib.sol` | 370 |
 | `src/libraries/OrderBookLib.sol` | 218 |
-| `src/libraries/TerminationLib.sol` | 112 |
+| `src/libraries/LiquidationLib.sol` | 206 |
+| `src/libraries/TerminationLib.sol` | 109 |
 | `src/libraries/BucketLib.sol` | 99 |
-| `src/libraries/VaultHealthLib.sol` | 68 |
-| **Total** | **6,770** |
+| `src/libraries/VaultHealthLib.sol` | 43 |
+| **Total** | **6,225** |
 
 This covers the matching engine and order management, liquidation and ADL, the insurance vault, the
 termination lifecycle, collateral accounting with the resting-order tally, and the risk library
 those paths call into:
-`RiskParamsLib` holds the unload planner (`planUnload`, `unloadRewardPayable`), the fund-ledger
-helpers (`fundLedgerFrom`, `bankruptcyCloseCost`, `redemptionHeadroom`, `vaultAdlExposure`), the ADL
-reserve (`adlReserve`) and the margin curve (`calculateIMRandMMR`, `liquidationImrBp`).
+`RiskParamsLib` holds the two-bucket read model and the netting gate (`overlap`,
+`overlapAffordable`, `netBuckets`, `tryNetBuckets`, `bucketBankruptcyCloseCost`), the unload
+planner (`unloadBucketIsLong`, `planUnload`, `settleUnloadTail`), the fund-ledger helpers
+(`fundLedgerFrom`, `redemptionHeadroom`, `vaultAdlExposure`), the ADL reserve (`adlReserve`) and the
+margin curve (`calculateIMRandMMR`, `liquidationImrBp`).
 `BazaarPair`, `FundingLib` and `BazaarTypes` are required reading for it, since the tier's files are
 called from the pair.
 
-### Out of scope (6 files, 1,132 lines)
+### Out of scope (6 files, 1,159 lines)
 
 | File | Lines | Reason |
 |---|---:|---|
-| `src/BazaarPairLens.sol` | 853 | Read-only views for frontends and keepers. No contract calls it on-chain: the factory stores its address and reads `factory()` from it once in the constructor as a wiring check. Known limitation: `getMaxWithdrawable` does not reproduce the liquidation-exposure refusal a position holder's withdrawal can meet before an ADL window latches, as its natspec states. |
+| `src/BazaarPairLens.sol` | 880 | Read-only views for frontends and keepers. No contract calls it on-chain: the factory stores its address and reads `factory()` from it once in the constructor as a wiring check. Known limitation: `getMaxWithdrawable` does not reproduce the liquidation-exposure refusal a position holder's withdrawal can meet before an ADL window latches, as its natspec states. |
 | `src/libraries/ClaimTextLib.sol` | 179 | Static UMA claim text (pure functions returning bytes); its correctness as prose matters to UMA verifiers, not to the contracts' state. |
 | `src/interfaces/IUmaOptimisticOracleV3.sol` | 55 | Interface |
 | `src/interfaces/IBazaarPair.sol` | 22 | Interface |
@@ -164,7 +166,7 @@ themselves (OpenZeppelin, Pyth SDK, UMA, forge-std). How Bazaar integrates its d
 scope, including whether the local interface `IUmaOptimisticOracleV3` matches the deployed oracle's
 ABI, since the factory decodes `getAssertion` results to decide proposal outcomes.
 
-All files: 27, 11,086 lines (9,954 in scope + 1,132 out of scope).
+All files: 27, 10,532 lines (9,373 in scope + 1,159 out of scope).
 
 ## 4. Build and test
 
@@ -182,7 +184,7 @@ git clone --recursive https://github.com/liberta-labs/bazaar.git bazaar
 ```
 
 ```bash
-git checkout v1.0.0-rc3
+git checkout v1.0.0-rc4
 ```
 
 ```bash
@@ -209,8 +211,10 @@ settings above (same compiler, optimizer, via-IR and invariant settings). `make 
 ### Build cost
 
 `via_ir` is mandatory and the IR pipeline is bounded by solc's peak memory, not by CPU. A cold
-build is one large solc process: plan for several GB of free RAM (8 GB or more is comfortable) and
-tens of minutes. Incremental builds after a test-only edit are much faster because
+build is one large solc process: plan for more than 8 GB of free RAM and tens of minutes. On an
+8 GB machine, build the sources first (`forge build --skip 'test/**'`), then the test tree in parts
+with further `--skip` globs (for example `'test/integration/**'`, then
+`'test/integration/[L-Z]*'`, then a plain `forge build`); the cache carries each part forward. Incremental builds after a test-only edit are much faster because
 `dynamic_test_linking` keeps library edits from recompiling the whole graph. Avoid running two cold
 builds on one machine at once.
 
@@ -226,9 +230,9 @@ builds on one machine at once.
 
 `test/integration/ZeroSumHandlerInvariantTest.t.sol` drives a multi-actor handler (trading,
 cancelling and amending resting orders, withdrawals against open positions, price moves,
-liquidation, unloads, ADL, funding accrual) and checks five invariants: `invariant_zeroSum`,
-`invariant_check3Solvency`, `invariant_openInterestMatchesPositions`,
-`invariant_deferredListedOnlyInsideWindow` and `invariant_restingTallyNeverUnderstates`. The
+liquidation on both sides of the book, unloads, ADL, funding accrual) and checks five invariants:
+`invariant_zeroSum`, `invariant_check3Solvency`, `invariant_openInterestMatchesPositions`,
+`invariant_overlapSurvivesOnlyAtALoss` and `invariant_restingTallyNeverUnderstates`. The
 `[invariant]` section of `foundry.toml` sets `runs = 64`, `depth = 160`, `fail_on_revert = false`;
 raise them for a deeper campaign:
 
@@ -237,8 +241,9 @@ FOUNDRY_INVARIANT_RUNS=512 FOUNDRY_INVARIANT_DEPTH=320 forge test --match-contra
 ```
 
 `test/integration/ZeroSumInvariantTest.t.sol` holds fixed scenarios (trade lifecycle, funding
-accrual, liquidation and vault close, a vault whipsaw, seizures against a thin ledger, termination)
-that assert the zero-sum identity at each step.
+accrual, liquidation and vault close, a vault whipsaw, seizures against a thin ledger, termination,
+an unaffordable netting held as two buckets and closed by one batch) that assert the zero-sum
+identity at each step.
 
 `test/unit/ContractSizeTest.t.sol` (`test_deployableContractsFitEip170`) enforces EIP-170 over the
 production contracts and external libraries only; `forge build --sizes` would also fail on
@@ -257,10 +262,10 @@ UMA's oracle (listed at the end).
 |---|---|---|---|
 | Trader (maker or taker) | `BazaarPair.depositCollateral`, `withdrawCollateral`, `createOrder`, `cancelOrders`, `amendOrders`, `claimFees` | Pays maker and taker fees (fees.md) | `MIN_ORDER_AMOUNT` and `MIN_COLLATERAL_AMOUNT` ($5); `MAX_ACTIVE_LIMIT_ORDERS_PER_USER` (32); `MAX_CANCELS_PER_CALL` (200); `MAX_AMENDS_PER_CALL` (32); IMR on worst-case exposure plus a cash floor while a position is open |
 | Trigger keeper | `executeTriggeredOrders` (up to `MAX_TRIGGER_EXECS_PER_CALL`, 20) | The owner-chosen bounty, escrowed from the owner's wallet at creation and paid pro rata to what an execution fills | The bounty goes to the owner when the order's own creation walk executes it, or when an execution lands in the creation block of an order the stale fallback left unarmed |
-| Liquidator | `liquidate` | `MIN_LIQUIDATOR_REWARD` ($0.05) per seized or deferred account, at most the account's equity below $5 of notional; a netting earns max($0.05, 2 bp of the overlap) (`LIQUIDATION_FEE_EBP`); the inline unload pays 2 bp on what it sells beyond that | Capped at insurance free capital; a stored price older than `MAX_LIQUIDATION_PRICE_AGE` (10 minutes) needs a fresh update |
-| Vault unloader | `unloadVault` | 2 bp of unloaded notional, raised to `UNLOAD_BOUNTY_MIN` ($0.25) when at least `UNLOAD_BOUNTY_MIN_NOTIONAL` ($1,250) unloads or the inventory clears | Capped by `RiskParamsLib.unloadRewardPayable`; fills nothing and pays nothing on the stale fallback |
+| Liquidator | `liquidate` | `MIN_LIQUIDATOR_REWARD` ($0.05) per seized account, at most the account's equity below $5 of notional; a seizure whose arrival nets the two buckets earns max($0.05, 2 bp of the overlap netted) (`LIQUIDATION_FEE_EBP`); the inline unload pays 2 bp on what it sells beyond that | Capped at insurance free capital; a stored price older than `MAX_LIQUIDATION_PRICE_AGE` (10 minutes) needs a fresh update |
+| Vault unloader | `unloadVault` | 2 bp of unloaded notional, raised to `UNLOAD_BOUNTY_MIN` ($0.25) when at least `UNLOAD_BOUNTY_MIN_NOTIONAL` ($1,250) unloads or the bucket it works clears, plus 2 bp of any overlap the walk's tail nets | One bucket per call (`RiskParamsLib.unloadBucketIsLong`); capped by `RiskParamsLib.settleUnloadTail`; fills nothing and pays nothing on the stale fallback |
 | Price refresher | `refreshPrice` | `REFRESH_BOUNTY` ($0.10) for a newer stored price | At most once per `REFRESH_BOUNTY_MIN_GAP` (5 minutes) while the vault holds at least $1,250 of inventory and free capital exceeds `REFRESH_BOUNTY_FAST_MIN_INSURANCE` ($5,000), otherwise once per `REFRESH_BOUNTY_HEARTBEAT` (1 day); only while free capital exceeds `REFRESH_BOUNTY_HEARTBEAT_MIN_INSURANCE` ($1,000) |
-| ADL executor | `executeAdl` (up to `MAX_ADL_WINNERS_PER_BATCH`, 25, per list) | For the inventory's own exposure closed (at most what the fund could not carry as the batch began, less every deferred account the batch absorbs), max(2 bp of the notional at the mark, `ADL_EXECUTOR_REWARD_BP` (0.1%) of the bad debt the close averts), nothing for units closed only so deferred accounts can be absorbed; per deferred account it seizes, max($0.05, 2 bp of what it retires) plus 0.1% of the bad debt its cohort close averts ($0.05 alone for one moved into the inventory) | Capped at free capital; refuses the stale fallback |
+| ADL executor | `executeAdl(longBucketWinners, shortBucketWinners, priceUpdate)` (up to `MAX_ADL_WINNERS_PER_BATCH`, 25, per list; any order, ranked and sorted on-chain) | For every unit a leg closes, max(2 bp of its notional at the mark, `ADL_EXECUTOR_REWARD_BP` (0.1%) of the bad debt the close averts); 2 bp at the mark of the overlap the batch's closing netting retires | Capped at free capital; refuses the stale fallback |
 | Expiry janitor | `sweepExpired` | Nothing | |
 | Terminal settler | `liquidate` once the settlement price is fixed (settlement mode, through `CollateralLib.settleTerminalPositions`), then `finalizeTermination` | `TERMINAL_SETTLEMENT_TIP` ($0.05) per position settled for someone else, from that position's collateral, topped up from insurance for positions of at least $5 | `finalizeTermination` runs once open interest is zero, or after `TERMINAL_SETTLEMENT_ESCAPE` (14 days) |
 | Insurance LP | `depositToInsurance`, `requestInsuranceWithdrawal`, `executeInsuranceWithdrawal` | Taker insurance fees, forfeited bonds, inventory gains | `INSURANCE_WITHDRAWAL_COOLDOWN` (13 days), `INSURANCE_WITHDRAWAL_WINDOW_CONTINUOUS` / `INSURANCE_WITHDRAWAL_WINDOW_SESSION` (2 / 4 days, by the pair's trading calendar), forward-priced claim (`INSURANCE_WITHDRAWAL_CLAIM_DELAY`, `INSURANCE_WITHDRAWAL_REOPEN_CLAIM_DELAY`), per-period rate limits, headroom while inventory is held; junior to every trader at termination |
@@ -451,7 +456,7 @@ in scope whatever its profit.
    "Accounting invariant").
 3. **Open interest is exact and two-sided.** `totalLongOI` and `totalShortOI` equal the sums of the
    position sizes on each side (`invariant_openInterestMatchesPositions`), and the two sides are
-   equal once the vault's inventory (`pendingLiqSize`) is counted on its own side.
+   equal once each of the vault's buckets (`longInv`, `shortInv`) is counted on its own side.
 4. **Price-time priority.** The book rests sorted by price and then by priority sequence, never
    rests crossed, and holds no two orders that tie; every fill executes at the resting maker's limit
    price against the best-priced, earliest-queued maker. An amendment that keeps the order's
@@ -478,17 +483,21 @@ in scope whatever its profit.
    free capital, the fund balance less the seizure earmarked against held inventory (fees.md).
 9. **An unload never opens an ADL window.** An unload's fills stay inside the unload bound and the
    fund's headroom, never take the fund below its reserve, and, with the caller's reward capped by
-   `RiskParamsLib.unloadRewardPayable`, never carry the pair over the ADL trigger it did not start
+   `RiskParamsLib.settleUnloadTail`, never carry the pair over the ADL trigger it did not start
    past (liquidations.md).
-10. **ADL is fund-neutral at worst and never favourable to the winner.** Winners close at the
-    estates' average bankruptcy price or at the mark, a winner whose PnL at that price would be
+10. **ADL is fund-neutral at worst and never favourable to the winner.** Winners close at their
+    bucket's average bankruptcy price or at the mark, a winner whose PnL at that price would be
     negative is skipped, and a batch closes no more than its sizing (`_sizeToRestoreHealth`, or
-    `_sizeToAffordNettings` while deferred accounts are listed) requires, with the executor's reward
-    counted so that paying it never leaves the fund short of releasing the window (adl.md).
+    `_sizeToAffordNetting` when the losing bucket has no eligible winner) requires, with the
+    executor's reward counted so that paying it never leaves the fund short of releasing the window
+    (adl.md).
 11. **The fund's outlay on an estate never exceeds the loss beyond its bankruptcy price.** A
     settlement pays its loss from the estate's own seized collateral first, then net of the ledger's
     arrears, and only then from free capital (liquidations.md, adl.md).
-12. **Deferred liquidations exist only inside an ADL window** (`invariant_deferredListedOnlyInsideWindow`).
+12. **Both buckets hold inventory only while their overlap is a loss.** A netting that is a gain
+    is taken wherever it arises (`invariant_overlapSurvivesOnlyAtALoss`), and every liquidation is
+    final: a position whose netting the fund cannot afford is seized into its own bucket, never left
+    open on its owner (liquidations.md).
 13. **Termination pays in strict seniority.** At finalize the fee escrow comes off the pot first,
     principal (the sum of collateral) is paid next, pro rata if the pot is short, registered profit
     claims share what remains at one ratio, and insurers own only the residual; trader payouts never
@@ -512,17 +521,20 @@ in scope whatever its profit.
 Ranked by where subtle risk concentrates, judged from the code and from where the internal reviews
 found most of their defects.
 
-1. **ADL batches and deferred liquidations.** `AdlLib.executeAdlCore`, `_sizeToRestoreHealth`,
-   `_sizeToAffordNettings`, `_releaseFigures`, `_closeAdlWinners`, `_deferredPass`,
-   `_resolveDeferred`, `_closeSeized`, `_seizeRemainingDeferred`, `_settleInventorySlice`,
-   `_listedNettings`, `_closeReward`, `_payRewards`; `LiquidationLib.processLiquidations`,
-   `nettingAffordable`,
-   `_netOpposingLiquidation`, `defer`; `RiskParamsLib.fundLedgerFrom`, `bankruptcyCloseCost`. A batch
-   mutates the inventory and the deferred list while it runs, sizes its closes against a reserve,
-   the ledger's arrears and holding-window funding, and rounds toward the fund. A wrong figure either
+1. **ADL batches over two buckets.** `AdlLib.executeAdlCore`, `_scan`, `_outranks`, `_longFirst`,
+   `_runLeg`, `_sizeToRestoreHealth`, `_sizeToAffordNetting`, `_figures`, `_legGain`,
+   `_sizeToCover`, `_closeAdlWinners`, `_settleInventorySlice`, `_closeReward`, `_payRewards`;
+   `LiquidationLib.processLiquidations`, `absorb`, `seizureReward`; `RiskParamsLib.overlap`,
+   `overlapAffordable`, `netBuckets`, `tryNetBuckets`, `bucketBankruptcyCloseCost`,
+   `fundLedgerFrom`. This is the newest code in scope. A batch ranks both cohorts at the price the
+   call resolves and sorts them on-chain, runs the losing leg first, sizes each leg in two segments
+   (its excess over the other bucket alone, its hedged units in pairs with a leg still to run), falls
+   back to closing the winning bucket at the mark until the fund can net the overlap, and ends by
+   netting the overlap where the fund can afford it. It sizes its closes against a reserve, the
+   ledger's arrears and holding-window funding, and rounds toward the fund. A wrong figure either
    haircuts winners for nothing or books a deficit, which terminates the pair. The executor's reward
-   enters those solves (`_closeReward`, `Rewards.paidSize`), and within a batch a cohort that covers
-   a deferred account has to stay the better-paid route.
+   enters those solves (`_closeReward`), and a hedged unit closed alone where pairing it was
+   possible widens the exposure the batch is meant to shrink.
 2. **The vault-health verdict and the ledgers.** `BazaarPair._vaultHealthVerdict`,
    `isVaultHealthy`, `refreshPrice`, `_terminatePair`; `CollateralLib.isBalanceShort`,
    `_debitLedger`; `VaultHealthLib.checkLiqExposure`; `RiskParamsLib.vaultAdlExposure`,
@@ -531,9 +543,10 @@ found most of their defects.
    order of operations that breaks the identity, defers the books-versus-cash check, or releases a
    window early.
 3. **The vault unload, a forced taker.** `MatchingEngineLib.unloadBook`, `_fillVault`,
-   `_settleVaultLiquidation`, `_finalizeTx`; `RiskParamsLib.planUnload`, `unloadRewardPayable`;
-   `BazaarPair.unloadVault` and the inline walk inside `liquidate`. The caller controls both the
-   maker side and the timing; the bound combines the fund-neutral price, the band edge and a floor
+   `_settleVaultLiquidation`, `_finalizeTx`; `RiskParamsLib.unloadBucketIsLong`, `planUnload`,
+   `settleUnloadTail`; `BazaarPair.unloadVault` and the inline walk inside `liquidate`. A walk works
+   one bucket and its tail re-tests the netting. The caller controls both the maker side and the
+   timing; the bound combines the fund-neutral price, the band edge and a floor
    that decays over `UNLOAD_FLOOR_DECAY`; and the fills feed the liquidation-gap readings that set
    margin for everyone.
 4. **Arrival matching and per-fill margin.** `MatchingEngineLib.executeArrival`, `_walkTaker`,
@@ -549,8 +562,8 @@ found most of their defects.
    `_sweepRestingReserve`, `_tallyAdd`, `_tallySub`, `withdrawCollateral`;
    `OrderManagementLib._requireCreationAffordable`, `_requireAmendedSetAffordable`,
    `_exactAmendReserve`, `_amendOne`, `_skipAmend`, `cancelOrder`; `OrderBookLib.staysInPlace`,
-   `restamp`. Apart from the refresh bounty's two floors (section 9, item 37), this is the newest code
-   in scope. The creation, amendment and withdrawal gates pass an
+   `restamp`. Apart from the two-bucket vault (item 1) and the refresh bounty's two floors (section 9,
+   item 37), this is the newest code in scope. The creation, amendment and withdrawal gates pass an
    account on an upper bound from a per-account tally without reading its orders, so any path that
    lets the tally understate the set is a margin bypass. Check every writer of an active order against the tally,
    the rounding slack (`RESTING_BOUND_SLACK`), saturation and the invalid marker, and the fallback to
@@ -706,17 +719,21 @@ without a new consequence (a larger impact, a cheaper path, or a broken bound) a
     its new counterparties posted, the `available` amount is always withdrawable, and outside an ADL
     window anyone can end the wait with a rewarded `unloadVault`, as far as the book absorbs the
     inventory; inside one, where `unloadVault` reverts, an `executeAdl` close or an affordable
-    opposing netting does.
-15. **ADL completeness is not enforced on-chain.** `AdlLib._scanEligibleWinners` checks descending
-    score only among the winners a keeper submits (position buckets are not enumerable), so a keeper
-    can spare an eligible higher-scored account. Accepted: the batch's sizing caps the close whoever
-    is named (naming fewer eligible winners closes less, never more), the executor's reward does not
-    depend on who bears the close, the Dutch threshold limits substitutes to accounts that cleared
-    it, and `AdlExecuted` carries the inventory leg's highest and lowest admitted score while each
-    `UserAdld` carries a closed winner's score, for off-chain monitoring.
-16. **A keeper's ADL sort can lose a race to a newer Pyth tick.** The deferred cohort is ranked at
-    the pair's stored price; a batch whose update carries a different mark can fail its ordering
-    check and revert. Liveness friction only (gas); the docs give keepers a score-and-retry recipe.
+    netting of the two buckets does.
+15. **ADL completeness is not enforced on-chain.** `AdlLib._scan` ranks and sorts only the
+    winners a keeper submits (position buckets are not enumerable), so a keeper can spare an
+    eligible higher-scored account. Accepted: the batch's sizing caps the close whoever is named
+    (naming fewer eligible winners closes less, never more), the executor's reward does not depend
+    on who bears the close, the Dutch threshold limits substitutes to accounts that cleared it, and
+    each `UserAdld` carries a closed winner's score, for off-chain monitoring.
+16. **A bucket seeded while a window is open meets the window's decayed threshold.** The Dutch
+    threshold runs from `adlAuctionStartTs`, set when a window opens and restarted only by a stored
+    price that ends a gap of at least `REOPEN_GAP_MIN_STALENESS` (1 hour). A liquidation that seeds
+    the other bucket mid-window brings that bucket's counterparties into range at whatever the
+    threshold has decayed to, so after `ADL_AUCTION_DURATION` (10 minutes) any profitable account on
+    that side is eligible at once, whichever of them a keeper names. Open design question:
+    restarting the decay would also re-protect the cohort the window opened for and delay its
+    closes, and a clock per bucket needs another storage slot.
 17. **The ADL timeout runway is a wall-clock instant armed once.** The first fresh price stored
     after a window has been pending for `ADL_TIMEOUT_DURATION` (24 hours) arms `adlTerminationTs`
     `ADL_TERMINATION_GRACE` (30 minutes) later, and nothing pushes it back. An outage or session close
@@ -728,27 +745,26 @@ without a new consequence (a larger impact, a cheaper path, or a broken bound) a
     and the pair terminates, the winners already deleveraged keep only what their closes paid;
     insurance is junior at termination, so a solvent fund keeps those haircuts in its residual.
     Open design question; a refund tier ahead of the insurers' residual is under consideration.
-19. **`_seizeRemainingDeferred` has no side filter or affordability gate.** It seizes every listed
-    account still open and insolvent. It is safe only because every account it can reach sits on one side: the
-    per-account pass delists accounts on the batch-start inventory side first, and nothing lists an
-    account mid-batch. Its natspec states the invariant; a path that breaks it is in scope.
-20. **An ADL batch pays nothing for closes made only so deferred accounts can be absorbed.** Units
-    the inventory leg closes past its restoring figure, or past what the fund could not carry as the
-    batch began less the deferred accounts it absorbs, earn only those accounts' seizure rewards. A
-    batch whose listed accounts are at least as large as the inventory closes all of it, moves them
-    into a new inventory and earns their $0.05 floors alone, which is thin pay for running that
-    window. Accepted by choice: paying
-    those units would reward absorbing an account over closing it against a cohort that covers it,
-    which spares the fund the loss.
-21. **A cohort stays the executor's better-paid route only within one batch.** An account netted by
-    an earlier call (`liquidate`, or `executeAdl` with no winners) no longer reduces a later batch's
-    paid units, so netting first and running the leg next can pay more than closing the account
-    against a covering cohort, by at most about 1% of the netting's cost, while the fund bears that
-    cost. Separately, a batch that empties the inventory seizes every account still listed at the
-    $0.05 floor (`_seizeRemainingDeferred`), including accounts within their collateral that a
-    cohort-kept inventory would leave listed and unpaid, which can tip the totals by that floor.
-    Accepted: an affordable netting is the protocol's own first resolution, and window-scoped state
-    would need new storage and still miss nettings made before the window's first batch.
+19. **A keeper can route a losing bucket's loss to the fund by leaving out its cohort.** A batch
+    that names no eligible winner for the bucket under water reaches the fallback
+    (`_sizeToAffordNetting`): the winning leg closes at the mark until the fund can afford to net the
+    overlap, and the fund pays the netting's loss within what the gate lets it spend, instead of
+    that bucket's counterparties paying at its bankruptcy price. Accepted: it is the loss the
+    `liquidate()` that seized the estate would have charged the fund had the fund held the cash then,
+    and the fund pays only what `overlapAffordable` admits, its reserve and the surviving bucket's
+    bankruptcy-close need kept.
+20. **An ADL batch can return having closed nothing.** A batch whose admitted winners are all
+    skipped at their leg's settlement price, or whose legs find no size that moves the fund toward
+    release, returns without reverting: it consumes an `adlId`, emits `AdlExecuted` with zero sizes
+    and pays nothing. Only a batch that admits no winner on either leg and nets nothing reverts
+    `AdlLib__NoEligibleWinners`. Accepted: the call costs only its caller's gas, and keepers read
+    `AdlExecuted`, not the call's success.
+21. **The fallback sizes against the overlap as the batch found it.** `_sizeToAffordNetting` prices
+    the netting for the overlap at the start of the leg, so where the winning bucket is the smaller
+    one, each unit it closes also shrinks the overlap, and the figure overstates the netting's cost
+    and understates what the surviving bucket keeps as the close proceeds. Accepted: the netting that
+    ends the batch runs the exact gate (`overlapAffordable`), so the error moves only how much the
+    leg closes at the mark, never whether an unaffordable netting runs.
 22. **Insurance redemptions stay open until shortly before a scheduled cutoff.** An LP with a matured
     request can exit between a termination's acceptance and the halt `LIMBO_LEAD` (6 s) before the
     cutoff. Accepted: the cutoff print exposes the fund to no loss that live trading would not, and a
@@ -839,7 +855,7 @@ without a new consequence (a larger impact, a cheaper path, or a broken bound) a
     rate withdrawals read until the next refresh. Positions opened during a genuine rise are
     maintained at the lagged rate for up to a day.
 33. **A netting's reward can bring an ADL window forward.** The 2 bp netting reward is paid from free
-    capital and is not counted by `nettingAffordable`, so it can open a window earlier by what it
+    capital and is not counted by `overlapAffordable`, so it can open a window earlier by what it
     pays.
 
 ### Test-suite limits
@@ -894,7 +910,9 @@ the most recent round, reproduced every Medium with a forge proof of concept bef
 Every finding from those rounds is fixed or listed in section 9. The best-effort amendment flag
 (section 8, item 5) came after them and has had two focused internal reviews rather than a full
 round. The refresh bounty's two floors (section 9, item 37) came after them too and have had no
-separate review. The test suite holds 1,799 test
+separate review. The two-bucket liquidation vault (section 8, item 1) came after them as well and
+has had one focused internal review: what it found is fixed or listed in section 9 (items 16, 19,
+20 and 21). The test suite holds 1,805 test
 functions in 113 files under `test/unit` and `test/integration` at the time of writing, including
 fuzz tests, fixed zero-sum scenarios and the handler-based invariant suite. **The protocol has not
 had a professional audit.** The internal review reports can be shared with the selected auditor on
