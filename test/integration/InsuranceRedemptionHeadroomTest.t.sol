@@ -8,6 +8,8 @@ import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 import {InsuranceVaultLib} from "../../src/libraries/InsuranceVaultLib.sol";
 import {RiskParamsLib} from "../../src/libraries/RiskParamsLib.sol";
 
+import {VaultStore} from "../VaultStore.sol";
+
 /// @title InsuranceRedemptionHeadroomTest
 /// @notice While the vault holds inventory, a live-pair redemption pays no more than the fund's
 ///         headroom: free capital less the reserve and the cost of finishing the inventory, valued
@@ -50,23 +52,16 @@ contract InsuranceRedemptionHeadroomTest is IntegrationBase {
     /// @dev The same figures with the inventory valued at `price`; the reserve stays at the stored
     ///      mark.
     function _fundAt(uint256 price) internal view returns (uint256 free, uint256 reserve, int256 net) {
-        (
-            ,,,,,
-            uint256 fund,
-            uint256 size,
-            uint256 entryNotional,,
-            int256 entryFundingIndex,
-            bool isLong,,,
-            uint256 seized,
-            uint256 arrears,,
-        ) = pair.pairVault();
+        (,,,,, uint256 fund,,, uint256 arrears,, BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) =
+            pair.pairVault();
         (uint256 spot,,,,) = pair.lastPairPrice();
+        uint256 seized = l.seized + s.seized;
         free = fund - seized;
         reserve = _reserveAt(spot);
+        int256 idx = pair.currentFundingIndex();
         net = int256(seized + arrears)
-            + RiskParamsLib.inventoryPnl(
-                size, entryNotional, entryFundingIndex, isLong, price, pair.currentFundingIndex()
-            );
+            + RiskParamsLib.inventoryPnl(l.size, l.entryNotional, l.entryFundingIndex, true, price, idx)
+            + RiskParamsLib.inventoryPnl(s.size, s.entryNotional, s.entryFundingIndex, false, price, idx);
     }
 
     /// @dev The reserve valued at `price`, as RiskParamsLib.adlReserve sizes it: ADL_RESERVE_BP of
@@ -74,20 +69,20 @@ contract InsuranceRedemptionHeadroomTest is IntegrationBase {
     function _reserveAt(uint256 price) internal view returns (uint256) {
         (
             uint256 longOI,
-            uint256 shortOI,,,,,
-            uint256 size,,,,
-            bool isLong,,
-            uint256 targetBp,,,,
-            uint128 trailingOiSize
+            uint256 shortOI,,,,,,
+            uint256 targetBp,,
+            uint128 trailingOiSize,
+            BazaarTypes.Inventory memory l,
+            BazaarTypes.Inventory memory s
         ) = pair.pairVault();
         uint256 oiSize = RiskParamsLib.reserveOiSizeOf(
-            RiskParamsLib.openInterestSizeOf(longOI, shortOI, size, isLong), trailingOiSize
+            RiskParamsLib.openInterestSizeOf(longOI, shortOI, l.size, s.size), trailingOiSize
         );
         return RiskParamsLib.adlReserveOf(oiSize, price, targetBp);
     }
 
     function _inventoryIsLong() internal view returns (bool isLong) {
-        (,,,,,,,,,, isLong,,,,,,) = pair.pairVault();
+        return VaultStore.read(address(pair), true).size != 0;
     }
 
     /// @dev The maintenance rate the payout cap derives its unload band from: the stored rate.
@@ -163,11 +158,10 @@ contract InsuranceRedemptionHeadroomTest is IntegrationBase {
         // One unit short: net = seized + entry - mark + funding index. The estates went bankrupt
         // the seizure above their entry.
         uint256 entry = uint256(net - int256(seized) + int256(MARK) - index);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(6).checked_write(BAZAAR_SCALE);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(7).checked_write(entry);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(8).checked_write(entry + seized);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(10).checked_write(false);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(13).checked_write(seized);
+        VaultStore.setSize(_stdstore, address(pair), false, BAZAAR_SCALE);
+        VaultStore.setEntryNotional(_stdstore, address(pair), false, entry);
+        VaultStore.setBankruptcyNotional(_stdstore, address(pair), false, entry + seized);
+        VaultStore.setSeized(_stdstore, address(pair), false, seized);
     }
 
     /// @dev Leave the vault holding one unit, long or short, at `stage` with a headroom set so
@@ -289,7 +283,7 @@ contract InsuranceRedemptionHeadroomTest is IntegrationBase {
     ///      plus the inventory's net position.
     function _unloadAtMark() internal {
         (uint256 free,, int256 net) = _fundAtMark();
-        (,,,,,,,,,,,,,, uint256 arrears,,) = pair.pairVault();
+        (,,,,,,,, uint256 arrears,,,) = pair.pairVault();
         assertEq(arrears, 0, "fixture: no arrears");
         _stageHeldInventory(pair, 0, 0, 0);
         _stdstore.target(address(pair)).sig("pairVault()").depth(5).checked_write(uint256(int256(free) + net));

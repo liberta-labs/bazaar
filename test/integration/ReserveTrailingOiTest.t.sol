@@ -5,6 +5,8 @@ import {IntegrationBase} from "./IntegrationBase.sol";
 import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 import {RiskParamsLib} from "../../src/libraries/RiskParamsLib.sol";
 
+import {VaultStore} from "../VaultStore.sol";
+
 /// @title ReserveTrailingOiTest
 /// @notice The fund's reserve is sized on the lower of live open interest and its lowest reading
 ///         over the trailing day. Open interest counts matched positions of one owner, so sized
@@ -21,11 +23,11 @@ contract ReserveTrailingOiTest is IntegrationBase {
     // ---------------------------- fixture ----------------------------
 
     function _trailingOi() internal view returns (uint256 t) {
-        (,,,,,,,,,,,,,,,, t) = pair.pairVault();
+        (,,,,,,,,, t,,) = pair.pairVault();
     }
 
     function _pendingLiqSize() internal view returns (uint256 size) {
-        (,,,,,, size,,,,,,,,,,) = pair.pairVault();
+        size = VaultStore.inventorySize(address(pair));
     }
 
     /// @dev Store a fresh mark at `priceUsd` as the keeper `after_` seconds on, which also advances
@@ -68,34 +70,39 @@ contract ReserveTrailingOiTest is IntegrationBase {
         (
             uint256 longOI,
             uint256 shortOI,,,,
-            uint256 fund,
-            uint256 size,
-            uint256 entryNotional,,
-            int256 entryFundingIndex,
-            bool isLong,,
+            uint256 fund,,
             uint256 targetBp,
-            uint256 seized,
-            uint256 arrears,,
-            uint256 trailing
+            uint256 arrears,
+            uint256 trailing,
+            BazaarTypes.Inventory memory l,
+            BazaarTypes.Inventory memory s
         ) = pair.pairVault();
         (uint256 spot,,,,) = pair.lastPairPrice();
+        uint256 seized = l.seized + s.seized;
         free = fund - seized;
         reserve = RiskParamsLib.adlReserveOf(
-            RiskParamsLib.reserveOiSizeOf(RiskParamsLib.openInterestSizeOf(longOI, shortOI, size, isLong), trailing),
+            RiskParamsLib.reserveOiSizeOf(RiskParamsLib.openInterestSizeOf(longOI, shortOI, l.size, s.size), trailing),
             spot,
             targetBp
         );
+        int256 idx = pair.currentFundingIndex();
         net = int256(seized + arrears)
-            + RiskParamsLib.inventoryPnl(
-                size, entryNotional, entryFundingIndex, isLong, spot, pair.currentFundingIndex()
-            );
+            + RiskParamsLib.inventoryPnl(l.size, l.entryNotional, l.entryFundingIndex, true, spot, idx)
+            + RiskParamsLib.inventoryPnl(s.size, s.entryNotional, s.entryFundingIndex, false, spot, idx);
     }
 
     /// @dev The insurance target in dollars on live open interest at the stored mark.
     function _targetOnLiveOi() internal view returns (uint256) {
-        (uint256 longOI, uint256 shortOI,,,,, uint256 size,,,, bool isLong,, uint256 targetBp,,,,) = pair.pairVault();
+        (
+            uint256 longOI,
+            uint256 shortOI,,,,,,
+            uint256 targetBp,,,
+            BazaarTypes.Inventory memory l,
+            BazaarTypes.Inventory memory s
+        ) = pair.pairVault();
         (uint256 spot,,,,) = pair.lastPairPrice();
-        return RiskParamsLib.openInterestSizeOf(longOI, shortOI, size, isLong) * spot / BAZAAR_SCALE * targetBp / 10_000;
+        return
+            RiskParamsLib.openInterestSizeOf(longOI, shortOI, l.size, s.size) * spot / BAZAAR_SCALE * targetBp / 10_000;
     }
 
     /// @dev Leave the vault long one unit with half the fund seized alongside it and a loss at the

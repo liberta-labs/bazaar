@@ -6,6 +6,8 @@ import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 import {RiskParamsLib} from "../../src/libraries/RiskParamsLib.sol";
 import {StdStorage, stdStorage} from "forge-std/Test.sol";
 
+import {VaultStore} from "../VaultStore.sol";
+
 /// @title UnloadVaultTest
 /// @notice Vault liquidation inventory crossing into the resting book: the unload bound (the
 ///         looser of the estates' fund-neutral price and the liquidation band
@@ -28,7 +30,7 @@ contract UnloadVaultTest is IntegrationBase {
     }
 
     function _pendingLiqSize() internal view returns (uint256 s) {
-        (,,,,,, s,,,,,,,,,,) = pair.pairVault();
+        s = VaultStore.inventorySize(address(pair));
     }
 
     /// @dev Inject inventory by raw notionals (1e18 scale). The gap between entry and bankruptcy
@@ -39,39 +41,43 @@ contract UnloadVaultTest is IntegrationBase {
         internal
     {
         uint256 seized = isLong ? entryNotional - bankruptcyNotional : bankruptcyNotional - entryNotional;
-        _stdstore.target(address(pair)).sig("pairVault()").depth(6).checked_write(size);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(7).checked_write(entryNotional);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(8).checked_write(bankruptcyNotional);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(10).checked_write(isLong);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(13).checked_write(seized);
+        VaultStore.setSize(_stdstore, address(pair), isLong, size);
+        VaultStore.setEntryNotional(_stdstore, address(pair), isLong, entryNotional);
+        VaultStore.setBankruptcyNotional(_stdstore, address(pair), isLong, bankruptcyNotional);
+        VaultStore.setSeized(_stdstore, address(pair), isLong, seized);
+    }
+
+    /// @dev The side the staged bucket sits on: the long bucket when it holds anything.
+    function _stagedSide() internal view returns (bool) {
+        return VaultStore.read(address(pair), true).size != 0;
     }
 
     /// @dev Seed the estates' entry funding index. With the live index at zero, an entry index of
     ///      −x means x of funding per unit has accrued since entry: paid by an inherited long,
     ///      received by an inherited short. Both raise the fund-neutral price by x.
     function _setVaultPendingLiqEntryFundingIndex(int256 idx) internal {
-        _stdstore.target(address(pair)).sig("pairVault()").depth(9).checked_write(uint256(idx));
+        VaultStore.setEntryFundingIndex(_stdstore, address(pair), _stagedSide(), idx);
     }
 
-    /// @dev Stamp the staged inventory's seizure time (Vault depth 15), which the unload floor
-    ///      opens from. Inventory staged without it reads as fully aged.
+    /// @dev Stamp the staged bucket's seizure time, which the unload floor opens from. Inventory
+    ///      staged without it reads as fully aged.
     function _setVaultPendingLiqSeizedTs(uint256 ts) internal {
-        _stdstore.enable_packed_slots().target(address(pair)).sig("pairVault()").depth(15).checked_write(ts);
+        VaultStore.setSeizedTs(_stdstore, address(pair), _stagedSide(), ts);
     }
 
     function _pendingLiqSeizedTs() internal view returns (uint64 ts) {
-        (,,,,,,,,,,,,,,, ts,) = pair.pairVault();
+        return VaultStore.read(address(pair), _stagedSide()).seizedTs;
     }
 
-    /// @dev Stage what the deposits ledger owes the fund (Vault depth 14). Written on its own,
+    /// @dev Stage what the deposits ledger owes the fund. Written on its own,
     ///      beside inventory whose seizure the ledger paid in full, it is a balance an earlier
     ///      inventory left behind.
     function _setVaultLedgerArrears(uint256 arrears) internal {
-        _stdstore.target(address(pair)).sig("pairVault()").depth(14).checked_write(arrears);
+        _stdstore.target(address(pair)).sig("pairVault()").depth(8).checked_write(arrears);
     }
 
     function _ledgerArrears() internal view returns (uint256 a) {
-        (,,,,,,,,,,,,,, a,,) = pair.pairVault();
+        (,,,,,,,, a,,,) = pair.pairVault();
     }
 
     /// @dev BazaarPair storage slot of the sample ring (`mmrBuffer`): 25 packed samples, ts in the
@@ -79,7 +85,7 @@ contract UnloadVaultTest is IntegrationBase {
     ///      packed cursor (head | count << 8 | lastSampleTs << 16 | intervalMinBp << 80 |
     ///      intervalMinOi << 112). `getLaggedMmr` is asserted after the write, so a stale pin
     ///      fails loudly.
-    uint256 internal constant SLOT_MMR_BUFFER = 66;
+    uint256 internal constant SLOT_MMR_BUFFER = 69;
 
     /// @dev Lay a single ring sample `mmrBp` stamped `ts`, the day's only and therefore lowest one.
     function _seedLaggedMmr(uint256 mmrBp, uint256 ts) internal {
@@ -112,13 +118,13 @@ contract UnloadVaultTest is IntegrationBase {
     }
 
     function _deficit() internal view returns (uint256 d) {
-        (,,,,,,,,,,, d,,,,,) = pair.pairVault();
+        (,,,,,, d,,,,,) = pair.pairVault();
     }
 
     /// @dev Storage slot of the pair's liquidation-outcome EMAs, the same pin BazaarPairLens reads
     ///      them by: +0 slippage line, +1 drift line (RiskParamsLib.GAP_EMA_SCALE units per bp),
     ///      +2 their anchors and the batch clock, +3 accumulated weight.
-    uint256 internal constant SLOT_LIQUIDATION_GAP_EMA = 43;
+    uint256 internal constant SLOT_LIQUIDATION_GAP_EMA = 46;
 
     /// @dev The stored EMAs as the last batch wrote them, in whole basis points. On a pair's first
     ///      batch each line is anchored at that batch, where the stored value is the reading.
@@ -837,7 +843,7 @@ contract UnloadVaultTest is IntegrationBase {
         _placeLimit(carol, true, BTC / 2, 50_000 * BAZAAR_SCALE);
 
         assertEq(_unloadVault(), BTC / 2, "half the inventory sold at the neutral price");
-        (,,,,,,,,,,,,, uint256 earmarkLeft,,,) = pair.pairVault();
+        uint256 earmarkLeft = _seizedTotal();
         assertEq(earmarkLeft, fund / 2, "half the seizure still earmarked");
         assertGe(_insuranceBal(), earmarkLeft, "the fund holds the earmark whole");
         assertLt(_claimFees(seq), 5e6, "the reward was capped under the 2 bp rate on $25,000");
@@ -1205,13 +1211,13 @@ contract UnloadVaultTest is IntegrationBase {
     ) internal {
         uint256 bankruptcyNotional = size * bankruptcyUsd;
         _setVaultPendingLiqRaw(size, bankruptcyNotional + seized + unpaid, bankruptcyNotional, true);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(13).checked_write(seized);
+        VaultStore.setSeized(_stdstore, address(pair), true, seized);
         _setVaultLedgerArrears(unpaid + leftover);
         _stdstore.target(address(pair)).sig("pairVault()").depth(5).checked_write(fund);
     }
 
     function _pendingLiqSeized() internal view returns (uint256 s) {
-        (,,,,,,,,,,,,, s,,,) = pair.pairVault();
+        s = _seizedTotal();
     }
 
     /// @notice A fill the walk takes as free leaves the pair as healthy as it found it. The vault
@@ -1298,7 +1304,7 @@ contract UnloadVaultTest is IntegrationBase {
         uint256 bk = 49_000 + bound(c.bankruptcyOffset, 0, 2_000);
         uint256 entry = c.shortInventory ? bk - c.collateral : bk + c.collateral;
         _setVaultPendingLiq(c.size * BTC, entry, bk, !c.shortInventory);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(13).checked_write(seized * BAZAAR_SCALE);
+        VaultStore.setSeized(_stdstore, address(pair), true, seized * BAZAAR_SCALE);
         _setVaultLedgerArrears(owed * BAZAAR_SCALE);
         // The live index is zero, so an entry index of −x means x a BTC has accrued since entry.
         int256 accrued = int256(bound(c.funding, 0, 200));
@@ -1367,7 +1373,7 @@ contract UnloadVaultTest is IntegrationBase {
         uint256 bk = c.shortInventory ? 50_000 + distance + lift : 50_000 - distance - lift;
         neutral = (c.shortInventory ? 50_000 + distance : 50_000 - distance) * BAZAAR_SCALE;
         _setVaultPendingLiq(size * BTC, c.shortInventory ? bk - collateral : bk + collateral, bk, !c.shortInventory);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(13).checked_write(seized * BAZAAR_SCALE);
+        VaultStore.setSeized(_stdstore, address(pair), true, seized * BAZAAR_SCALE);
         _setVaultLedgerArrears((total - seized + size * leftover) * BAZAAR_SCALE);
         int256 index = int256(accrued) * int256(BAZAAR_SCALE);
         _setVaultPendingLiqEntryFundingIndex(c.shortInventory == paid ? index : -index);

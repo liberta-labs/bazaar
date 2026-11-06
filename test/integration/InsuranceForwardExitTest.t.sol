@@ -26,7 +26,7 @@ contract InsuranceForwardExitTest is IntegrationBase {
     uint256 internal constant REOPEN_DELAY = InsuranceVaultLib.INSURANCE_WITHDRAWAL_REOPEN_CLAIM_DELAY;
     /// @dev InsuranceWithdrawalRateLimitState.withdrawnThisPeriod, from `forge inspect BazaarPair
     ///      storage-layout` (the lens pins the same slot).
-    uint256 internal constant SLOT_INSURANCE_RATE_LIMIT = 57;
+    uint256 internal constant SLOT_INSURANCE_RATE_LIMIT = 60;
 
     address internal keeper = makeAddr("keeper");
 
@@ -577,7 +577,7 @@ contract InsuranceForwardExitTest is IntegrationBase {
         uint256 terminalValue =
             pair.insuranceWithdrawalRequestShareAmount(carol) * _insuranceBal() / pair.totalInsuranceShares();
         assertGt(terminalValue, lockedAmount, "fixture: the terminal value exceeds the old lock");
-        bytes32 lockSlot = keccak256(abi.encode(carol, uint256(112))); // insuranceWithdrawalLock
+        bytes32 lockSlot = keccak256(abi.encode(carol, uint256(113))); // insuranceWithdrawalLock
         assertGt(uint256(vm.load(address(pair), lockSlot)), 0, "fixture: the pin reads the live lock");
         uint256 before = usdc.balanceOf(carol);
         _executeRedemption(pair, carol, new bytes[](0));

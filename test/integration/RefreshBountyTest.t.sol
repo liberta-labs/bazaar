@@ -328,13 +328,13 @@ contract RefreshBountyTest is IntegrationBase {
 
         vm.warp(vm.getBlockTimestamp() + HEARTBEAT + 1);
 
-        (,,,,, uint256 insuranceBefore,,,,,,,,,,,) = aaplPair.pairVault();
+        (,,,,, uint256 insuranceBefore,,,,,,) = aaplPair.pairVault();
         vm.prank(keeper);
         aaplPair.refreshPrice(new bytes[](0)); // stale fallback path: no store
 
         (uint256 owed,) = lens.claimableFees(address(aaplPair), keeper);
         assertEq(owed, 0, "stale fallback earns nothing");
-        (,,,,, uint256 insuranceAfter,,,,,,,,,,,) = aaplPair.pairVault();
+        (,,,,, uint256 insuranceAfter,,,,,,) = aaplPair.pairVault();
         assertEq(insuranceAfter, insuranceBefore, "insurance untouched");
     }
 

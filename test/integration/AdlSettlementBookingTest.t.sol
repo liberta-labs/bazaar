@@ -8,6 +8,8 @@ import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 import {FundingLib} from "../../src/libraries/FundingLib.sol";
 import {IntegrationBase} from "./IntegrationBase.sol";
 
+import {VaultStore} from "../VaultStore.sol";
+
 /// @title AdlSettlementBookingTest
 /// @notice ADL closes winners at the estates' average bankruptcy price, or at the mark when the
 ///         mark sits on the fund's favorable side of it, and settles the inventory slice through
@@ -30,7 +32,8 @@ contract AdlSettlementBookingTest is IntegrationBase {
     uint256 constant ESTATE_SIZE = 5 * BAZAAR_SCALE;
     uint256 constant PRICE_36K = 36_000 * BAZAAR_SCALE;
 
-    /// @dev Pending-liquidation aggregates a close is settled from.
+    /// @dev The long bucket's aggregates a close is settled from: the vault holds dave's long
+    ///      throughout, and the short bucket stays empty.
     struct Inventory {
         uint256 size;
         uint256 entryNotional;
@@ -74,11 +77,16 @@ contract AdlSettlementBookingTest is IntegrationBase {
     }
 
     function _deficit() internal view returns (uint256 d) {
-        (,,,,,,,,,,, d,,,,,) = pair.pairVault();
+        (,,,,,, d,,,,,) = pair.pairVault();
     }
 
     function _inventory() internal view returns (Inventory memory inv) {
-        (,,,,,, inv.size, inv.entryNotional, inv.bkNotional, inv.entryFundingIndex,,,, inv.seized,,,) = pair.pairVault();
+        (BazaarTypes.Inventory memory l,) = _vaultBuckets();
+        inv.size = l.size;
+        inv.entryNotional = l.entryNotional;
+        inv.bkNotional = l.bankruptcyNotional;
+        inv.entryFundingIndex = l.entryFundingIndex;
+        inv.seized = l.seized;
     }
 
     function _winner(address user) internal view returns (Winner memory w) {
@@ -97,13 +105,21 @@ contract AdlSettlementBookingTest is IntegrationBase {
         s.aliceCollBefore = _posCollateral(alice);
     }
 
-    /// @dev The vault's inventory valued from the liquidatees' entry, price and funding legs.
-    function _estateValue(uint256 price) internal view returns (int256) {
-        Inventory memory inv = _inventory();
-        if (inv.size == 0) return 0;
-        int256 cur = int256(inv.size * price / BAZAAR_SCALE);
-        int256 funding = (pair.currentFundingIndex() - inv.entryFundingIndex) * int256(inv.size) / int256(BAZAAR_SCALE);
-        return cur - int256(inv.entryNotional) - funding; // the vault holds longs throughout
+    /// @dev The vault's inventory valued from the liquidatees' entry, price and funding legs, both
+    ///      buckets together.
+    function _estateValue(uint256 price) internal view returns (int256 value) {
+        (BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) = _vaultBuckets();
+        int256 idx = pair.currentFundingIndex();
+        if (l.size != 0) {
+            int256 cur = int256(l.size * price / BAZAAR_SCALE);
+            int256 funding = (idx - l.entryFundingIndex) * int256(l.size) / int256(BAZAAR_SCALE);
+            value += cur - int256(l.entryNotional) - funding;
+        }
+        if (s.size != 0) {
+            int256 cur = int256(s.size * price / BAZAAR_SCALE);
+            int256 funding = (idx - s.entryFundingIndex) * int256(s.size) / int256(BAZAAR_SCALE);
+            value += int256(s.entryNotional) - cur + funding;
+        }
     }
 
     /// @dev The unload band the ADL gate reads: the lower of the current and the lagged
@@ -124,24 +140,26 @@ contract AdlSettlementBookingTest is IntegrationBase {
         (
             uint256 longOi,
             uint256 shortOi,,,,
-            uint256 fund,
-            uint256 pending,,,,
-            bool isLong,,
+            uint256 fund,,
             uint256 target,
-            uint256 seized,
-            uint256 arrears,,
-            uint128 trailing
+            uint256 arrears,
+            uint128 trailing,
+            BazaarTypes.Inventory memory l,
+            BazaarTypes.Inventory memory s
         ) = pair.pairVault();
-        uint256 longSide = isLong ? longOi + pending : longOi;
-        uint256 shortSide = isLong ? shortOi : shortOi + pending;
+        uint256 longSide = longOi + l.size;
+        uint256 shortSide = shortOi + s.size;
         uint256 live = longSide > shortSide ? longSide : shortSide;
         uint256 reserveOi = trailing != 0 && trailing < live ? trailing : live;
         uint256 reserveRate = target * BazaarTypes.ADL_RESERVE_BP;
         uint256 reserve = Math.mulDiv(Math.mulDiv(reserveOi, price, BAZAAR_SCALE), reserveRate, 1e8);
+        uint256 seized = l.seized + s.seized;
         uint256 free = fund > seized ? fund - seized : 0;
         base = free > reserve ? free - reserve : 0;
         uint256 bandBp = _bandBp();
-        uint256 bandEdge = price * (10_000 - bandBp) / 10_000;
+        // The edge sits against the vault's net exposure: below the mark while the long bucket is
+        // at least the short one, above it otherwise.
+        uint256 bandEdge = l.size >= s.size ? price * (10_000 - bandBp) / 10_000 : price * (10_000 + bandBp) / 10_000;
         int256 net = int256(seized + arrears) + _estateValue(bandEdge);
         worstFinish = net < 0 ? uint256(-net) : 0;
         perUnit = Math.mulDiv(price, bandBp, 10_000) + Math.mulDiv(price, reserveRate, 1e8);
@@ -214,7 +232,7 @@ contract AdlSettlementBookingTest is IntegrationBase {
     }
 
     function _writeInsurance(uint256 x) internal {
-        _stdstore.target(address(pair)).sig("pairVault()").depth(5).checked_write(x);
+        VaultStore.setInsuranceFundBalance(_stdstore, address(pair), x);
     }
 
     function _arr2(address a, address b) internal pure returns (address[] memory out) {
@@ -265,9 +283,9 @@ contract AdlSettlementBookingTest is IntegrationBase {
         vm.prank(seq);
         assertEq(pair.liquidate(_arr1(dave), pu), 1, "dave liquidated");
         assertTrue(pair.isAdlPending(), "ADL pending");
-        (,,,,,, uint256 pendSize,,,, bool pendIsLong,,,,,,) = pair.pairVault();
-        assertEq(pendSize, ESTATE_SIZE, "vault inherited 5 BTC");
-        assertTrue(pendIsLong, "vault holds the long");
+        (BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) = _vaultBuckets();
+        assertEq(l.size, ESTATE_SIZE, "the long bucket inherited 5 BTC");
+        assertEq(s.size, 0, "the short bucket is empty");
         _assertIdentity(PRICE_36K, "identity after the liquidation");
     }
 

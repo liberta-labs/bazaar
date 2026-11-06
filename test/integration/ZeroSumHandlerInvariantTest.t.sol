@@ -2,19 +2,24 @@
 pragma solidity 0.8.34;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IntegrationBase} from "./IntegrationBase.sol";
 import {BazaarPair} from "../../src/BazaarPair.sol";
 import {BazaarPairLens} from "../../src/BazaarPairLens.sol";
 import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 import {FundingLib} from "../../src/libraries/FundingLib.sol";
 import {AdlLib} from "../../src/libraries/AdlLib.sol";
+import {RiskParamsLib} from "../../src/libraries/RiskParamsLib.sol";
 import {OrderView} from "../OrderView.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {MockPyth} from "@pythnetwork/pyth-sdk-solidity/MockPyth.sol";
+import {VaultStore} from "../VaultStore.sol";
 
 /// @dev Stateful fuzzing handler for the conservation invariants. Drives deposits, withdrawals
 ///      (flat and against an open position), crossing trades, resting quotes, oracle moves,
-///      liquidations, vault unloads and auto-deleveraging over nine actors.
+///      liquidations on both sides of the vault's inventory, vault unloads and auto-deleveraging
+///      over nine actors.
 ///
 ///      The design problem this handler exists to solve is that conservation is easy to satisfy in
 ///      the states that are easy to reach. So it deliberately reaches the awkward ones: fill prices
@@ -92,10 +97,32 @@ contract ZeroSumHandler is Test {
     ///      no longer absorb the estates, so this counts sequences that reached the ADL regime and
     ///      resolved it, not calls made.
     uint256 public ghostAdlBatches;
-    /// @dev Deleverage calls the pair refused for cohort ordering. The handler ranks winners the
-    ///      way executeAdl requires — score descending, ties by ascending address — so this must
-    ///      stay at zero; a nonzero count means the ADL regime went untested behind the try.
-    uint256 public ghostAdlOrderRejects;
+    /// @dev Per-leg work, read off the batch's AdlExecuted event: batches whose long leg closed
+    ///      inventory against shorts, whose short leg closed inventory against longs, and that
+    ///      netted the two buckets' overlap at their end. Both legs are reached only once both
+    ///      buckets have arisen, so the two leg counters say whether the two-bucket auction was
+    ///      exercised at all rather than assumed.
+    uint256 public ghostAdlLongLegCloses;
+    uint256 public ghostAdlShortLegCloses;
+    uint256 public ghostAdlNettings;
+    /// @dev Deleverage calls whose entry health check released the window or fixed the settlement
+    ///      price before any batch ran: the window had already healed, or timed out.
+    uint256 public ghostAdlReleases;
+    /// @dev Deleverage calls the pair refused because no submitted account passed either leg's
+    ///      scan and nothing could be netted. The lens reports eligibility at the pair's stored
+    ///      mark and the batch ranks at the one it resolves, so a refusal is recorded, not
+    ///      asserted away.
+    uint256 public ghostAdlNoEligible;
+    /// @dev Batches that ran to the end and did nothing: no close on either leg, no netting. A
+    ///      cohort can legitimately close nothing — a hedged small bucket with no partner cohort,
+    ///      or winners under water at a bankruptcy-priced settlement — so this is recorded.
+    uint256 public ghostAdlIdleBatches;
+    /// @dev Deleverage calls that were bound to do work (_netSideCohortClosable), and how many of
+    ///      them did: closed on a leg, netted, released the window or fixed the settlement price.
+    ///      Asserted equal by afterInvariant, which is what makes a batch that silently does
+    ///      nothing against a closable cohort loud.
+    uint256 public ghostAdlNetSideChances;
+    uint256 public ghostAdlNetSideWork;
     /// @dev High-water mark of realized bad debt seen during the sequence, and whether the pair
     ///      ever froze. Both are outcomes the handler reaches rather than actions it takes, so
     ///      neither can be asserted per sequence without forcing the run to be pathological — they
@@ -112,12 +139,12 @@ contract ZeroSumHandler is Test {
     ///      enters the mark clamped at the band edge, the farthest any print can sit; what it adds
     ///      is its alpha of that edge.
     uint256 constant PREMIUM_BP = 500;
-    /// @dev High-water mark of the deferred-liquidation list: opposite-side seizures the fund
-    ///      could not afford to net, left open for the auction to close against their own
-    ///      counterparties. Reached only when an inventory the fund is already straining under
-    ///      meets a reversal deep enough to bankrupt the other side, so it is recorded rather
-    ///      than asserted.
-    uint256 public ghostMaxDeferred;
+    /// @dev Readings that found both buckets holding inventory at once: opposite-side seizures
+    ///      the fund could not afford to net, held hedged for the auction to close each against
+    ///      its own counterparties. Reached only when an inventory the fund is already straining
+    ///      under meets a reversal deep enough to bankrupt the other side, so it is recorded
+    ///      rather than asserted.
+    uint256 public ghostBothBuckets;
     /// @dev Whether an ADL window was open at ANY point in the sequence. Matching and
     ///      position-holder withdrawals are both frozen for as long as one is, so a sequence that
     ///      spent its calls inside a window had no honest opportunity to do either — and the
@@ -360,14 +387,15 @@ contract ZeroSumHandler is Test {
         address L = traders[bound(lSeed, 0, lastTradeable)];
         address S = traders[bound(sSeed, 0, lastTradeable)];
         if (L == S) return;
-        // Sized against the genesis insurance seed, not against the actors' balances. Realized
-        // bad debt is booked only where a loss lands on the fund all at once — an opposing
-        // liquidation netting two estates — and it needs that loss to outrun the seed plus both
-        // estates' seizures. A seizure is the loser's whole bucket: as little as a fifth of the
-        // notional at the warmup margin floor, a tenth after a withdrawal against the position.
-        // So the netting loss beats the seizures whenever the two entries are far enough apart,
-        // and beating the seed on top of that is a matter of size: with positions an order of
-        // magnitude below the seed no sequence realizes bad debt however far the mark travels.
+        // Sized against the genesis insurance seed, not against the actors' balances. Two
+        // estates seized on opposite sides are netted only where the overlap's loss fits the fund
+        // above its reserve plus both estates' seizures; past that they are held as two buckets,
+        // which is the regime the two-leg auction and the overlap invariant exist for. A seizure
+        // is the loser's whole bucket: as little as a fifth of the notional at the
+        // warmup margin floor, a tenth after a withdrawal against the position. So the overlap's
+        // loss beats the seizures whenever the two entries are far enough apart, and beating the
+        // seed on top of that is a matter of size: with positions an order of magnitude below the
+        // seed every netting fits and the second bucket never arises, however far the mark travels.
         uint256 size = bound(sizeSeed, 5e16, 1e18); // 0.05 - 1 BTC
 
         // Fund to a fuzzed LEVERAGE rather than a fuzzed dollar amount. A flat dollar target
@@ -446,10 +474,10 @@ contract ZeroSumHandler is Test {
     ///      right in. Pushed through refreshPrice so the mark lands even when no other action runs
     ///      in the same step, and so the pair's own health evaluation sees it.
     ///
-    ///      Half the moves land on a band edge. Realizing bad debt takes two estates seized at
-    ///      opposite ends of the band — a long taken near the top, a short taken near the bottom —
-    ///      netted against each other before the auction closes either, and uniform draws only
-    ///      rarely put both ends into one sequence.
+    ///      Half the moves land on a band edge. A second bucket takes two estates seized at
+    ///      opposite ends of the band — a long taken near the bottom, a short taken near the top —
+    ///      before the auction closes either, and uniform draws only rarely put both ends into one
+    ///      sequence.
     function movePrice(uint256 priceSeed) public {
         uint256 pick = priceSeed % 4;
         if (pick == 0) markUsd = MARK_MIN_USD;
@@ -470,9 +498,9 @@ contract ZeroSumHandler is Test {
     ///      vault owes on inventory it holds is what the estates' seized collateral does not
     ///      cover: the bankruptcy price embeds funding only up to the seizure, so everything
     ///      after it is paid by the fund, and the part beyond the fund's free capital and beyond
-    ///      what the closing winner's own funding income can absorb is booked as `deficit`. With
-    ///      the netting arm now refusing a loss it cannot afford, that is the only writer a
-    ///      sequence can still reach, and no action here was reaching it.
+    ///      what the closing winner's own funding income can absorb is booked as `deficit`. The
+    ///      netting refuses a loss the fund cannot afford, so the carry is the one writer of
+    ///      `deficit` a sequence can reach, and only this action supplies it.
     ///
     ///      Stepped rather than warped in one jump, because a single long step accrues almost
     ///      nothing: `FundingLib` credits at most MAX_FUNDING_AGE of elapsed time per update and
@@ -485,12 +513,16 @@ contract ZeroSumHandler is Test {
     ///      the share of the premium that fill adds — so a hold with no trading in it earns its
     ///      carry within the first hour and nothing afterwards. Landing a small cross each step
     ///      holds the premium up, which is the book a vault carrying inventory actually sits in.
-    ///      The cross is placed on the side that makes the vault's OWN inventory the payer: the
+    ///      The cross is placed on the side that makes the vault's NET inventory the payer: the
     ///      adverse direction is the one worth reaching, since funding the vault receives can
-    ///      never leave a claim unbacked. PREMIUM_BP sits above MAX_MARK_DEVIATION_BP so a peg
-    ///      print that rests at that distance enters at the band edge, the farthest any print can.
+    ///      never leave a claim unbacked. With two buckets the overlap's funding cancels and only
+    ///      the larger bucket's excess pays or receives, so the net side decides. PREMIUM_BP sits
+    ///      above MAX_MARK_DEVIATION_BP so a peg print that rests at that distance enters at the
+    ///      band edge, the farthest any print can.
     function accrueFunding(uint256 roundsSeed, uint256 actorSeed) public {
-        (,,,,,, uint256 inventory,,,, bool vaultIsLong,,,,,,) = pair.pairVault();
+        (BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) = _buckets();
+        uint256 inventory = l.size + s.size;
+        bool vaultIsLong = l.size >= s.size;
         if (inventory == 0) return; // nothing is carrying anything
         int256 indexBefore = pair.currentFundingIndex();
         uint256 rounds = bound(roundsSeed, 1, 6);
@@ -571,11 +603,36 @@ contract ZeroSumHandler is Test {
         _recordRegime();
     }
 
+    /// @dev Stage the second bucket: move the mark to the band edge that bankrupts the side
+    ///      opposite the vault's net inventory and liquidate everyone. A long bucket is seized on
+    ///      the way down, so a move to the top of the band is what takes the shorts out opposite
+    ///      it, and the reverse for a short bucket. Where the fund can afford to net the two
+    ///      estates the seizure nets them at once; where it cannot, both buckets stand, which is
+    ///      the regime the overlap invariant and the two-leg batch exist for. Silent when the
+    ///      vault holds nothing to stand opposite.
+    function reverseAndLiquidate(uint256) public {
+        (BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) = _buckets();
+        if (l.size == 0 && s.size == 0) return;
+        markUsd = l.size >= s.size ? MARK_MAX_USD : MARK_MIN_USD;
+        vm.warp(vm.getBlockTimestamp() + 4);
+        bytes[] memory pu = _pu(markUsd);
+        try pair.refreshPrice(pu) {
+            ghostPriceMoves++;
+        } catch {}
+        vm.warp(vm.getBlockTimestamp() + 4);
+        pu = _pu(markUsd);
+        try pair.liquidate(traders, pu) returns (uint256 count) {
+            ghostLiquidations += count;
+        } catch {}
+        _recordRegime();
+    }
+
     /// @dev Cross the vault's seized inventory back into the book. Without it the inventory only
     ///      accumulates: past the trigger the ADL latch freezes matching, and every later action in
     ///      the sequence starts failing for a reason that has nothing to do with what it tests.
     ///      This is the path that resolves the window, so it is what keeps a post-liquidation
-    ///      sequence alive long enough to be worth checking.
+    ///      sequence alive long enough to be worth checking. One walk works one bucket; the tail
+    ///      re-tests netting the two.
     function unloadInventory(uint256) public {
         vm.warp(vm.getBlockTimestamp() + 4);
         bytes[] memory pu = _pu(markUsd);
@@ -639,75 +696,134 @@ contract ZeroSumHandler is Test {
         } catch {}
     }
 
-    /// @dev Close profitable counterparties against the vault's inventory once the fund can no
-    ///      longer absorb it. The latch freezes matching and position-holder withdrawals, so a
+    /// @dev Close profitable counterparties against the vault's buckets once the fund can no
+    ///      longer absorb them. The latch freezes matching and position-holder withdrawals, so a
     ///      sequence that opens a window and never resolves it spends its remaining calls on
     ///      reverts; this is the path that ends the window the way the protocol intends.
     ///
     ///      The Dutch decay admits a realistically profitable account only in the auction's last
     ///      minute, and every other action here advances the clock by seconds, so this one jumps
     ///      past the decay: the threshold is then 1 and every profitable account qualifies — the
-    ///      auction's designed end state, not a way around it. Both cohorts are submitted: the
-    ///      side opposite the inventory closes the inventory, the inventory's own side closes
-    ///      the deferred liquidations, each in descending score order as the lens ranks them.
+    ///      auction's designed end state, not a way around it. One cohort per non-empty bucket:
+    ///      the shorts the lens reports eligible close the long bucket, the longs the short
+    ///      bucket. Each is submitted in actor order, since the batch sorts whatever it is given.
+    ///      Silent once a settlement price is fixed: the pair settles then and refuses a batch.
     function deleverage(uint256) public {
-        if (!pair.isAdlPending()) return;
+        if (!pair.isAdlPending() || pair.settlementPriceFixedTs() != 0) return;
         vm.warp(vm.getBlockTimestamp() + BazaarTypes.ADL_AUCTION_DURATION + 1);
-        bool adlLongs = pair.auxState().adlLongs;
-        address[] memory winners = _adlWinners(adlLongs);
-        address[] memory deferredWinners = _adlWinners(!adlLongs);
-        if (winners.length == 0 && deferredWinners.length == 0) return;
-        (,,,,,, uint256 inventoryBefore,,,,,,,,,,) = pair.pairVault();
+        (BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) = _buckets();
+        address[] memory longBucketWinners = l.size != 0 ? _adlWinners(false) : new address[](0);
+        address[] memory shortBucketWinners = s.size != 0 ? _adlWinners(true) : new address[](0);
+        if (longBucketWinners.length == 0 && shortBucketWinners.length == 0) return;
+        bool chance = _netSideCohortClosable(l, s);
+        if (chance) ghostAdlNetSideChances++;
+        uint256 inventoryBefore = l.size + s.size;
         bytes[] memory pu = _pu(markUsd);
-        try pair.executeAdl(winners, deferredWinners, pu) {
-            (,,,,,, uint256 inventoryAfter,,,,,,,,,,) = pair.pairVault();
-            if (inventoryAfter < inventoryBefore) ghostAdlBatches++;
+        vm.recordLogs();
+        try pair.executeAdl(longBucketWinners, shortBucketWinners, pu) {
+            (bool ran, uint256 longClosed, uint256 shortClosed, uint256 netted) = _adlExecuted(vm.getRecordedLogs());
+            if (longClosed > 0) ghostAdlLongLegCloses++;
+            if (shortClosed > 0) ghostAdlShortLegCloses++;
+            if (netted > 0) ghostAdlNettings++;
+            if (!ran) ghostAdlReleases++;
+            if (VaultStore.inventorySize(address(pair)) < inventoryBefore) ghostAdlBatches++;
+            bool worked = longClosed > 0 || shortClosed > 0 || netted > 0 || !pair.isAdlPending()
+                || pair.settlementPriceFixedTs() != 0;
+            if (chance && worked) ghostAdlNetSideWork++;
+            if (ran && !worked) ghostAdlIdleBatches++;
         } catch (bytes memory reason) {
-            bytes4 selector = bytes4(reason);
-            if (
-                selector == AdlLib.AdlLib__NotDescendingAdlScoreOrder.selector
-                    || selector == AdlLib.AdlLib__NotAscendingAddressTie.selector
-            ) ghostAdlOrderRejects++;
+            if (bytes4(reason) == AdlLib.AdlLib__NoEligibleWinners.selector) ghostAdlNoEligible++;
         }
         _recordRegime();
     }
 
-    /// @dev Every actor on `isLong`'s side the lens reports eligible, in the order executeAdl
-    ///      requires: descending score, ties by ascending address.
+    /// @dev Every actor on `isLong`'s side the lens reports eligible, in actor order.
     function _adlWinners(bool isLong) internal view returns (address[] memory winners) {
         uint256 n = traders.length;
-        address[] memory sorted = new address[](n);
-        uint256[] memory scores = new uint256[](n);
+        address[] memory found = new address[](n);
         uint256 count;
         for (uint256 i = 0; i < n; i++) {
-            (bool side,,,,,,) = pair.positionBuckets(traders[i]);
-            if (side != isLong) continue;
-            (uint256 score, bool eligible) = lens.getAdlScore(address(pair), traders[i]);
+            (bool side, uint256 size,,,,,) = pair.positionBuckets(traders[i]);
+            if (size == 0 || side != isLong) continue;
+            (, bool eligible) = lens.getAdlScore(address(pair), traders[i]);
             if (!eligible) continue;
-            uint256 j = count;
-            while (j > 0 && (scores[j - 1] < score || (scores[j - 1] == score && sorted[j - 1] > traders[i]))) {
-                sorted[j] = sorted[j - 1];
-                scores[j] = scores[j - 1];
-                j--;
-            }
-            sorted[j] = traders[i];
-            scores[j] = score;
-            count++;
+            found[count++] = traders[i];
         }
         winners = new address[](count);
         for (uint256 i = 0; i < count; i++) {
-            winners[i] = sorted[i];
+            winners[i] = found[i];
         }
     }
 
-    /// @dev Sample the two regime markers after any action that can move them. Reading them from
+    /// @dev Whether the batch about to run is bound to do work. The larger bucket's leg always
+    ///      gains per unit closed — its settlement price lies on the fund's favorable side of the
+    ///      mark and the band edge on the adverse side — so while the window stands uncovered it
+    ///      sizes a close, and a winner in profit at that settlement price is not skipped there;
+    ///      where the entry health check finds the window healed or timed out instead, the call
+    ///      releases it or fixes the settlement price, which is work too. So the batch is bound to
+    ///      do work when a submitted account on the larger bucket's cohort is eligible per the
+    ///      lens and at least $10 in profit at the bucket's settlement price, provided the lens
+    ///      and the batch agree on the mark: the pair's stored price is the one the batch will
+    ///      resolve, and the store is not a reopen that would restart the Dutch decay the lens
+    ///      judged eligibility against. Equal buckets are excluded: with no excess on either side,
+    ///      a winning leg whose counterpart has no cohort has nothing it can close without eating
+    ///      the overlap. The $10 margin covers the funding the batch's own price store accrues
+    ///      between this reading and the close.
+    function _netSideCohortClosable(BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s)
+        internal
+        view
+        returns (bool)
+    {
+        if (l.size == s.size) return false;
+        (uint256 spot,, uint256 lastTs,,) = pair.lastPairPrice();
+        uint256 mark = markUsd * SCALE;
+        if (spot != mark) return false;
+        if (vm.getBlockTimestamp() - lastTs >= RiskParamsLib.REOPEN_GAP_MIN_STALENESS) return false;
+        bool big = l.size > s.size;
+        BazaarTypes.Inventory memory b = big ? l : s;
+        uint256 bankruptcy =
+            Math.mulDiv(b.bankruptcyNotional, SCALE, b.size, big ? Math.Rounding.Ceil : Math.Rounding.Floor);
+        uint256 settlement = big ? (bankruptcy > mark ? bankruptcy : mark) : (bankruptcy < mark ? bankruptcy : mark);
+        for (uint256 i = 0; i < traders.length; i++) {
+            (bool side, uint256 size,,,,,) = pair.positionBuckets(traders[i]);
+            if (size == 0 || side == big) continue;
+            (, bool eligible) = lens.getAdlScore(address(pair), traders[i]);
+            if (!eligible) continue;
+            if (lens.checkBucketSolvency(address(pair), traders[i], settlement).totalPnl >= 10 * int256(SCALE)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// @dev The batch's AdlExecuted figures, if a batch ran: what each leg closed and what the
+    ///      batch netted. `ran` is false when the call's entry health check skipped the batch.
+    function _adlExecuted(Vm.Log[] memory logs)
+        internal
+        view
+        returns (bool ran, uint256 longClosed, uint256 shortClosed, uint256 netted)
+    {
+        bytes32 sig = keccak256("AdlExecuted(bytes32,uint256,address,uint256,uint256,uint256,uint256,uint256,uint256)");
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter != address(pair) || logs[i].topics[0] != sig) continue;
+            (longClosed,, shortClosed,, netted,) =
+                abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256, uint256));
+            return (true, longClosed, shortClosed, netted);
+        }
+    }
+
+    /// @dev The vault's two buckets.
+    function _buckets() internal view returns (BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) {
+        (,,,,,,,,,, l, s) = pair.pairVault();
+    }
+
+    /// @dev Sample the regime markers after any action that can move them. Reading them from
     ///      the invariant would be cleaner but those run view-only, and these have to accumulate.
     function _recordRegime() internal {
-        (,,,,,,,,,,, uint256 deficit,,,,,) = pair.pairVault();
+        (,,,,,, uint256 deficit,,,, BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) = pair.pairVault();
         if (deficit > ghostMaxDeficit) ghostMaxDeficit = deficit;
         if (pair.settlementPriceFixedTs() != 0) ghostFroze = true;
-        uint256 deferred = pair.auxState().deferredCount;
-        if (deferred > ghostMaxDeferred) ghostMaxDeferred = deferred;
+        if (l.size != 0 && s.size != 0) ghostBothBuckets++;
         if (pair.isAdlPending()) ghostAdlEverPending = true;
     }
 
@@ -769,15 +885,24 @@ contract ZeroSumHandlerInvariantTest is IntegrationBase {
         equity += pricePnl + fundingPnl;
     }
 
-    /// @dev Vault pendingLiq inventory marked at (p, f). Mirrors ZeroSumInvariantTest.
+    /// @dev The vault's two buckets marked at (p, f): each bucket's price PnL vs its entry basis
+    ///      plus funding from the liquidatees' entry-weighted index. Mirrors ZeroSumInvariantTest.
     function _vaultInventoryAt(uint256 p, int256 f) internal view returns (int256 value) {
-        (,,,,,, uint256 plSize, uint256 plEntry,, int256 plFundIdx, bool plIsLong,,,,,,) = pair.pairVault();
-        if (plSize == 0) return 0;
-        int256 notional = int256(plSize * p / BAZAAR_SCALE);
-        int256 pricePnl = plIsLong ? notional - int256(plEntry) : int256(plEntry) - notional;
-        int256 rawFunding = (f - plFundIdx) * int256(plSize) / int256(BAZAAR_SCALE);
-        int256 windowFunding = plIsLong ? -rawFunding : rawFunding;
-        value = pricePnl + windowFunding;
+        (,,,,,,,,,, BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) = pair.pairVault();
+        value = _bucketValueAt(l, true, p, f) + _bucketValueAt(s, false, p, f);
+    }
+
+    function _bucketValueAt(BazaarTypes.Inventory memory b, bool isLong, uint256 p, int256 f)
+        internal
+        pure
+        returns (int256)
+    {
+        if (b.size == 0) return 0;
+        int256 notional = int256(b.size * p / BAZAAR_SCALE);
+        int256 pricePnl = isLong ? notional - int256(b.entryNotional) : int256(b.entryNotional) - notional;
+        int256 rawFunding = (f - b.entryFundingIndex) * int256(b.size) / int256(BAZAAR_SCALE);
+        int256 windowFunding = isLong ? -rawFunding : rawFunding;
+        return pricePnl + windowFunding;
     }
 
     /// @dev The mark every leg of the conservation sum is valued at. Conservation does not depend
@@ -870,7 +995,7 @@ contract ZeroSumHandlerInvariantTest is IntegrationBase {
     ///         Marked at the pair's own price while it is live and at the fixed settlement price
     ///         once one is set, so the identity holds across the freeze that bad debt triggers.
     function invariant_zeroSum() public view {
-        (,,,,, uint256 I,,,,,, uint256 deficit,,, uint256 arrears,,) = pair.pairVault();
+        (,,,,, uint256 I, uint256 deficit,, uint256 arrears,,,) = pair.pairVault();
         BazaarTypes.AuxState memory aux = pair.auxState();
         // Once a settlement price is fixed, every leg is valued at it. The stored mark and the
         // funding index stop advancing at the fix, and terminal settlement realizes each position
@@ -935,24 +1060,26 @@ contract ZeroSumHandlerInvariantTest is IntegrationBase {
             if (isLong) longSum += size;
             else shortSum += size;
         }
-        (uint256 totalLongOI, uint256 totalShortOI,,,,,,,,,,,,,,,) = pair.pairVault();
+        (uint256 totalLongOI, uint256 totalShortOI,,,,,,,,,,) = pair.pairVault();
         assertEq(totalLongOI, longSum, "totalLongOI == sum of long position sizes");
         assertEq(totalShortOI, shortSum, "totalShortOI == sum of short position sizes");
     }
 
-    /// @notice A deferred liquidation is listed only while an ADL window is open. The list exists
-    ///         for a window's auction, and every health check that leaves no window open empties
-    ///         it; an entry outliving its window would be a liquidation candidate the gate keeps
-    ///         walking and a later window could open on without anyone re-testing its netting.
-    ///         Exact on this pair: it is continuously traded, so no verdict runs on the stale
-    ///         fallback, the one case that keeps an entry with no window stored. Past a fixed
-    ///         settlement price the pair settles instead of judging health and the window is
-    ///         retired at finalize, so the check stops there.
-    function invariant_deferredListedOnlyInsideWindow() public view {
-        if (pair.settlementPriceFixedTs() != 0) return;
-        if (pair.auxState().deferredCount != 0) {
-            assertTrue(pair.isAdlPending(), "a deferred liquidation is listed with no window open");
-        }
+    /// @notice The two buckets hold inventory at once only while netting their overlap would
+    ///         realize a loss. Every path that changes a bucket re-tests the netting in the same
+    ///         call — an absorb, an unload walk's tail, an auction batch — and a gain is netted
+    ///         there and then (RiskParamsLib.tryNetBuckets), so a surviving overlap is always a
+    ///         loss the fund could not afford when it was last tested. The overlap's realization
+    ///         is the gap between the two sides' entry bases plus the offset of their entry clocks
+    ///         (RiskParamsLib.overlap); no price or funding move changes it, so the check needs no
+    ///         mark and holds across the freeze a fixed settlement price brings.
+    function invariant_overlapSurvivesOnlyAtALoss() public view {
+        (,,,,,,,,,, BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) = pair.pairVault();
+        if (l.size == 0 || s.size == 0) return;
+        uint256 o = l.size < s.size ? l.size : s.size;
+        int256 pnl = int256(Math.mulDiv(s.entryNotional, o, s.size)) - int256(Math.mulDiv(l.entryNotional, o, l.size))
+            + (l.entryFundingIndex - s.entryFundingIndex) * int256(o) / int256(BAZAAR_SCALE);
+        assertLt(pnl, 0, "both buckets hold inventory although netting their overlap would be a gain");
     }
 
     /// @notice Every handler action reached its success path at least once in this run.
@@ -971,7 +1098,18 @@ contract ZeroSumHandlerInvariantTest is IntegrationBase {
     ///      failure. The conservation invariants keep running across the freeze; only the
     ///      liveness-shaped coverage claims are suspended.
     function afterInvariant() public view {
-        assertEq(handler.ghostAdlOrderRejects(), 0, "a deleverage batch was refused for cohort ordering");
+        // A deleverage run while the larger bucket's cohort held a winner in profit at that
+        // bucket's settlement price must have done something: closed on a leg, netted the
+        // overlap, released the window or fixed the settlement price. Gated on that opportunity
+        // (ZeroSumHandler._netSideCohortClosable), since a cohort can legitimately close nothing
+        // — a hedged small bucket with no partner cohort, winners under water at a
+        // bankruptcy-priced settlement — and a sequence whose windows never offered one has
+        // nothing to assert.
+        assertEq(
+            handler.ghostAdlNetSideChances(),
+            handler.ghostAdlNetSideWork(),
+            "a deleverage with a closable net-side cohort did nothing"
+        );
         if (pair.settlementPriceFixedTs() != 0) return;
         assertGt(handler.ghostDeposits(), 0, "no deposit landed");
         assertGt(handler.ghostTrades(), 0, "no order was placed");

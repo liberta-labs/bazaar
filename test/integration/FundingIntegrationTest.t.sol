@@ -71,15 +71,16 @@ contract FundingIntegrationTest is IntegrationBase {
         BazaarTypes.AuxState memory a = pair.auxState();
         s.lastMarkUpdateTs = a.lastMarkUpdateTs;
         s.rollingVolume = a.rollingVolume;
-        s.premiumNotional = int256(uint256(vm.load(address(pair), bytes32(uint256(63)))));
+        s.premiumNotional = int256(uint256(vm.load(address(pair), bytes32(uint256(66)))));
     }
 
     /// @dev Per-side open interest, counting the vault's inventory on its side, as the floor is
     ///      sized (RiskParamsLib.openInterestSize).
     function _oiSize() internal view returns (uint256) {
-        (uint256 l, uint256 s,,,,, uint256 pend,,,, bool pendLong,,,,,,) = pair.pairVault();
-        if (pendLong) l += pend;
-        else s += pend;
+        (uint256 l, uint256 s,,,,,,,,, BazaarTypes.Inventory memory li, BazaarTypes.Inventory memory si) =
+            pair.pairVault();
+        l += li.size;
+        s += si.size;
         return l > s ? l : s;
     }
 

@@ -18,11 +18,11 @@ contract InsuranceSharePriceTest is IntegrationBase {
     uint256 constant AAPL_MARK = 150 * BAZAAR_SCALE;
 
     function _insuranceBalance() internal view returns (uint256 b) {
-        (,,,,, b,,,,,,,,,,,) = pair.pairVault();
+        (,,,,, b,,,,,,) = pair.pairVault();
     }
 
     function _fundOf(BazaarPair target) internal view returns (uint256 b) {
-        (,,,,, b,,,,,,,,,,,) = target.pairVault();
+        (,,,,, b,,,,,,) = target.pairVault();
     }
 
     function _requestAll(address user) internal returns (uint256 shares) {
@@ -59,7 +59,7 @@ contract InsuranceSharePriceTest is IntegrationBase {
     }
 
     function _cachedTargetBp() internal view returns (uint256 t) {
-        (,,,,,,,,,,,, t,,,,) = pair.pairVault();
+        (,,,,,,, t,,,,) = pair.pairVault();
     }
 
     /// @dev Direct deposit into `target` carrying `pu` as the price update.

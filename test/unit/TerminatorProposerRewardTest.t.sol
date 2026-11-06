@@ -21,8 +21,8 @@ contract PayRewardHarness {
     /// @dev Collateral seized alongside inventory the vault still holds, which the fund holds but
     ///      may not spend.
     function setEarmark(uint256 amount) external {
-        vault.pendingLiqSeized = amount;
-        vault.pendingLiqSize = amount == 0 ? 0 : 1e18;
+        vault.longInv.seized = amount;
+        vault.longInv.size = amount == 0 ? 0 : 1e18;
     }
 
     function insurance() external view returns (uint256) {

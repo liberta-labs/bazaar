@@ -49,9 +49,10 @@ contract MarkDecayClockTest is IntegrationBase {
     /// @dev The volume floor at the oracle: 2% of per-side open interest, counting the vault's
     ///      inventory on its side.
     function _floor() internal view returns (uint256) {
-        (uint256 l, uint256 s,,,,, uint256 pend,,,, bool pendLong,,,,,,) = pair.pairVault();
-        if (pendLong) l += pend;
-        else s += pend;
+        (uint256 l, uint256 s,,,,,,,,, BazaarTypes.Inventory memory li, BazaarTypes.Inventory memory si) =
+            pair.pairVault();
+        l += li.size;
+        s += si.size;
         return FundingLib.floorVolumeOf(l > s ? l : s, ORACLE);
     }
 

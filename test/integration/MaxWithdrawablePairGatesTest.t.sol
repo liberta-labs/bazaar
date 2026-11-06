@@ -111,7 +111,7 @@ contract MaxWithdrawablePairGatesTest is IntegrationBase {
         _openPosition(alice, bob, true, BAZAAR_SCALE);
         _deposit(dave, 10_000 * BAZAAR_SCALE);
         _placeLimit(dave, true, BAZAAR_SCALE / 10, 40_000 * BAZAAR_SCALE); // resting, won't cross
-        _stdstore.target(address(pair)).sig("pairVault()").depth(11).checked_write(uint256(1));
+        _stdstore.target(address(pair)).sig("pairVault()").depth(6).checked_write(uint256(1));
 
         assertEq(_quote(carol, 0), 1_000 * BAZAAR_SCALE, "unpriced account is not judged on bad debt");
         assertEq(_quote(alice, LOW_BRACKET), 0, "position holder");

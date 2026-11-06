@@ -12,29 +12,24 @@ import {RiskParamsLib} from "./RiskParamsLib.sol";
 import {OrderBookLib} from "./OrderBookLib.sol";
 
 /// @title AdlLib
-/// @notice External library for Auto-Deleveraging (ADL) logic. Runs via DELEGATECALL with BazaarPair storage.
-///         Uses O(1) aggregate decrement instead of O(n) FIFO queue popping.
-///         Settlement price = the estates' average bankruptcy price,
-///         pendingLiqBankruptcyNotional / pendingLiqSize, or the mark when the mark sits on the
-///         fund's favorable side of it. A batch settles there the inventory its restoring figure
-///         calls for (_sizeToRestoreHealth) and closes past that at the mark.
+/// @notice External library for Auto-Deleveraging (ADL) logic. Runs via DELEGATECALL with
+///         BazaarPair storage. Uses O(1) aggregate decrement instead of O(n) FIFO queue popping.
 ///
-///         One batch works two independent problems, each against its own counterparties. The
-///         vault's inventory is closed against the cohort on the opposite side, as the auction
-///         always has. Liquidations the vault could not take — accounts on the opposite side
-///         whose netting against the inventory would have cost the fund more than it may spend,
-///         recorded as deferred by LiquidationLib — are closed against the cohort on the
-///         inventory's own side: each is seized inside the batch, its counterparties are settled
-///         against it at its own bankruptcy price, or at the mark when the mark sits on the
-///         fund's favorable side of it, and nothing of it outlives the transaction.
-///         The two meet only through the fund: when no cohort covers a deferred account, the
-///         inventory leg closes enough inventory for the fund to afford netting it, and the fund
-///         pays what it can afford, as the liquidation that deferred it would have. The units
-///         closed for that purpose settle at the mark, so the inventory's winners bear none of
-///         the deferred account's loss. Netting the two
-///         sides against each other at the oracle
-///         would instead charge the fund a loss that belongs to the deferred accounts' winners,
-///         which is the case deferral exists to avoid.
+///         The vault holds two buckets, liquidated longs and liquidated shorts, and one batch runs
+///         one leg per bucket: the long bucket is closed against profitable shorts, the short
+///         bucket against profitable longs, each at its own settlement price — the bucket's
+///         average bankruptcy price, or the mark when the mark sits on the fund's favorable side
+///         of it — so a bucket's shortfall lands on that bucket's own counterparties and the fund
+///         pays nothing on a close. Every cohort is scored at the price the call resolved and
+///         sorted here, so a keeper submits its winners in any order and a newer tick cannot
+///         reorder a batch out from under it.
+///
+///         The two legs meet only through the fund. Where the losing bucket's cohort cannot make
+///         progress on its own because the bucket is hedged by the other one, its units are closed
+///         in pairs with the winning bucket's; where the losing bucket has no cohort at all, the
+///         winning bucket is closed at the mark until the fund can afford to net the two, and the
+///         fund pays what it can afford, as a liquidation would have. Every batch ends by netting
+///         the buckets' overlap if the fund can then afford it (RiskParamsLib.tryNetBuckets).
 library AdlLib {
     // -------------------- Constants --------------------
 
@@ -49,20 +44,12 @@ library AdlLib {
     ///      smallest amount the pair can pay anyone.
     uint256 internal constant ROUNDING_ALLOWANCE = BAZAAR_SCALE / BazaarTypes.USDC_SCALE;
 
-    /// @dev The inventory leg's planned close when the batch made no plan: no listed account is
-    ///      past its collateral, or the leg did not run. No close equals it, so such a batch never
-    ///      reads as having closed what it planned.
-    uint256 internal constant NO_PLAN = type(uint256).max;
-
     // -------------------- Errors --------------------
 
     error AdlLib__EmptySubmission();
     error AdlLib__TooManyWinners(uint256 count, uint256 max);
     error AdlLib__NoPendingLiquidations();
     error AdlLib__NoEligibleWinners();
-    error AdlLib__NotDescendingAdlScoreOrder(uint256 adlScore, uint256 prevScore);
-    error AdlLib__NotAscendingAddressTie(address user, address prevUser);
-    error AdlLib__CohortDidNotCover(uint256 uncovered);
 
     // -------------------- Structs --------------------
 
@@ -76,10 +63,9 @@ library AdlLib {
         uint256 sliceEntry;
     }
 
-    /// @notice An inventory the batch closes winners against: the vault's own aggregate loaded
-    ///         from storage, or a deferred account seized for the duration of one batch.
-    /// @dev The same fields as the vault's pending-liquidation aggregate. Closes decrement it
-    ///      pro rata in memory; only the vault's own copy is written back.
+    /// @notice A bucket as a leg works it: the vault's aggregate loaded from storage.
+    /// @dev The same fields as BazaarTypes.Inventory, with the side made explicit. Closes
+    ///      decrement it pro rata in memory and write it back after each one.
     struct Inventory {
         uint256 size;
         uint256 entryNotional;
@@ -89,28 +75,59 @@ library AdlLib {
         bool isLong;
     }
 
-    /// @notice What the batch earns its executor, accumulated across both phases and paid once,
-    ///         and how many deferred accounts it seized on the way.
-    /// @param seizure The seizure reward of every deferred account seized in the batch, each on
-    ///        what the batch retires with it (LiquidationLib.seizureReward)
-    /// @param averted The bad debt the closes against deferred accounts averted, rewarded at
-    ///        ADL_EXECUTOR_REWARD_BP
-    /// @param seized The number of deferred accounts seized: closed against their cohort, netted
-    ///        into the inventory or made the inventory
-    /// @param closes What the inventory leg's paid units earn (_closeReward)
-    /// @param carried The inventory the fund could carry as the batch began: its size less the
-    ///        restoring figure read before the deferred pass; 0 when nothing is listed for that
-    ///        pass, or when the fund could carry none of it
-    /// @param paidSize The most of the leg's close that earns `closes`: the inventory left to the
-    ///        leg, less `carried` and less the accounts listed past their collateral, which the
-    ///        batch absorbs once the leg has closed (_listedNettings)
+    /// @notice One leg of the batch: a bucket and the cohort submitted to close it.
+    /// @param isLong The bucket's side; the cohort is the other side
+    /// @param inv The bucket as loaded, decremented by the leg's closes
+    /// @param settlementPrice The price the leg settles at (_settlementPrice)
+    /// @param order Indices into the submitted cohort of the winners the scan admitted, sorted by
+    ///        descending score and ascending address, duplicates dropped
+    /// @param scores Each admitted winner's score, aligned with `order`
+    /// @param eligibleSize The size the admitted winners cover, capped at the bucket
+    /// @param eligibleCount The admitted winners counted toward that size
+    /// @param highestAdlScore The first admitted winner's score
+    /// @param lowestAdlScore The last admitted winner's score
+    /// @param closed The size the leg closed
+    /// @param ran True once the leg has been executed: a leg runs once per batch, so nothing can
+    ///        be sized as pairs against it afterwards (_sizeToRestoreHealth)
+    struct Leg {
+        bool isLong;
+        Inventory inv;
+        uint256 settlementPrice;
+        uint256[] order;
+        uint256[] scores;
+        uint256 eligibleSize;
+        uint256 eligibleCount;
+        uint256 highestAdlScore;
+        uint256 lowestAdlScore;
+        uint256 closed;
+        bool ran;
+    }
+
+    /// @notice The vault-wide figures a close is sized against.
+    /// @param edge The unload band's edge against the vault's net exposure
+    /// @param edgeAgainstLong The band's lower edge, the one a long bucket is finished at
+    /// @param edgeAgainstShort The band's upper edge, the one a short bucket is finished at
+    /// @param finish What finishing the whole inventory at `edge` would cost beyond its earmark;
+    ///        0 when the earmark covers the loss there
+    /// @param budget The balance less the earmark and the reserve, plus the arrears: negative by
+    ///        any shortfall below the reserve, or below the earmark itself
+    /// @param heldBack Live open interest above the trailing reading the reserve is sized on:
+    ///        units that close without releasing any reserve
+    struct Figures {
+        uint256 edge;
+        uint256 edgeAgainstLong;
+        uint256 edgeAgainstShort;
+        uint256 finish;
+        int256 budget;
+        uint256 heldBack;
+    }
+
+    /// @notice What the batch earns its executor, paid once.
+    /// @param closes What the legs' closes earn (_closeReward)
+    /// @param netting The keeper rate on what the batch's netting retired
     struct Rewards {
-        uint256 seizure;
-        uint256 averted;
-        uint256 seized;
         uint256 closes;
-        uint256 carried;
-        uint256 paidSize;
+        uint256 netting;
     }
 
     // -------------------- Events --------------------
@@ -123,10 +140,9 @@ library AdlLib {
     /// @param realizedPnl The amount credited to the winner's collateral: PnL at the settlement
     ///        price with the live funding index, less `withheldFunding`
     /// @param remainingCollateral The winner's collateral after the credit
-    /// @param adlScore The winner's score against the frozen snapshot
-    /// @param adlSettlementPrice The price the close settled at: the estates' average bankruptcy
-    ///        price, or the mark when the mark sat on the fund's favorable side of it or the
-    ///        close was past the batch's restoring figure and the fund could pay for it there
+    /// @param adlScore The winner's score at the price the batch resolved
+    /// @param adlSettlementPrice The price the close settled at: the bucket's average bankruptcy
+    ///        price, or the mark when the mark sat on the fund's favorable side of it
     /// @param withheldFunding What the insurance fund could not back and therefore did not pay;
     ///        bounded by the winner's funding income on the closed size, or by ROUNDING_ALLOWANCE
     ///        where that is larger, and by the credit
@@ -149,382 +165,209 @@ library AdlLib {
     ///      writes an ABI that includes it.
     /// @param pairId The pair
     /// @param adlId The batch's sequence number on the pair
-    /// @param adlLongs The side the window targets: the winners opposite the vault's inventory
     /// @param submitter The executor, credited with the batch's rewards
-    /// @param highestBankruptcyPrice The higher of the prices the inventory leg settled at
-    /// @param lowestBankruptcyPrice The lower of them. The leg settles at the estates' average
-    ///        bankruptcy price, or at the mark when the mark sits on the fund's favorable side of
-    ///        it, and settles at the mark what it closes past its restoring figure. Both fields
-    ///        hold the settlement price when nothing closed at the mark, including when the leg
-    ///        closed nothing, and are zero when the leg did not run: no inventory opposite the
-    ///        targeted side, or neither winners nor listed accounts to size it for
-    /// @param highestAdlScore The inventory leg's first admitted winner's score
-    /// @param lowestAdlScore Its last admitted winner's score
-    /// @param adlSnapshotPrice The window's frozen ranking price
+    /// @param longBucketClosed The size closed off the long bucket, against shorts
+    /// @param longBucketSettlementPrice The long leg's settlement price; 0 when the leg did not run
+    /// @param shortBucketClosed The size closed off the short bucket, against longs
+    /// @param shortBucketSettlementPrice The short leg's settlement price; 0 when the leg did not run
+    /// @param netted The overlap netted bucket against bucket at the end of the batch
     /// @param timestamp The block timestamp
     event AdlExecuted(
         bytes32 indexed pairId,
         uint256 indexed adlId,
-        bool adlLongs,
         address indexed submitter,
-        uint256 highestBankruptcyPrice,
-        uint256 lowestBankruptcyPrice,
-        uint256 highestAdlScore,
-        uint256 lowestAdlScore,
-        uint256 adlSnapshotPrice,
+        uint256 longBucketClosed,
+        uint256 longBucketSettlementPrice,
+        uint256 shortBucketClosed,
+        uint256 shortBucketSettlementPrice,
+        uint256 netted,
         uint256 timestamp
     );
 
     // -------------------- External Functions --------------------
 
-    /// @notice Core ADL execution: close deferred accounts against their own counterparties,
-    ///         close the vault's inventory against its opposite cohort, seize what deferrals
-    ///         remain once the inventory is gone, and pay the executor.
+    /// @notice Core ADL execution: close each bucket against its own cohort, net the buckets'
+    ///         overlap where the fund can afford it, and pay the executor.
     /// @dev Called via DELEGATECALL from BazaarPair.executeAdl, which re-evaluates vault health
-    ///      after this returns. Rewards accrue to msg.sender's claimable balance here: the
-    ///      seizure reward of every deferred account taken in the batch, ADL_EXECUTOR_REWARD_BP
-    ///      of the bad debt the closes against those accounts averted, and for the inventory leg
-    ///      the keeper rate on the units its restoring figure calls for, or that share of the bad
-    ///      debt their close averts where larger (_closeReward), capped together at the fund's
-    ///      free capital — the earmark left against unclosed inventory settles that inventory, so
-    ///      a reward drawn from it would come out of a later winner's funding income or an unload
-    ///      fill's backing. The units the leg closes past those, only so the fund can net
-    ///      deferred accounts, earn nothing beyond the accounts' own seizure rewards, and neither
-    ///      do restoring units past the inventory the fund could not carry as the batch began,
-    ///      less the size of every deferred account the batch absorbs, whether it nets the account
-    ///      or makes it the inventory (Rewards.paidSize). A cohort that covers an account spares
-    ///      the fund its loss, so within a batch it has to remain the better-paid route: counted
-    ///      this way, absorbing the account instead lowers the leg's pay by its size. The count
-    ///      is the batch's own: an account absorbed by an earlier call, a liquidate() or a batch
-    ///      with no winners, no longer counts against a later batch's leg, whose restoring figure
-    ///      that absorption may have raised.
+    ///      after this returns. Rewards accrue to msg.sender's claimable balance here: for every
+    ///      leg the keeper rate on what it closes, or ADL_EXECUTOR_REWARD_BP of the bad debt the
+    ///      close averts where larger (_closeReward), and the keeper rate on what the netting
+    ///      retires, capped together at the fund's free capital — the earmark left against
+    ///      unclosed inventory settles that inventory, so a reward drawn from it would come out
+    ///      of a later winner's funding income or an unload fill's backing.
     ///
-    ///      Order: deferred accounts first, because theirs is the exposure no earmark backs;
-    ///      then the inventory. Either phase runs without the other's cohort, and the deferred
-    ///      phase runs whether or not one was submitted at all: only closing an account against
-    ///      counterparties needs `deferredWinners`, while dropping one that is flat or solvent
-    ///      again, delisting one that now sits on the inventory's own side (the next liquidation
-    ///      that names it seizes it into the inventory), and netting one the fund can afford are
-    ///      all operations on stored state. Gating the pass on the cohort
-    ///      would skip that housekeeping in precisely the batch that ends the window, since a
-    ///      caller finishing the inventory has no reason to submit a second list. With no cohort
-    ///      the eligible size is zero, so the close branch is the only one that goes quiet.
+    ///      Order: the losing leg first, the leg whose bucket is under water and settles at its
+    ///      bankruptcy price; where both or neither are, the larger bucket first. The losing leg
+    ///      is sized on the vault as the batch finds it, so its counterparties pay what restoring
+    ///      health takes before any gain on the other bucket is realized; the other leg is sized
+    ///      on what the first leaves, and closes only what is still needed. Each leg is sized to
+    ///      the gate's release condition (_sizeToRestoreHealth): a deleverage takes what the
+    ///      exposure requires and no more.
     ///
-    ///      An account the deferred pass leaves listed past its collateral — no cohort covers it
-    ///      whole, and the fund cannot afford its netting while keeping its reserve and the whole
-    ///      remaining inventory's bankruptcy-priced close backed — is resolved through the
-    ///      inventory leg: the leg is sized so that the fund can absorb every such account by
-    ///      netting and still carry the inventory those nettings leave (_sizeToAffordNettings), and
-    ///      the deferred pass runs once more after it, with no cohort and taking only such
-    ///      accounts, to make those nettings. Since the nettings retire inventory themselves, the
-    ///      fund can be able to carry what they leave with nothing closed; the size is then zero
-    ///      and the second pass makes them all the same. A leg that closes part of a positive size
-    ///      leaves that pass keeping the whole remainder backed, as the first pass does, and one
-    ///      that closes none of it leaves the first pass's refusals standing. The fund then pays
-    ///      what it can afford, as the liquidation that deferred the account would have. None of
-    ///      that loss reaches the inventory's winners:
-    ///      the leg settles at the settlement price only the units its restoring figure calls
-    ///      for (_sizeToRestoreHealth), and once those have closed it closes the units past them
-    ///      at the mark, the fund paying their distance to the settlement price. Settled at the
-    ///      bankruptcy price instead, those units would haircut the inventory's winners to pay a
-    ///      loss the deferred accounts owe their own counterparties on the inventory's side. The
-    ///      fund can always pay for them: the restoring units leave it able to finish what
-    ///      remains at the band edge, which lies further from the settlement price than the mark
-    ///      does, so the capital that carries the remainder covers that distance on any part of
-    ///      it, with the reserve kept.
+    ///      A losing bucket smaller than the other is hedged by it: closing its units alone turns
+    ///      a hedged unit into exposure on the other bucket, and where the band edge lies closer to
+    ///      the mark than its bankruptcy price does that worsens the finish cost rather than
+    ///      lowering it. Such units are closed in pairs, one of each bucket against its own cohort,
+    ///      and the other leg is held to at least that many. A losing bucket with no cohort at all
+    ///      is resolved through the fund instead: the winning leg closes enough at the mark for the
+    ///      fund to afford netting the overlap (_sizeToAffordNetting), and the netting that ends
+    ///      every batch takes it.
     ///
-    ///      Once the inventory is empty, deferred accounts that are still open are seized on the
-    ///      spot and become the inventory — there is nothing left to net them against, and
-    ///      leaving them open would keep a window pending with nothing for the auction to close
-    ///      — so the health check that follows re-targets the window at their counterparties.
-    /// @param winners The cohort opposite the vault's inventory, descending score
-    /// @param deferredWinners The cohort on the inventory's side, descending score, to be closed
-    ///        against the deferred accounts
+    ///      Both legs rank their cohort at the price this call resolved and sort it here, so
+    ///      neither depends on the order the keeper submitted, and a tick stored ahead of the call
+    ///      moves the ranking without reverting the batch (_scan).
+    /// @param longBucketWinners Candidate shorts to close the long bucket against, any order
+    /// @param shortBucketWinners Candidate longs to close the short bucket against, any order
     function executeAdlCore(
         mapping(uint256 => BazaarTypes.Order) storage orders,
         BazaarTypes.OrderBook storage book,
         mapping(address => BazaarTypes.PositionBucket) storage positionBuckets,
         BazaarTypes.Vault storage pairVault,
         BazaarTypes.FeeEscrow storage feeEscrow,
-        address[] storage deferred,
-        address[] calldata winners,
-        address[] calldata deferredWinners,
+        address[] calldata longBucketWinners,
+        address[] calldata shortBucketWinners,
         BazaarTypes.AdlParams memory params,
         uint64 adlEpoch,
         mapping(address => uint64) storage adlDepositEpoch,
         mapping(address => uint256) storage adlWindowDeposits
     ) external returns (BazaarTypes.AdlResult memory r) {
-        if (winners.length == 0 && deferredWinners.length == 0) {
+        if (longBucketWinners.length == 0 && shortBucketWinners.length == 0) {
             revert AdlLib__EmptySubmission();
         }
-        uint256 longest = winners.length > deferredWinners.length ? winners.length : deferredWinners.length;
+        uint256 longest =
+            longBucketWinners.length > shortBucketWinners.length ? longBucketWinners.length : shortBucketWinners.length;
         if (longest > MAX_ADL_WINNERS_PER_BATCH) revert AdlLib__TooManyWinners(longest, MAX_ADL_WINNERS_PER_BATCH);
-        if (pairVault.pendingLiqSize == 0 && deferred.length == 0) revert AdlLib__NoPendingLiquidations();
+        if (RiskParamsLib.inventorySize(pairVault) == 0) revert AdlLib__NoPendingLiquidations();
+
+        Leg memory lng = _leg(pairVault, true, params.currentPrice);
+        Leg memory sht = _leg(pairVault, false, params.currentPrice);
+        _scan(positionBuckets, longBucketWinners, lng, params, adlEpoch, adlDepositEpoch, adlWindowDeposits);
+        _scan(positionBuckets, shortBucketWinners, sht, params, adlEpoch, adlDepositEpoch, adlWindowDeposits);
 
         Rewards memory rw;
-        // The part of the inventory leg's close settled at the mark rather than at the
-        // settlement price, for the price range AdlExecuted reports.
-        uint256 markSettled;
-        // The size the leg was sized to close so that the fund can net every listed account past
-        // its collateral (_sizeToAffordNettings), zero when it can as it stands.
-        uint256 plannedClose = NO_PLAN;
-
-        // What the fund could carry of the inventory as the batch began, measured before the
-        // deferred pass. The leg's close is paid only on the inventory past it, less every
-        // deferred account the batch absorbs. Absorbing one costs the fund its loss, which raises
-        // what the leg has to close, yet those units are closed only because the account was
-        // absorbed rather than closed against a cohort that covers it, which would have spared the
-        // fund that loss. Counted this way, every account the batch absorbs shrinks the paid size
-        // by its own size, so within the batch leaving such a cohort out never pays the executor
-        // more.
-        rw.paidSize = type(uint256).max;
-        if (deferred.length != 0 && pairVault.pendingLiqSize != 0 && pairVault.pendingLiqIsLong != params.adlLongs) {
-            Inventory memory before = _loadInventory(pairVault);
-            uint256 need = _sizeToRestoreHealth(
-                pairVault,
-                params,
-                before,
-                _settlementPrice(before, params.currentPrice),
-                BucketLib.effectiveMmrBp(params.marginRequirements),
-                _rewardOf(rw),
-                rw.paidSize
-            );
-            if (need < before.size) rw.carried = before.size - need;
+        uint256 pairUnits;
+        if (_longFirst(lng, sht, params.currentPrice)) {
+            pairUnits = _runLeg(orders, book, positionBuckets, pairVault, longBucketWinners, lng, sht, params, rw, 0);
+            _runLeg(orders, book, positionBuckets, pairVault, shortBucketWinners, sht, lng, params, rw, pairUnits);
+        } else {
+            pairUnits = _runLeg(orders, book, positionBuckets, pairVault, shortBucketWinners, sht, lng, params, rw, 0);
+            _runLeg(orders, book, positionBuckets, pairVault, longBucketWinners, lng, sht, params, rw, pairUnits);
         }
 
-        if (deferred.length != 0 && pairVault.pendingLiqSize != 0) {
-            r.deferredClosedSize = _closeDeferred(
-                orders,
-                book,
-                positionBuckets,
-                pairVault,
-                deferred,
-                deferredWinners,
-                params,
-                rw,
-                _unheldEpoch(adlEpoch),
-                adlDepositEpoch,
-                adlWindowDeposits
-            );
-        }
+        // The legs moved the fund's means: every close handed it the slice's earmark and its
+        // realization and freed reserve. A netting the fund could not afford before the batch can
+        // fit now, and what it retires earns the executor the rate a liquidation's caller earns.
+        r.netted = RiskParamsLib.tryNetBuckets(pairVault, params.currentPrice, params.currentFundingIndex);
+        rw.netting = LiquidationLib.rateOn(r.netted, params.currentPrice);
 
-        // The winners were chosen for the side the window targeted when the batch began, and the
-        // deferred pass can have moved the inventory onto that side since: a netting larger than
-        // the inventory hands the remainder over, and one that empties it exactly lets the next
-        // listed account seed a fresh aggregate on its own side. Closing the winners against an
-        // inventory on their own side would take the closed size out of both that side's open
-        // interest and the inventory, leaving the other side that much exposure with no
-        // counterparty. The leg is skipped rather than reverted so the deferred resolutions
-        // stand; the health check after the batch re-targets the window at the new side.
-        if (
-            pairVault.pendingLiqSize != 0 && pairVault.pendingLiqIsLong != params.adlLongs
-                && (winners.length != 0 || deferred.length != 0)
-        ) {
-            Inventory memory inv = _loadInventory(pairVault);
-            r.settlementPrice = _settlementPrice(inv, params.currentPrice);
-
-            // Pass 1: Scan eligible winners (read-only)
-            (r.eligibleSize, r.eligibleCount, r.highestAdlScore, r.lowestAdlScore) = _scanEligibleWinners(
-                positionBuckets, winners, params, inv.size, adlEpoch, adlDepositEpoch, adlWindowDeposits
-            );
-
-            if (r.eligibleSize != 0 || deferred.length != 0) {
-                uint256 mmrBp = BucketLib.effectiveMmrBp(params.marginRequirements);
-                uint256 accrued = _rewardOf(rw);
-                Nettings memory n;
-                if (deferred.length != 0) n = _listedNettings(positionBuckets, deferred, params, inv);
-                // The leg is paid only on the inventory past what the fund could carry as the batch
-                // began and past the listed accounts, each counted at its full size whether the pass
-                // after the leg nets it or it becomes the inventory once the inventory is gone.
-                rw.paidSize = inv.size > rw.carried + n.size ? inv.size - rw.carried - n.size : 0;
-                uint256 restoringSize =
-                    _sizeToRestoreHealth(pairVault, params, inv, r.settlementPrice, mmrBp, accrued, rw.paidSize);
-                uint256 batchSize = restoringSize;
-                // Accounts the deferred pass left listed past their collateral hold the window
-                // open however the inventory reads, and only the fund absorbing them ends it.
-                // What the exposure requires is then the size after which the fund can net every
-                // one of them and still carry what remains (_sizeToAffordNettings). That figure
-                // is sized on the release condition of the inventory the nettings leave, so it
-                // replaces the restoring figure rather than competing with it: the nettings take
-                // inventory off the fund too, which can put it below the restoring figure, and
-                // closing to the larger would haircut winners for units the nettings retire. That
-                // holds down to a figure of zero, when the fund can net them as it stands: the
-                // batch then closes nothing and the pass after the leg takes them. Nettings need
-                // no winner, so the figure is taken whether or not the scan admitted one.
-                if (n.size != 0) {
-                    batchSize = _sizeToAffordNettings(
-                        pairVault, params, inv, n, r.settlementPrice, mmrBp, accrued, restoringSize, rw.paidSize
-                    );
-                    plannedClose = batchSize;
-                }
-                // Cap how much we attempt to close at the smaller of eligible-winner size and
-                // pending liq, then at the batch size: a deleverage takes what the exposure
-                // requires and no more. The cap holds for the whole batch, so the loop needs no
-                // per-winner health re-check — its own `totalClosed >= requiredSize` break
-                // enforces it.
-                uint256 effectiveSize = r.eligibleSize < inv.size ? r.eligibleSize : inv.size;
-                if (batchSize < effectiveSize) effectiveSize = batchSize;
-                // Only the restoring units, those _sizeToRestoreHealth finds the fund cannot carry,
-                // settle at the settlement price. Units past them are closed for the deferred
-                // accounts alone, and settled at the bankruptcy price they would haircut the
-                // inventory's winners to pay a loss those accounts owe their own counterparties;
-                // they settle at the mark instead. With the mark as the settlement price the two
-                // coincide and one close takes the whole batch.
-                uint256 settledSize = restoringSize < effectiveSize && r.settlementPrice != params.currentPrice
-                    ? restoringSize
-                    : effectiveSize;
-                if (settledSize != 0) {
-                    r.totalLiqSize = _closeAdlWinners(
-                        orders,
-                        book,
-                        positionBuckets,
-                        pairVault,
-                        winners,
-                        params,
-                        settledSize,
-                        r.settlementPrice,
-                        inv,
-                        true,
-                        adlEpoch,
-                        adlDepositEpoch,
-                        adlWindowDeposits
-                    );
-                    // Only the units the restoring figure calls for earn the close reward, and of
-                    // those no more than the paid size; with the mark as the settlement price this
-                    // one close also takes the units past them.
-                    {
-                        uint256 paid = r.totalLiqSize < restoringSize ? r.totalLiqSize : restoringSize;
-                        if (paid > rw.paidSize) paid = rw.paidSize;
-                        rw.closes += _closeReward(inv.isLong, params.currentPrice, r.settlementPrice, paid);
-                    }
-                }
-                // The rest of the batch closes only once the restoring units have closed in full:
-                // short of them — a winner at a loss at the bankruptcy price is skipped — the
-                // batch has not reached the state it was sized for, and closing more would spend
-                // the fund's capital without ending the window. The rest settles at the mark, and
-                // the fund can pay its distance to the settlement price: the restoring units leave
-                // it able to finish what remains at the band edge, which lies further from the
-                // settlement price than the mark does, so the capital that carries the remainder
-                // covers that distance on any part of it, with the reserve kept.
-                if (settledSize < effectiveSize && r.totalLiqSize == settledSize) {
-                    markSettled = _closeAdlWinners(
-                        orders,
-                        book,
-                        positionBuckets,
-                        pairVault,
-                        winners,
-                        params,
-                        effectiveSize - settledSize,
-                        params.currentPrice,
-                        inv,
-                        true,
-                        adlEpoch,
-                        adlDepositEpoch,
-                        adlWindowDeposits
-                    );
-                    r.totalLiqSize += markSettled;
-                }
-            }
-        }
-
-        // The inventory leg moves what the nettings' gate reads: every unit closed settles its
-        // slice, takes its share off what the inventory left has to keep, and, once live open
-        // interest is down to the reading the reserve is sized on, frees its share of the
-        // reserve. Nettings the deferred pass had to refuse can fit now, and the batch was sized
-        // for exactly that: the accounts past their collateral. The pass runs again with no
-        // cohort to close against and takes only those, so what the close freed goes to the
-        // nettings it was raised for. It runs too when the plan was to close nothing, the fund
-        // being able to net them as it stands. With nothing closed and no such plan it is
-        // skipped: nothing was freed for it, and the first pass has already offered every
-        // account its netting.
-        if ((r.totalLiqSize != 0 || plannedClose == 0) && deferred.length != 0 && pairVault.pendingLiqSize != 0) {
-            DeferredPass memory d = _deferredPass(pairVault, params, rw);
-            d.heldOnly = true;
-            // The nettings' gate keeps what the inventory they leave needs to close at its
-            // bankruptcy price out of their reach. When the leg closed what it planned, that
-            // inventory is what is left once every account this pass takes is netted, which the
-            // plan sized the fund to carry; protecting the whole remainder instead would refuse
-            // nettings the batch was sized for. A leg short of its plan — too few eligible
-            // winners, a winner skipped at the price it would close at, or a close stopped by a
-            // deficit — vouches for no such end state: gated on it, the first nettings could spend
-            // backing the inventory still needs once a later one is refused. Each netting then
-            // keeps the whole remainder backed, as in the first pass.
-            if (r.totalLiqSize == plannedClose) {
-                uint256 held = _heldSize(positionBuckets, deferred, d.lp, pairVault.pendingLiqIsLong);
-                uint256 left = pairVault.pendingLiqSize;
-                d.keep = left > held ? left - held : 0;
-            }
-            _walkDeferred(
-                orders,
-                book,
-                positionBuckets,
-                pairVault,
-                deferred,
-                deferredWinners,
-                d,
-                _unheldEpoch(adlEpoch),
-                adlDepositEpoch,
-                adlWindowDeposits
-            );
-        }
-
-        if (pairVault.pendingLiqSize == 0 && deferred.length != 0) {
-            _seizeRemainingDeferred(orders, book, positionBuckets, pairVault, deferred, params, rw);
-        }
-        // Nothing to do at all: no winner passed the scan on the inventory's side and no deferred
-        // account was seized (every close against one begins with its seizure). A winner the
-        // scan admitted but the close skipped at the settlement price is not that case, so the
-        // batch returns quietly.
-        if (r.eligibleSize == 0 && rw.seized == 0) revert AdlLib__NoEligibleWinners();
+        // Nothing to do at all: no winner passed either scan and no netting fit. A winner the scan
+        // admitted but the close skipped at the settlement price is not that case, so the batch
+        // returns quietly.
+        if (lng.eligibleSize == 0 && sht.eligibleSize == 0 && r.netted == 0) revert AdlLib__NoEligibleWinners();
 
         _payRewards(pairVault, feeEscrow, params.pairId, rw);
-        _emitExecuted(params, r, markSettled);
-    }
-
-    /// @dev AdlExecuted with the range of prices the inventory leg settled at: its settlement
-    ///      price, the mark when part of the close settled there, or the mark alone when all of
-    ///      it did.
-    /// @param params The batch parameters
-    /// @param r The batch's result: the leg's settlement price, its total close and its scores
-    /// @param markSettled The part of the leg's close that settled at the mark
-    function _emitExecuted(BazaarTypes.AdlParams memory params, BazaarTypes.AdlResult memory r, uint256 markSettled)
-        internal
-    {
-        uint256 highest = r.settlementPrice;
-        uint256 lowest = highest;
-        if (markSettled != 0) {
-            if (markSettled == r.totalLiqSize) {
-                highest = params.currentPrice;
-                lowest = params.currentPrice;
-            } else if (params.currentPrice > highest) {
-                highest = params.currentPrice;
-            } else {
-                lowest = params.currentPrice;
-            }
-        }
+        r.longBucket = _legResult(lng);
+        r.shortBucket = _legResult(sht);
         emit AdlExecuted(
             params.pairId,
             params.adlId,
-            params.adlLongs,
             msg.sender,
-            highest,
-            lowest,
-            r.highestAdlScore,
-            r.lowestAdlScore,
-            params.adlSnapshotPrice,
+            lng.closed,
+            lng.settlementPrice,
+            sht.closed,
+            sht.settlementPrice,
+            r.netted,
             block.timestamp
         );
     }
 
-    /// @notice The ranking denominator: the bucket's collateral at the snapshot less any deposit
-    ///         tagged to the current ADL window, floored at 1.
-    /// @dev A deposit made while the account was already in range for this window must not
-    ///      improve its queue position, which is what dividing by the pre-deposit collateral
-    ///      guarantees. Deposits from earlier windows (a different epoch) are not subtracted.
-    ///      `adlWindowDeposits` is read only when the tag's epoch matches, so a caller that
-    ///      passes an epoch no tag holds (_unheldEpoch) ranks on the full collateral. Floored at
-    ///      1 so a zero-collateral winner ranks at the top rather than reverting the batch —
-    ///      profit on no collateral is the strongest possible claim.
+    // -------------------- Legs --------------------
+
+    /// @dev One leg as loaded for the batch: the bucket and the price it settles at. A leg over an
+    ///      empty bucket admits no winner and closes nothing.
+    function _leg(BazaarTypes.Vault storage pairVault, bool isLong, uint256 currentPrice)
+        internal
+        view
+        returns (Leg memory leg)
+    {
+        leg.isLong = isLong;
+        BazaarTypes.Inventory storage b = RiskParamsLib.bucketOf(pairVault, isLong);
+        leg.inv = Inventory(b.size, b.entryNotional, b.bankruptcyNotional, b.seized, b.entryFundingIndex, isLong);
+        if (b.size != 0) leg.settlementPrice = _settlementPrice(leg.inv, currentPrice);
+    }
+
+    /// @dev Whether the long leg runs first: the losing leg does, the one whose bucket settles at
+    ///      its bankruptcy price rather than the mark; where both or neither do, the larger bucket.
+    function _longFirst(Leg memory lng, Leg memory sht, uint256 currentPrice) internal pure returns (bool) {
+        bool longLosing = lng.inv.size != 0 && lng.settlementPrice != currentPrice;
+        bool shortLosing = sht.inv.size != 0 && sht.settlementPrice != currentPrice;
+        if (longLosing != shortLosing) return longLosing;
+        return lng.inv.size >= sht.inv.size;
+    }
+
+    /// @dev Sizes and closes one leg. The size is the gate's release figure on the vault as it
+    ///      stands (_sizeToRestoreHealth), or, when the other bucket has no cohort and sits under
+    ///      water, what the fund needs this bucket closed at the mark for to afford netting the
+    ///      two (_sizeToAffordNetting); never less than `forced`, the pairs the other leg sized
+    ///      against this one, and never more than the cohort covers or the bucket holds.
+    /// @return pairUnits The units this leg closed as pairs with the other leg's, which that leg is
+    ///         held to; 0 when it sized itself alone
+    function _runLeg(
+        mapping(uint256 => BazaarTypes.Order) storage orders,
+        BazaarTypes.OrderBook storage book,
+        mapping(address => BazaarTypes.PositionBucket) storage positionBuckets,
+        BazaarTypes.Vault storage pairVault,
+        address[] calldata winners,
+        Leg memory leg,
+        Leg memory other,
+        BazaarTypes.AdlParams memory params,
+        Rewards memory rw,
+        uint256 forced
+    ) internal returns (uint256 pairUnits) {
+        leg.ran = true;
+        if (leg.inv.size == 0 || leg.eligibleSize == 0) return 0;
+        uint256 mmrBp = BucketLib.effectiveMmrBp(params.marginRequirements);
+        uint256 plan;
+        bool otherStranded = other.inv.size != 0 && other.eligibleSize == 0
+            && other.settlementPrice != params.currentPrice && leg.settlementPrice == params.currentPrice;
+        if (otherStranded) {
+            plan = _sizeToAffordNetting(pairVault, params, leg, mmrBp, _rewardOf(rw));
+        } else {
+            (plan, pairUnits) = _sizeToRestoreHealth(pairVault, params, leg, other, mmrBp, _rewardOf(rw));
+        }
+        // The pairs are the tail of the plan, behind the units the leg closes alone.
+        uint256 alone = plan - pairUnits;
+        if (plan < forced) plan = forced;
+        if (plan > leg.eligibleSize) plan = leg.eligibleSize;
+        if (plan > leg.inv.size) plan = leg.inv.size;
+        if (plan == 0) return 0;
+        leg.closed = _closeAdlWinners(orders, book, positionBuckets, pairVault, winners, leg, params, plan);
+        rw.closes += _closeReward(leg.isLong, params.currentPrice, leg.settlementPrice, leg.closed);
+        // A pair whose half this leg did not close — the cap above, or a winner skipped at the
+        // settlement price — does not hold the other leg to its unit.
+        uint256 paired = leg.closed > alone ? leg.closed - alone : 0;
+        if (pairUnits > paired) pairUnits = paired;
+    }
+
+    /// @dev A leg's figures as the batch reports them.
+    function _legResult(Leg memory leg) internal pure returns (BazaarTypes.AdlLegResult memory lr) {
+        lr.eligibleSize = leg.eligibleSize;
+        lr.eligibleCount = leg.eligibleCount;
+        lr.highestAdlScore = leg.highestAdlScore;
+        lr.lowestAdlScore = leg.lowestAdlScore;
+        lr.closedSize = leg.closed;
+        lr.settlementPrice = leg.settlementPrice;
+    }
+
+    // -------------------- Ranking --------------------
+
+    /// @notice The ranking denominator: the bucket's collateral less any deposit tagged to the
+    ///         current ADL window, floored at 1.
+    /// @dev A deposit made while a window is open must not improve its owner's queue position on
+    ///      either side, which is what dividing by the pre-deposit collateral guarantees. Deposits
+    ///      from earlier windows (a different epoch) are not subtracted. Floored at 1 so a
+    ///      zero-collateral winner ranks at the top rather than reverting the batch — profit on no
+    ///      collateral is the strongest possible claim.
     function _scoreCollateral(
         uint256 effectiveCollateral,
         address user,
@@ -536,35 +379,15 @@ library AdlLib {
         return _scoreCollateral(effectiveCollateral, wd);
     }
 
-    /// @notice The ranking denominator as the lens computes it: the bucket's collateral at the
-    ///         snapshot less the already-epoch-checked deposit, floored at 1.
-    /// @param effectiveCollateral The bucket's collateral at the ranking snapshot
+    /// @notice The ranking denominator as the lens computes it: the bucket's collateral less the
+    ///         already-epoch-checked deposit, floored at 1.
+    /// @param effectiveCollateral The bucket's collateral at the ranking price
     /// @param windowDeposit The already-epoch-checked deposit tagged to the current ADL window
     /// @return The collateral denominator used in the ADL score
     function _scoreCollateral(uint256 effectiveCollateral, uint256 windowDeposit) internal pure returns (uint256) {
         uint256 base = effectiveCollateral > windowDeposit ? effectiveCollateral - windowDeposit : 0;
         return base == 0 ? 1 : base;
     }
-
-    /// @notice An epoch no deposit tag holds: one past the window's current epoch.
-    /// @dev A tag carries the epoch of the window it was made in, and the counter only advances,
-    ///      so no tag is ahead of it. The deferred cohort is scored with this in place of the
-    ///      window's epoch (_closeDeferred), which leaves its window deposits in its collateral:
-    ///      that cohort ranks at the price, funding index and collateral of the call itself, and
-    ///      there is no snapshot for a deposit to postdate. Derived from the live counter rather
-    ///      than written as a literal (`type(uint64).max` would do): a literal argument has the
-    ///      optimizer specialise a copy of every function on the path down to _closeAdlWinners,
-    ///      and that copy does not fit the stack. Unchecked so the wrap at the counter's limit,
-    ///      2⁶⁴ windows away, cannot revert a batch.
-    /// @param adlEpoch The window's current epoch
-    /// @return An epoch no tag holds
-    function _unheldEpoch(uint64 adlEpoch) private pure returns (uint64) {
-        unchecked {
-            return adlEpoch + 1;
-        }
-    }
-
-    // -------------------- Internal Helpers --------------------
 
     /// @notice Computes the ADL auction score threshold (quadratic decay)
     /// @dev Measured from the auction's current decay run rather than from the window's opening:
@@ -582,159 +405,367 @@ library AdlLib {
         return 1 + maxScore * remaining * remaining / (ADL_AUCTION_DURATION * ADL_AUCTION_DURATION);
     }
 
-    /// @notice The inventory size whose closure at `settlementPrice` brings the vault back under
-    ///         the ADL cancel threshold, or `type(uint256).max` when no size does.
+    /// @notice Pass 1: read-only scan of one leg's cohort. Admits every submitted account on the
+    ///         cohort's side with a positive PnL at the price the call resolved and a score at or
+    ///         above the Dutch threshold, sorts the admitted by descending score and ascending
+    ///         address, drops repeats, and reads off the size the cohort covers.
+    /// @dev Ranked at the live price and funding index, the same figures the close settles the
+    ///      winning leg at, so the two agree on who is a winner there; the losing leg's close
+    ///      re-checks each winner at its bankruptcy price and skips one under water there. Sorted
+    ///      here rather than by the keeper: the score moves with every tick, and a keeper's sort
+    ///      checked against the on-chain order would be reverted by any tick stored ahead of its
+    ///      call, which anyone can post. The sort is an insertion sort over at most
+    ///      MAX_ADL_WINNERS_PER_BATCH entries. Ties break on ascending address, which makes the
+    ///      order total, so a repeated account sorts next to itself and is dropped there; the
+    ///      close loop therefore consumes each account once.
+    ///
+    ///      The eligible size counts admitted winners in order until it covers the bucket, which
+    ///      the close loop's own `totalClosed >= requiredSize` break enforces; entries past that
+    ///      point stay in the order in case a winner ahead of them is skipped at the settlement
+    ///      price.
+    function _scan(
+        mapping(address => BazaarTypes.PositionBucket) storage positionBuckets,
+        address[] calldata winners,
+        Leg memory leg,
+        BazaarTypes.AdlParams memory params,
+        uint64 adlEpoch,
+        mapping(address => uint64) storage adlDepositEpoch,
+        mapping(address => uint256) storage adlWindowDeposits
+    ) internal view {
+        uint256 n = winners.length;
+        if (n == 0 || leg.inv.size == 0) return;
+        uint256 threshold = _getAdlScoreThreshold(params.adlAuctionStartTs);
+        uint256[] memory order = new uint256[](n);
+        uint256[] memory scores = new uint256[](n);
+        uint256 m;
+        for (uint256 i = 0; i < n; i++) {
+            address user = winners[i];
+            BazaarTypes.PositionBucket storage bucket = positionBuckets[user];
+            if (bucket.size == 0 || bucket.isLong == leg.isLong) continue;
+            BazaarTypes.BucketState memory state = BucketLib.calculateState(
+                bucket, params.currentPrice, params.currentFundingIndex, params.marginRequirements
+            );
+            if (state.totalPnl <= 0) continue;
+            uint256 score = Math.mulDiv(
+                uint256(state.totalPnl),
+                BAZAAR_SCALE,
+                _scoreCollateral(state.effectiveCollateral, user, adlEpoch, adlDepositEpoch, adlWindowDeposits)
+            );
+            if (score < threshold) continue;
+            // Insert behind every entry that outranks it: a higher score, or the same score and a
+            // lower address.
+            uint256 j = m;
+            while (j > 0 && _outranks(score, user, scores[j - 1], winners[order[j - 1]])) {
+                order[j] = order[j - 1];
+                scores[j] = scores[j - 1];
+                j--;
+            }
+            order[j] = i;
+            scores[j] = score;
+            m++;
+        }
+        // Repeats sort adjacent; keep the first of each. Read off the size the kept cover.
+        uint256 kept;
+        for (uint256 a = 0; a < m; a++) {
+            address user = winners[order[a]];
+            if (kept != 0 && winners[order[kept - 1]] == user) continue;
+            order[kept] = order[a];
+            scores[kept] = scores[a];
+            kept++;
+            if (leg.eligibleSize < leg.inv.size) {
+                uint256 winnerSize = positionBuckets[user].size;
+                uint256 remaining = leg.inv.size - leg.eligibleSize;
+                leg.eligibleSize += winnerSize < remaining ? winnerSize : remaining;
+                leg.eligibleCount++;
+                if (leg.eligibleCount == 1) leg.highestAdlScore = scores[a];
+                leg.lowestAdlScore = scores[a];
+            }
+        }
+        assembly ("memory-safe") {
+            mstore(order, kept)
+            mstore(scores, kept)
+        }
+        leg.order = order;
+        leg.scores = scores;
+    }
+
+    /// @dev Whether (`score`, `user`) sorts ahead of (`prevScore`, `prevUser`): a higher score, or
+    ///      the same score and a lower address. A repeat of the same account never does, so it
+    ///      lands directly behind its first entry.
+    function _outranks(uint256 score, address user, uint256 prevScore, address prevUser) private pure returns (bool) {
+        return score > prevScore || (score == prevScore && user < prevUser);
+    }
+
+    // -------------------- Sizing --------------------
+
+    /// @notice The vault-wide figures a close is sized against (Figures).
+    /// @dev The gate's release condition reduced to one budget: free capital above the reserve
+    ///      (negative by the shortfall below it) plus the ledger's arrears, which a close's loss is
+    ///      paid net of. Free capital is taken signed, the balance less the earmark: a fund holding
+    ///      less than it has earmarked is short by the difference, and what the closes hand it
+    ///      fills that hole before any of it reaches the reserve or the finish cost — the gate
+    ///      reads such a fund as holding nothing, and would go on reading it so after a close sized
+    ///      as if the hole were not there. Against the budget, what finishing the whole inventory
+    ///      at the band edge would cost beyond its earmark, taken without the arrears since the
+    ///      budget counts them once. The edge is the one RiskParamsLib.vaultAdlExposure reads:
+    ///      against the vault's net exposure, since the buckets' overlap does not move with it.
+    function _figures(BazaarTypes.Vault storage pairVault, BazaarTypes.AdlParams memory params, uint256 mmrBp)
+        internal
+        view
+        returns (Figures memory f)
+    {
+        uint256 bandBp = mmrBp < BazaarTypes.LIQ_MAX_SLIPPAGE_BP ? mmrBp : BazaarTypes.LIQ_MAX_SLIPPAGE_BP;
+        f.edgeAgainstLong = params.currentPrice * (BP_SCALE - bandBp) / BP_SCALE;
+        f.edgeAgainstShort = params.currentPrice * (BP_SCALE + bandBp) / BP_SCALE;
+        f.edge = RiskParamsLib.netLong(pairVault) ? f.edgeAgainstLong : f.edgeAgainstShort;
+        uint256 seized = RiskParamsLib.seizedTotal(pairVault);
+        int256 net = RiskParamsLib.vaultPnl(pairVault, f.edge, params.currentFundingIndex) + int256(seized);
+        if (net < 0) f.finish = uint256(-net);
+        uint256 reserve = RiskParamsLib.adlReserve(pairVault, params.currentPrice);
+        f.budget =
+            int256(pairVault.insuranceFundBalance) - int256(seized) - int256(reserve) + int256(pairVault.ledgerArrears);
+        uint256 liveOi = RiskParamsLib.openInterestSize(pairVault);
+        f.heldBack = liveOi - RiskParamsLib.reserveOiSizeOf(liveOi, pairVault.trailingOiSize);
+    }
+
+    /// @notice What closing `units` of a leg's bucket at `settlementPrice` moves the release
+    ///         condition by, before any reserve release: the cash the close hands the fund less
+    ///         what it takes off the finish cost, which is the bucket's PnL at the settlement
+    ///         price less its PnL at the band edge on those units. Signed: negative when the
+    ///         bucket's units are hedged by the other bucket and the edge sits on their favorable
+    ///         side, so closing them alone widens the exposure the edge is measured on.
+    /// @dev The earmark enters both terms and cancels; so does the funding leg, which both prices
+    ///      share. On a long bucket it is (settlement − edge) per unit, on a short bucket
+    ///      (edge − settlement).
+    function _legGain(Leg memory leg, uint256 edge, uint256 settlementPrice, uint256 units)
+        internal
+        pure
+        returns (int256)
+    {
+        int256 distance = leg.isLong ? int256(settlementPrice) - int256(edge) : int256(edge) - int256(settlementPrice);
+        return BazaarMathLib.signedMulDiv(distance, int256(units), int256(BAZAAR_SCALE));
+    }
+
+    /// @notice The size of `leg`'s bucket whose close at the leg's settlement price brings the
+    ///         vault back under the ADL release condition, in two segments: the bucket's excess
+    ///         over the other bucket, closed alone, and then its units hedged by the other bucket,
+    ///         closed in pairs with the other leg's where that leg is still to run, or alone where
+    ///         closing them alone still gains.
     /// @dev Sizes the batch so a deleverage takes only what the exposure requires. Bounding by
-    ///      winner count instead would let one account large enough to cover the aggregate absorb
+    ///      winner count instead would let one account large enough to cover the bucket absorb
     ///      all of it: every unit past this figure settles a solvent trader at the batch's
     ///      settlement price for no protective gain, and the executor reward — linear in the size
     ///      closed — pays for the excess.
     ///
-    ///      The target is the gate's release condition: the fund's budget (_releaseFigures) must
-    ///      be able to finish the remaining inventory at the unload band's edge, so the walk that
-    ///      resumes afterwards can sell it inside the band without reopening the window. Closing
-    ///      one unit moves both sides of that comparison. The finish cost falls by its per-unit
-    ///      share. The budget moves by what the unit's settlement hands the fund — the earmark
-    ///      released plus the realization at the settlement price, which at the bankruptcy price
-    ///      is the earmark less the unpaid collateral and the holding-window funding, the funding
-    ///      the estates paid or received before liquidation being folded into that price — less
-    ///      what the unit pays the executor (_closeReward), debited on this batch's own closed
-    ///      size before the health re-evaluation that ends the auction; and it rises by
-    ///      the reserve on the unit itself. A close removes the unit from the vault's side and
-    ///      from the winner's, so per-side open interest falls by it and the reserve, a share of
-    ///      the target on that open interest, falls with it: capital that returns to the budget
-    ///      without a dollar moving. The reserve is sized on live open interest only up to its
-    ///      trailing minimum (RiskParamsLib.reserveOiSizeOf), so while live open interest sits
-    ///      above that minimum the first units closed release nothing: the release starts once
-    ///      the close has brought live open interest down to it.
+    ///      The target is the gate's release condition: the fund's budget (_figures) must be able
+    ///      to finish the remaining inventory at the unload band's edge, so the walk that resumes
+    ///      afterwards can sell it inside the band without reopening the window. Closing one unit
+    ///      moves both sides of that comparison by the leg's gain on it (_legGain), less what the
+    ///      unit pays the executor (_closeReward), debited on this batch's own closed size before
+    ///      the health re-evaluation that ends the auction; and the budget rises by the reserve on
+    ///      the unit itself. A close removes the unit from the vault's side and from the winner's,
+    ///      so per-side open interest falls by it and the reserve, a share of the target on that
+    ///      open interest, falls with it: capital that returns to the budget without a dollar
+    ///      moving. The reserve is sized on live open interest only up to its trailing minimum
+    ///      (RiskParamsLib.reserveOiSizeOf), so while live open interest sits above that minimum
+    ///      the first units closed release nothing: the release starts once the close has brought
+    ///      live open interest down to it.
     ///
-    ///      Progress per unit is therefore the settlement price's distance to the band edge, less
-    ///      the executor's reward, plus the release — positive whenever the band is wider than the
-    ///      keeper rate, so a batch sized here lands on the release line where one sized against
-    ///      the finish cost alone would stop short of it. Every leg is linear in the size closed
-    ///      under the proportional decrement _releaseSlice applies, and none depends on which
-    ///      winner takes the other side, so one figure holds for the whole batch; _sizeToCover
-    ///      solves the two segments.
+    ///      The bucket's excess over the other bucket is the vault's net exposure, and those units
+    ///      always gain: their settlement price lies on the favorable side of the mark, and the
+    ///      edge on the adverse side. Past the excess every unit is hedged by one of the other
+    ///      bucket, and closing it alone turns the pair into exposure of the other bucket, finished
+    ///      at the edge adverse to that bucket: the unit gains only where its own settlement price
+    ///      lies beyond that edge, that is where the bucket is under water by more than the band.
+    ///      Such units are closed in pairs where they can be, one of each bucket, each against its
+    ///      own cohort: a pair retires an overlap unit whole, its gain is the two legs' together,
+    ///      the two settlement prices' gap less the rewards, with reserve released on both sides.
+    ///      The pairs are capped at what the other cohort covers, and the other leg is held to at
+    ///      least that many (executeAdlCore). Only the leg that runs first can size pairs: the
+    ///      other leg has not run yet and is held to them, whereas a leg that has already run
+    ///      closes nothing more, so a pair sized against it would close its own half alone and
+    ///      forfeit the hedge the figure counted on. Hedged units with no leg to pair with close
+    ///      alone where that gains, and otherwise not at all.
+    ///
+    ///      Every term is linear in the size closed within a segment under the proportional
+    ///      decrement _releaseSlice applies, and none depends on which winner takes the other side,
+    ///      so one figure holds per segment; _sizeToCover solves each, the second over what the
+    ///      first leaves of the distance, with the units that release no reserve consumed first.
     ///      ROUNDING_ALLOWANCE on top, so the pro-rata shares each slice rounds on its own cannot
     ///      land the release a few wei short and leave a second call to close dust.
     ///
-    ///      With a zero band the settlement price can be the band edge itself, where a unit
-    ///      closed takes as much off the budget as off the finish cost, the executor's reward on
-    ///      top, and no size restores health: the auction then runs to its eligible size, and the
-    ///      timeout or a recorded deficit resolves it. A pair's band is never zero, since the
-    ///      maintenance rate it derives from is at least half of RiskParamsLib.MIN_IMR_BP.
-    ///
-    ///      What the batch has already earned closing the deferred cohort is paid from the same
-    ///      free capital after this close, so it is part of the distance to cover.
-    ///
-    ///      Only the first `paidSize` units pay the executor its close reward. Past them the reward
-    ///      on those units is a fixed debit rather than a cost per unit, so a close that needs more
-    ///      is solved again with it added to the distance.
+    ///      What the batch has already earned is paid from the same free capital after this close,
+    ///      so it is part of the distance to cover.
     /// @param pairVault The pair's vault aggregates
     /// @param params The batch parameters
-    /// @param inv The vault's inventory as loaded for the leg, read only
-    /// @param settlementPrice The inventory leg's settlement price (_settlementPrice)
+    /// @param leg The leg being sized
+    /// @param other The other leg, whose bucket bounds the excess and whose cohort the pairs are
+    ///        capped at
     /// @param mmrBp The maintenance rate the unload band is derived from (BucketLib.effectiveMmrBp)
     /// @param accruedReward The executor's reward accrued in this batch before this close
-    /// @param paidSize The most of the close that earns the executor's close reward
-    ///        (Rewards.paidSize)
-    /// @return The size to close, 0 when the vault already meets the release condition
+    /// @return size The size to close, 0 when the vault already meets the release condition or
+    ///         the leg cannot move it
+    /// @return pairUnits The part of `size` sized as pairs with the other leg's units, 0 when none
     function _sizeToRestoreHealth(
         BazaarTypes.Vault storage pairVault,
         BazaarTypes.AdlParams memory params,
-        Inventory memory inv,
-        uint256 settlementPrice,
+        Leg memory leg,
+        Leg memory other,
         uint256 mmrBp,
-        uint256 accruedReward,
-        uint256 paidSize
-    ) internal view returns (uint256) {
+        uint256 accruedReward
+    ) internal view returns (uint256 size, uint256 pairUnits) {
         // The gate's own reading first, so the figure is 0 exactly when the gate would release.
         (, uint256 base, uint256 worstFinish,) =
             RiskParamsLib.vaultAdlExposure(pairVault, params.currentPrice, params.currentFundingIndex, mmrBp);
-        if (worstFinish + accruedReward <= base) return 0;
+        if (worstFinish + accruedReward <= base) return (0, 0);
 
-        (int256 progress, uint256 finish, int256 budget, uint256 heldBack) =
-            _releaseFigures(pairVault, params, inv, settlementPrice, mmrBp);
+        Figures memory f = _figures(pairVault, params, mmrBp);
         uint256 distance;
         {
-            uint256 need = finish + accruedReward + ROUNDING_ALLOWANCE;
-            if (int256(need) <= budget) return 0;
-            distance = uint256(int256(need) - budget);
+            uint256 need = f.finish + accruedReward + ROUNDING_ALLOWANCE;
+            if (int256(need) <= f.budget) return (0, 0);
+            distance = uint256(int256(need) - f.budget);
         }
-        progress += int256(finish);
-        uint256 reserve = RiskParamsLib.adlReserveOf(inv.size, params.currentPrice, pairVault.targetInsuranceRatioBp);
-        uint256 reserveHeldBack =
-            RiskParamsLib.adlReserveOf(heldBack, params.currentPrice, pairVault.targetInsuranceRatioBp);
-        uint256 size = _sizeToCover(
+        uint256 targetBp = pairVault.targetInsuranceRatioBp;
+        uint256 heldBack = f.heldBack;
+
+        // Segment 1: the excess over the other bucket, directional units closed alone.
+        uint256 excess = leg.inv.size > other.inv.size ? leg.inv.size - other.inv.size : 0;
+        if (excess != 0) {
+            int256 gain = _legGain(leg, f.edge, leg.settlementPrice, excess)
+                - int256(_closeReward(leg.isLong, params.currentPrice, leg.settlementPrice, excess));
+            if (gain > 0) {
+                size = _sizeToCover(
+                    distance,
+                    gain,
+                    RiskParamsLib.adlReserveOf(excess, params.currentPrice, targetBp),
+                    RiskParamsLib.adlReserveOf(heldBack, params.currentPrice, targetBp),
+                    heldBack,
+                    excess
+                );
+                if (size <= excess) return (size, 0);
+                // The whole excess does not cover the distance: take it all, and size the hedged
+                // units over what it leaves.
+                size = excess;
+                uint256 releasing = excess > heldBack ? excess - heldBack : 0;
+                uint256 progress = uint256(gain) + RiskParamsLib.adlReserveOf(releasing, params.currentPrice, targetBp);
+                distance = distance > progress ? distance - progress : 0;
+                heldBack = heldBack > excess ? heldBack - excess : 0;
+            }
+        }
+
+        // Segment 2: the units hedged by the other bucket.
+        uint256 hedged = leg.inv.size - excess;
+        if (hedged == 0 || distance == 0) return (size, 0);
+        bool paired = !other.ran && other.eligibleSize != 0;
+        uint256 units = hedged;
+        int256 gain2;
+        if (paired) {
+            if (units > other.eligibleSize) units = other.eligibleSize;
+            gain2 = _legGain(leg, f.edge, leg.settlementPrice, units)
+                + _legGain(other, f.edge, other.settlementPrice, units)
+                - int256(_closeReward(leg.isLong, params.currentPrice, leg.settlementPrice, units))
+                - int256(_closeReward(other.isLong, params.currentPrice, other.settlementPrice, units));
+        } else {
+            // Alone, a hedged unit leaves the other bucket's unit directional: it is finished at
+            // the edge adverse to that bucket.
+            uint256 edge = other.isLong ? f.edgeAgainstLong : f.edgeAgainstShort;
+            gain2 = _legGain(leg, edge, leg.settlementPrice, units)
+                - int256(_closeReward(leg.isLong, params.currentPrice, leg.settlementPrice, units));
+        }
+        if (gain2 <= 0) return (size, 0);
+        uint256 size2 = _sizeToCover(
             distance,
-            progress - int256(_closeReward(inv.isLong, params.currentPrice, settlementPrice, inv.size)),
-            reserve,
-            reserveHeldBack,
+            gain2,
+            RiskParamsLib.adlReserveOf(paired ? 2 * units : units, params.currentPrice, targetBp),
+            RiskParamsLib.adlReserveOf(heldBack, params.currentPrice, targetBp),
             heldBack,
-            inv.size
+            units
         );
-        if (size > paidSize) {
-            size = _sizeToCover(
-                distance + _closeReward(inv.isLong, params.currentPrice, settlementPrice, paidSize),
-                progress,
-                reserve,
-                reserveHeldBack,
-                heldBack,
-                inv.size
-            );
-        }
-        return size;
+        if (size2 > units) size2 = units;
+        size += size2;
+        if (paired) pairUnits = size2;
     }
 
-    /// @notice The figures a close at `settlementPrice` is sized on, read over the whole
-    ///         inventory.
-    /// @dev The gate's release condition, LiquidationLib.nettingAffordable's backing and
-    ///      VaultHealthLib's release reduced to one budget: free capital above the reserve
-    ///      (negative by the shortfall below it) plus the ledger's arrears, which both a netting's
-    ///      loss and a close's loss are paid net of. Free capital is taken signed, the balance
-    ///      less the earmark: a fund holding less than it has earmarked is short by the
-    ///      difference, and what the closes hand it fills that hole before any of it reaches the
-    ///      reserve or the finish cost — the gate reads such a fund as holding nothing, and would
-    ///      go on reading it so after a close sized as if the hole were not there. Against the
-    ///      budget, what finishing the inventory at the band edge would cost beyond its earmark,
-    ///      taken without the arrears since the budget counts them once, and what closing the
-    ///      inventory at `settlementPrice` hands the fund: the earmark released plus the
-    ///      realization there. _releaseSlice decrements the inventory it is given, so each reading
-    ///      runs on its own copy.
+    /// @notice The size of the winning leg's bucket to close at the mark so that the fund can
+    ///         afford to net the two buckets' overlap, when the losing bucket has no cohort to
+    ///         close it against.
+    /// @dev A losing bucket with no cohort holds the window open however the rest reads, and
+    ///      only the fund absorbing it ends that: the netting, once the fund can afford it, which
+    ///      the netting at the end of every batch takes. The winning leg is what moves the fund's
+    ///      means. Each unit it closes at the mark hands the fund the slice's earmark plus its
+    ///      realization there, and once live open interest is down to the trailing reading the
+    ///      reserve is sized on, frees the unit's share of the reserve. The condition is the
+    ///      netting's own gate (RiskParamsLib.overlapAffordable) on the budget _figures reads, with
+    ///      the release folded in: the budget after the close has to cover the netting's cost
+    ///      beyond the two netted slices' own backing, the rate the netting pays its executor, the
+    ///      reward accrued before this close, and what the bucket the netting leaves has to keep —
+    ///      the larger of its finish cost at the band edge, which the release test reads, and the
+    ///      cost beyond its earmark of closing it at its bankruptcy price, which the gate holds out
+    ///      of the netting's reach so a later bankruptcy-priced close of it books no deficit.
+    ///
+    ///      Capped so the close never eats into the overlap itself: at the winning bucket's excess
+    ///      over the other bucket when it is the larger, and at the whole bucket when it is the
+    ///      smaller or the two are equal, where closing it all retires the overlap and leaves
+    ///      nothing to net. Where no
+    ///      size within that cap affords the netting, the cap is closed and the netting waits for
+    ///      the next batch or walk to move the fund's means further.
     /// @param pairVault The pair's vault aggregates
     /// @param params The batch parameters
-    /// @param inv The vault's inventory as loaded for the leg, read only
-    /// @param settlementPrice The price the close settles at
+    /// @param leg The winning leg, settling at the mark
     /// @param mmrBp The maintenance rate the unload band is derived from (BucketLib.effectiveMmrBp)
-    /// @return progress The earmark plus the realization at `settlementPrice` over the whole
-    ///         inventory, negative when the close costs the fund
-    /// @return finish What finishing the whole inventory at the band edge would cost beyond its
-    ///         earmark; 0 when the earmark covers the loss there
-    /// @return budget The balance less the earmark and the reserve, plus the arrears: negative by
-    ///         any shortfall below the reserve, or below the earmark itself
-    /// @return heldBack Live open interest above the trailing reading the reserve is sized on:
-    ///         units that close without releasing any reserve
-    function _releaseFigures(
+    /// @param accruedReward The executor's reward accrued in this batch before this close
+    /// @return The size to close, 0 when the fund can already afford the netting
+    function _sizeToAffordNetting(
         BazaarTypes.Vault storage pairVault,
         BazaarTypes.AdlParams memory params,
-        Inventory memory inv,
-        uint256 settlementPrice,
-        uint256 mmrBp
-    ) internal view returns (int256 progress, uint256 finish, int256 budget, uint256 heldBack) {
-        (int256 pnl, uint256 earmark) = _releaseSlice(_copy(inv), params.currentFundingIndex, inv.size, settlementPrice);
-        progress = pnl + int256(earmark);
-        uint256 bandBp = mmrBp < BazaarTypes.LIQ_MAX_SLIPPAGE_BP ? mmrBp : BazaarTypes.LIQ_MAX_SLIPPAGE_BP;
-        uint256 bandEdge = inv.isLong
-            ? params.currentPrice * (BP_SCALE - bandBp) / BP_SCALE
-            : params.currentPrice * (BP_SCALE + bandBp) / BP_SCALE;
-        (pnl,) = _releaseSlice(_copy(inv), params.currentFundingIndex, inv.size, bandEdge);
-        pnl += int256(earmark);
-        if (pnl < 0) finish = uint256(-pnl);
-        uint256 reserve = RiskParamsLib.adlReserve(pairVault, params.currentPrice);
-        budget = int256(pairVault.insuranceFundBalance) - int256(pairVault.pendingLiqSeized) - int256(reserve)
-            + int256(pairVault.ledgerArrears);
-        uint256 liveOi = RiskParamsLib.openInterestSize(pairVault);
-        heldBack = liveOi - RiskParamsLib.reserveOiSizeOf(liveOi, pairVault.trailingOiSize);
+        Leg memory leg,
+        uint256 mmrBp,
+        uint256 accruedReward
+    ) internal view returns (uint256) {
+        (uint256 o, int256 pnl, uint256 seized) = RiskParamsLib.overlap(pairVault);
+        if (o == 0) return 0;
+        uint256 overlapCost;
+        if (pnl + int256(seized) < 0) overlapCost = uint256(-(pnl + int256(seized)));
+
+        Figures memory f = _figures(pairVault, params, mmrBp);
+        bool big = RiskParamsLib.netLong(pairVault);
+        BazaarTypes.Inventory storage survivor = RiskParamsLib.bucketOf(pairVault, big);
+        uint256 rest = survivor.size - o;
+        uint256 need;
+        {
+            // What the survivor has to keep, pro rata to what the netting leaves of it.
+            uint256 finishWhole;
+            {
+                int256 net = RiskParamsLib.bucketPnl(survivor, big, f.edge, params.currentFundingIndex)
+                    + int256(survivor.seized);
+                if (net < 0) finishWhole = uint256(-net);
+            }
+            uint256 bankruptcyClose = RiskParamsLib.bucketBankruptcyCloseCost(survivor, big, params.currentFundingIndex);
+            uint256 keepWhole = bankruptcyClose > finishWhole ? bankruptcyClose : finishWhole;
+            need = overlapCost + LiquidationLib.rateOn(o, params.currentPrice) + accruedReward
+                + Math.mulDiv(keepWhole, rest, survivor.size) + ROUNDING_ALLOWANCE;
+        }
+        if (int256(need) <= f.budget) return 0;
+        uint256 distance = uint256(int256(need) - f.budget);
+
+        // The winning bucket's excess over the other when it is the larger; the whole bucket when it
+        // is the smaller or the two are equal, where closing it all retires the overlap.
+        uint256 closable = leg.isLong == big && rest != 0 ? rest : leg.inv.size;
+        if (closable == 0) return 0;
+        (int256 realization, uint256 earmark) =
+            _releaseSlice(_copy(leg.inv), params.currentFundingIndex, closable, params.currentPrice);
+        int256 progress = realization + int256(earmark)
+            - int256(_closeReward(leg.isLong, params.currentPrice, params.currentPrice, closable));
+        uint256 size = _sizeToCover(
+            distance,
+            progress,
+            RiskParamsLib.adlReserveOf(closable, params.currentPrice, pairVault.targetInsuranceRatioBp),
+            RiskParamsLib.adlReserveOf(f.heldBack, params.currentPrice, pairVault.targetInsuranceRatioBp),
+            f.heldBack,
+            closable
+        );
+        return size > closable ? closable : size;
     }
 
     /// @notice The smallest size whose close covers `distance`, when closing all of `size`
@@ -777,277 +808,6 @@ library AdlLib {
         }
     }
 
-    /// @notice The accounts the deferred pass left listed past their collateral, as netting each
-    ///         against the inventory would cost the fund (_listedNettings).
-    /// @param cost What netting every such account at its full size costs the fund beyond the
-    ///        two netted slices' own backing
-    /// @param size Their total size: the inventory the nettings consume
-    /// @param reward The seizure reward those nettings pay the executor
-    struct Nettings {
-        uint256 cost;
-        uint256 size;
-        uint256 reward;
-    }
-
-    /// @notice Gathers the Nettings figures over the deferred list.
-    /// @dev Only an account past its collateral holds the window open, which is the gate's own
-    ///      count (RiskParamsLib.deferredExcess). One within its collateral is left for the
-    ///      release that clears the list, or for a liquidation that names it.
-    /// @param positionBuckets Storage mapping of position buckets
-    /// @param deferred The deferred liquidations, every entry opposite the inventory and insolvent
-    /// @param params The batch parameters
-    /// @param inv The vault's inventory as loaded for the leg, read only
-    /// @return n The listed accounts past their collateral: their netting cost, size and reward
-    function _listedNettings(
-        mapping(address => BazaarTypes.PositionBucket) storage positionBuckets,
-        address[] storage deferred,
-        BazaarTypes.AdlParams memory params,
-        Inventory memory inv
-    ) internal view returns (Nettings memory n) {
-        BazaarTypes.LiquidateParams memory lp = _liquidateParams(params);
-        for (uint256 i = 0; i < deferred.length; i++) {
-            BazaarTypes.BucketState memory state = BucketLib.calculateState(
-                positionBuckets[deferred[i]], lp.currentPrice, lp.currentFundingIndex, lp.marginReqs
-            );
-            if (RiskParamsLib.accountExcess(state) == 0) continue;
-            uint256 size = state.adjustedSize;
-            // The netting's realization at the account's full size, as
-            // LiquidationLib._netOpposingLiquidation books it: the entry gap on the overlap plus
-            // the two sides' entry-clock offset.
-            uint256 inventoryEntry = Math.mulDiv(inv.entryNotional, size, inv.size);
-            int256 netPnl = inv.isLong
-                ? int256(state.entryValue) - int256(inventoryEntry)
-                : int256(inventoryEntry) - int256(state.entryValue);
-            int256 nettedFunding = BazaarMathLib.signedMulDiv(
-                inv.entryFundingIndex - state.adjustedEntryFundingIndex, int256(size), int256(BAZAAR_SCALE)
-            );
-            netPnl += inv.isLong ? nettedFunding : -nettedFunding;
-            if (netPnl < 0) {
-                // Backed by the netted slices themselves: the inventory's earmark on the overlap
-                // and the account's own collateral. Only the rest draws on the budget.
-                uint256 own = Math.mulDiv(inv.seized, size, inv.size) + state.effectiveCollateral;
-                uint256 loss = uint256(-netPnl);
-                if (loss > own) n.cost += loss - own;
-            }
-            n.size += size;
-            // The seizure reward the netting pays, on the account's full size: the close
-            // _sizeToAffordNettings solves for leaves inventory covering every listed account, so
-            // none of these nettings flips and each retires the whole position.
-            n.reward += LiquidationLib.seizureReward(state, size, lp.currentPrice);
-        }
-    }
-
-    /// @notice The size the inventory leg has to close so that the fund can absorb every account
-    ///         the deferred pass left listed past its collateral by netting it, and still carry
-    ///         the inventory those nettings leave: keep its close at the bankruptcy price backed
-    ///         and meet the release condition on it.
-    /// @dev An account is still listed after the pass because no cohort covers it whole and its
-    ///      netting against the inventory costs more than the fund may spend. Of these, the ones
-    ///      past their collateral are what the gate counts (_listedNettings), and they hold the
-    ///      window open however the inventory reads; the size is for them alone. An account within
-    ///      its collateral holds nothing open: the window releases once the inventory is covered,
-    ///      the release clears the list, and the account is an ordinary liquidation candidate
-    ///      again. Nothing else can take an account past its collateral: it sits opposite the
-    ///      inventory, the vault holds one aggregate, so seizing it is that netting, and the window
-    ///      it holds open halts every unload. The inventory leg is what moves the fund's means.
-    ///      Each unit it closes hands the fund the slice's earmark plus its realization at the
-    ///      price it settles at, takes its share off what the fund has to keep for the remainder,
-    ///      and, once live open interest is down to the trailing reading the reserve is sized on,
-    ///      frees the unit's share of the reserve. Where closing enough units makes the nettings
-    ///      affordable, the pass that runs after the leg takes them, and only them; where the
-    ///      fund can afford them with no close at all, that pass takes them with nothing closed;
-    ///      where no close short of the whole inventory does, the whole inventory goes (below).
-    ///
-    ///      Sized to end the window in one batch rather than merely to afford the nettings: a
-    ///      netting that just fits leaves the fund holding no more above its reserve than the gate
-    ///      keeps for the inventory it leaves, and the release condition can need more — that
-    ///      inventory's band-edge finish cost where it is the larger figure, and the rewards the
-    ///      batch pays after the nettings — and until another batch closes the rest, trading,
-    ///      unloads and insurance deposits stay halted. The condition is the gate's release
-    ///      test on the post-netting state, on the budget _releaseFigures reads, with the
-    ///      nettings' own gate folded in: the budget after the batch has to cover the nettings'
-    ///      cost beyond the netted slices' own backing, what the inventory they leave has to keep,
-    ///      and what the batch pays its executor — the reward accrued before this close and the
-    ///      seizure reward of every account netted, both debited from free capital before the
-    ///      health check that ends the window.
-    ///
-    ///      What that inventory has to keep is the larger of two figures over the whole
-    ///      inventory, taken pro rata: its finish cost at the band edge, which the release test
-    ///      reads, and the cost beyond its earmark of closing it at the estates' bankruptcy price
-    ///      (RiskParamsLib.bankruptcyCloseCost), which the nettings' gate holds out of their reach
-    ///      (LiquidationLib.nettingAffordable) so that a later bankruptcy-priced close of it books
-    ///      no deficit. The two prices value the same inventory against the same earmark, so the
-    ///      finish cost is the larger when the band edge lies past the bankruptcy price, on the
-    ///      side where the inventory loses, and the bankruptcy-priced close when the edge lies
-    ///      short of it. That close needs the collateral the deposits ledger could not hand over
-    ///      at seizure and the net funding the vault paid holding the inventory, and with the edge
-    ///      short of the bankruptcy price the finish cost can read zero while it does: counted at
-    ///      the finish cost alone, a close the gate needs would read as unneeded, the batch would
-    ///      close nothing, and the gate would refuse every netting, batch after batch. Counted at
-    ///      the larger, a batch sized here clears the gate for every one of them.
-    ///
-    ///      Every term is linear in the size closed, so the same two-segment solve as
-    ///      _sizeToRestoreHealth gives the size: progress per unit is the earmark plus the
-    ///      realization, plus the unit's share of what the remainder has to keep, which the close
-    ///      takes off it, less what the close pays the executor (_closeReward); the reserve
-    ///      release is the same figure. The nettings themselves free reserve too, which is left
-    ///      out, so the size errs toward closing a little more rather than leaving the window
-    ///      open.
-    ///
-    ///      That progress is read at the settlement price, for the first `restoringSize` units:
-    ///      executeAdlCore settles those there and closes the rest at the mark. Of those, only the
-    ///      first `paidSize` pay the executor its reward (Rewards.paidSize). A unit past
-    ///      `restoringSize` pays the executor nothing either, and realizes less by the distance
-    ///      between the two prices when the settlement price is the bankruptcy price, so a close
-    ///      that needs units past `restoringSize` is solved again from that point on the mark's
-    ///      progress (_sizePastRestore).
-    ///
-    ///      Valid while the inventory left after the close still covers every listed account, so
-    ///      each netting runs at the account's full size and costs what the pass measured. Past
-    ///      that point the nettings would consume the whole inventory and flip the remainder onto
-    ///      the deferred side, and the fund would have paid netting costs for inventory it does
-    ///      not keep; the whole inventory goes instead, so nothing is spent on nettings, and the
-    ///      accounts are seized as the new inventory with nothing to net against. The same
-    ///      holds when the listed accounts are at least the inventory's size, and when no size
-    ///      covers the distance.
-    /// @param pairVault The pair's vault aggregates
-    /// @param params The batch parameters
-    /// @param inv The vault's inventory as loaded for the leg, read only
-    /// @param n The listed accounts past their collateral (_listedNettings), at least one
-    /// @param settlementPrice The inventory leg's settlement price (_settlementPrice)
-    /// @param mmrBp The maintenance rate the unload band is derived from (BucketLib.effectiveMmrBp)
-    /// @param accruedReward The executor's reward accrued in this batch before this close
-    /// @param restoringSize The size _sizeToRestoreHealth gives: the units the leg settles at
-    ///        `settlementPrice` before it closes the rest at the mark
-    /// @param paidSize The most of the close that earns the executor's close reward
-    ///        (Rewards.paidSize)
-    /// @return The size to close: 0 when the fund can already net every account past its
-    ///         collateral and carry what remains, the whole inventory when no smaller close
-    ///         leaves inventory the fund can carry
-    function _sizeToAffordNettings(
-        BazaarTypes.Vault storage pairVault,
-        BazaarTypes.AdlParams memory params,
-        Inventory memory inv,
-        Nettings memory n,
-        uint256 settlementPrice,
-        uint256 mmrBp,
-        uint256 accruedReward,
-        uint256 restoringSize,
-        uint256 paidSize
-    ) internal view returns (uint256) {
-        if (n.size >= inv.size) return inv.size;
-        // The leg pays nothing past its restoring units.
-        if (paidSize > restoringSize) paidSize = restoringSize;
-
-        (int256 progress, uint256 survivorCost, int256 budget, uint256 heldBack) =
-            _releaseFigures(pairVault, params, inv, settlementPrice, mmrBp);
-        // What the inventory the nettings leave has to keep, over the whole inventory: the larger
-        // of the release test's finish cost, as read, and the gate's bankruptcy-priced close.
-        {
-            uint256 bankruptcyClose = RiskParamsLib.bankruptcyCloseCost(pairVault, params.currentFundingIndex);
-            if (bankruptcyClose > survivorCost) survivorCost = bankruptcyClose;
-        }
-        // ROUNDING_ALLOWANCE on top, so the pro-rata shares the closes and nettings each round on
-        // their own cannot land the release, or a netting's gate, a few wei short.
-        uint256 need = n.cost + n.reward + accruedReward + Math.mulDiv(survivorCost, inv.size - n.size, inv.size)
-            + ROUNDING_ALLOWANCE;
-        if (int256(need) <= budget) return 0;
-
-        progress += int256(survivorCost);
-        uint256 distance = uint256(int256(need) - budget);
-        uint256 close = _sizeToCover(
-            distance,
-            progress - int256(_closeReward(inv.isLong, params.currentPrice, settlementPrice, inv.size)),
-            RiskParamsLib.adlReserveOf(inv.size, params.currentPrice, pairVault.targetInsuranceRatioBp),
-            RiskParamsLib.adlReserveOf(heldBack, params.currentPrice, pairVault.targetInsuranceRatioBp),
-            heldBack,
-            inv.size
-        );
-        // Only the first `paidSize` units pay the executor its close reward. Past them that reward
-        // is a fixed debit added to the distance, and the close is solved again with no reward per
-        // unit: at the settlement price up to `restoringSize`, and past it, where the leg closes
-        // at the mark, on the mark's figures (_sizePastRestore). A restoring size that leaves the
-        // nettings no room past it needs no mark solve: any close beyond it consumes the inventory
-        // they need, and the whole inventory goes either way.
-        if (close > paidSize) {
-            distance += _closeReward(inv.isLong, params.currentPrice, settlementPrice, paidSize);
-            close = _sizeToCover(
-                distance,
-                progress,
-                RiskParamsLib.adlReserveOf(inv.size, params.currentPrice, pairVault.targetInsuranceRatioBp),
-                RiskParamsLib.adlReserveOf(heldBack, params.currentPrice, pairVault.targetInsuranceRatioBp),
-                heldBack,
-                inv.size
-            );
-            if (close > restoringSize && restoringSize < inv.size - n.size) {
-                close =
-                    _sizePastRestore(pairVault, params, inv, distance, progress, survivorCost, heldBack, restoringSize);
-            }
-        }
-        return close <= inv.size - n.size ? close : inv.size;
-    }
-
-    /// @notice _sizeToAffordNettings' close when it needs units past the first `restoringSize`,
-    ///         which the leg settles at the settlement price, while it closes the rest at the
-    ///         mark.
-    /// @dev The restoring units cover what the single solve counts for them: their share of
-    ///      `progress`, and the reserve on those of them past the `heldBack` stretch. The rest of
-    ///      `distance` falls to units closed at the mark. Each hands the fund the slice's earmark
-    ///      plus its realization at the mark, which falls short of the settlement price's by the
-    ///      distance between the two prices, and takes its share of `survivorCost` off the
-    ///      remainder; it pays the executor nothing, being closed only so the fund can net the
-    ///      deferred accounts — those are paid for through their seizure rewards, and a cohort
-    ///      that covers them spares the fund their loss, so the route through the inventory must
-    ///      not pay its executor more. The restoring units' share of `progress` carries no reward
-    ///      either, since `distance` already holds what they pay, so with the mark as the
-    ///      settlement price both parts are reckoned alike and this gives the single solve's size,
-    ///      up to rounding.
-    ///      Whatever of the `heldBack` stretch the restoring units did not use up comes first
-    ///      among them.
-    /// @param pairVault The pair's vault aggregates
-    /// @param params The batch parameters
-    /// @param inv The vault's inventory as loaded for the leg, read only
-    /// @param distance What the close has to cover, the executor's close reward on the units that
-    ///        earn it included
-    /// @param progress What closing the whole inventory at the settlement price contributes
-    ///        before any reserve release: the earmark plus the realization there, plus the
-    ///        `survivorCost` the closes take off the remainder
-    /// @param survivorCost What the inventory left has to keep, over the whole inventory: the
-    ///        larger of its band-edge finish cost and its bankruptcy-priced close, beyond its
-    ///        earmark (_sizeToAffordNettings)
-    /// @param heldBack The units that close without releasing any reserve
-    /// @param restoringSize The units settled at the settlement price, short of the inventory
-    /// @return The size to close, type(uint256).max when no size short of the whole inventory
-    ///         covers the distance
-    function _sizePastRestore(
-        BazaarTypes.Vault storage pairVault,
-        BazaarTypes.AdlParams memory params,
-        Inventory memory inv,
-        uint256 distance,
-        int256 progress,
-        uint256 survivorCost,
-        uint256 heldBack,
-        uint256 restoringSize
-    ) internal view returns (uint256) {
-        uint256 reserve = RiskParamsLib.adlReserveOf(inv.size, params.currentPrice, pairVault.targetInsuranceRatioBp);
-        int256 covered = BazaarMathLib.signedMulDiv(progress, int256(restoringSize), int256(inv.size));
-        if (restoringSize > heldBack) covered += int256(Math.mulDiv(reserve, restoringSize - heldBack, inv.size));
-        if (covered >= int256(distance)) return restoringSize;
-
-        (int256 pnl, uint256 earmark) =
-            _releaseSlice(_copy(inv), params.currentFundingIndex, inv.size, params.currentPrice);
-        uint256 stillHeld = heldBack > restoringSize ? heldBack - restoringSize : 0;
-        uint256 extra = _sizeToCover(
-            uint256(int256(distance) - covered),
-            pnl + int256(earmark) + int256(survivorCost),
-            reserve,
-            RiskParamsLib.adlReserveOf(stillHeld, params.currentPrice, pairVault.targetInsuranceRatioBp),
-            stillHeld,
-            inv.size
-        );
-        return extra < inv.size ? restoringSize + extra : type(uint256).max;
-    }
-
     /// @dev A copy of `inv`, for a reading by a function that decrements the inventory it is
     ///      given. A memory-to-memory struct assignment shares the pointer.
     function _copy(Inventory memory inv) internal pure returns (Inventory memory) {
@@ -1061,96 +821,27 @@ library AdlLib {
         });
     }
 
-    /// @notice Pass 1: Read-only scan of winners to determine eligible size and scores
-    /// @dev Admitted entries must arrive in descending score order, ties in ascending address
-    ///      order. That is a total order, so no account can be admitted twice: a repeat carries
-    ///      exactly its predecessor's score and address. The scan stops once `maxSize` is covered
-    ///      and checks nothing past that point; for the deferred cohort, _closeSeized refuses a
-    ///      remainder such an unchecked repeat would produce.
-    function _scanEligibleWinners(
-        mapping(address => BazaarTypes.PositionBucket) storage positionBuckets,
-        address[] calldata winners,
-        BazaarTypes.AdlParams memory params,
-        uint256 maxSize,
-        uint64 adlEpoch,
-        mapping(address => uint64) storage adlDepositEpoch,
-        mapping(address => uint256) storage adlWindowDeposits
-    )
-        internal
-        view
-        returns (uint256 eligibleSize, uint256 eligibleCount, uint256 highestAdlScore, uint256 lowestAdlScore)
-    {
-        uint256 prevScore = type(uint256).max;
-        address prevUser;
-        uint256 threshold = _getAdlScoreThreshold(params.adlAuctionStartTs);
+    // -------------------- Closing --------------------
 
-        for (uint256 i = 0; i < winners.length; i++) {
-            if (eligibleSize >= maxSize) break;
-
-            address user = winners[i];
-            BazaarTypes.PositionBucket storage bucket = positionBuckets[user];
-
-            if (bucket.size == 0) continue;
-            if (bucket.isLong != params.adlLongs) continue;
-
-            // Rank against the FROZEN snapshot funding index (paired with adlSnapshotPrice), not
-            // the live index. This keeps adlScore — and therefore the descending-order check
-            // below — deterministic between the keeper's off-chain sort and on-chain execution.
-            BazaarTypes.BucketState memory state = BucketLib.calculateState(
-                bucket, params.adlSnapshotPrice, params.adlSnapshotFundingIndex, params.marginRequirements
-            );
-            if (state.totalPnl <= 0) continue;
-
-            uint256 adlScore = Math.mulDiv(
-                uint256(state.totalPnl),
-                BAZAAR_SCALE,
-                _scoreCollateral(state.effectiveCollateral, user, adlEpoch, adlDepositEpoch, adlWindowDeposits)
-            );
-            if (adlScore < threshold) continue;
-
-            if (adlScore > prevScore) revert AdlLib__NotDescendingAdlScoreOrder(adlScore, prevScore);
-            // Ties break on ascending address, which makes the order total and rules out the same
-            // account twice. That matters for the deferred cohort: _settleableSize adds an
-            // account's size once per entry, while the close loop consumes it once, so a repeat
-            // would test as covering size the loop cannot close.
-            if (adlScore == prevScore && user <= prevUser) {
-                revert AdlLib__NotAscendingAddressTie(user, prevUser);
-            }
-            prevScore = adlScore;
-            prevUser = user;
-
-            if (eligibleCount == 0) highestAdlScore = adlScore;
-            lowestAdlScore = adlScore;
-
-            uint256 winnerSize = state.adjustedSize;
-            uint256 remaining = maxSize - eligibleSize;
-            eligibleSize += winnerSize < remaining ? winnerSize : remaining;
-            eligibleCount++;
-        }
-    }
-
-    /// @notice Pass 2: Close eligible winners at the settlement price
-    /// @dev `params.adlLongs` is the winners' side. `inv` is what they close against: the
-    ///      vault's aggregate, written back after every close when `persistent`, or a deferred
-    ///      account seized for this batch, which is never stored.
+    /// @notice Pass 2: closes the leg's admitted winners, in the scan's order, against the leg's
+    ///         bucket at its settlement price until `requiredSize` is closed.
+    /// @dev Settlement realizes at the live funding index and the leg's settlement price. A winner
+    ///      profitable at the mark can be under water at a bankruptcy-priced settlement; only a
+    ///      strictly negative settlement PnL is skipped, so a market-profitable trader is never
+    ///      forced into a realized loss and a negative is never cast below. The bucket is written
+    ///      back after every close, so the next iteration sees the reduced exposure.
     function _closeAdlWinners(
         mapping(uint256 => BazaarTypes.Order) storage orders,
         BazaarTypes.OrderBook storage book,
         mapping(address => BazaarTypes.PositionBucket) storage positionBuckets,
         BazaarTypes.Vault storage pairVault,
         address[] calldata winners,
+        Leg memory leg,
         BazaarTypes.AdlParams memory params,
-        uint256 requiredSize,
-        uint256 settlementPrice,
-        Inventory memory inv,
-        bool persistent,
-        uint64 adlEpoch,
-        mapping(address => uint64) storage adlDepositEpoch,
-        mapping(address => uint256) storage adlWindowDeposits
+        uint256 requiredSize
     ) internal returns (uint256 totalClosed) {
-        uint256 threshold = _getAdlScoreThreshold(params.adlAuctionStartTs);
-
-        for (uint256 i = 0; i < winners.length; i++) {
+        BazaarTypes.Inventory storage stored = RiskParamsLib.bucketOf(pairVault, leg.isLong);
+        for (uint256 k = 0; k < leg.order.length; k++) {
             if (totalClosed >= requiredSize) break;
 
             // executeAdl's entry health check routes a pre-existing deficit into termination
@@ -1162,66 +853,40 @@ library AdlLib {
             // settlement waterfall share the recorded shortfall pro-rata.
             if (pairVault.deficit > 0) break;
 
-            address user = winners[i];
+            address user = winners[leg.order[k]];
             BazaarTypes.PositionBucket storage bucket = positionBuckets[user];
+            if (bucket.size == 0 || bucket.isLong == leg.isLong) continue;
 
-            if (bucket.size == 0) continue;
-            if (bucket.isLong != params.adlLongs) continue;
-
-            // Eligibility ranking uses the FROZEN snapshot funding index, matching the scan pass
-            // so both agree on which winners are eligible and on eligibleSize.
-            BazaarTypes.BucketState memory rankingState = BucketLib.calculateState(
-                bucket, params.adlSnapshotPrice, params.adlSnapshotFundingIndex, params.marginRequirements
-            );
-            if (rankingState.totalPnl <= 0) continue;
-
-            uint256 adlScore = Math.mulDiv(
-                uint256(rankingState.totalPnl),
-                BAZAAR_SCALE,
-                _scoreCollateral(rankingState.effectiveCollateral, user, adlEpoch, adlDepositEpoch, adlWindowDeposits)
-            );
-            if (adlScore < threshold) continue;
-
-            // Settlement realizes at the live funding index and the batch's settlement price, so
-            // the winner's credit reflects funding actually accrued up to execution.
             BazaarTypes.BucketState memory state = BucketLib.calculateState(
-                bucket, settlementPrice, params.currentFundingIndex, params.marginRequirements
+                bucket, leg.settlementPrice, params.currentFundingIndex, params.marginRequirements
             );
-
-            // Eligibility ranked PnL at the snapshot price; the credit realizes it at the
-            // settlement price. A winner deleveraged at/above their entry settles at zero PnL —
-            // a valid break-even close. Only skip a strictly-negative settlement PnL: don't force
-            // a market-profitable trader into a realized loss, and never feed a negative into
-            // the uint256 cast below.
             if (state.totalPnl < 0) continue;
 
             uint256 remaining = requiredSize - totalClosed;
             uint256 closedSize = state.adjustedSize <= remaining ? state.adjustedSize : remaining;
             totalClosed += closedSize;
 
-            // Settles the inventory slice through insurance (and releases it from the aggregate,
-            // so the next iteration sees the reduced exposure), then sizes the winner's credit.
-            // A deferred account's seizure sits in the fund but is not earmarked in the vault's
-            // aggregate, so free capital is read net of what is still to be released from it.
+            // Settles the inventory slice through insurance (and releases it from the bucket, so
+            // the next iteration sees the reduced exposure), then sizes the winner's credit.
             uint256 free = RiskParamsLib.insuranceFreeCapital(pairVault);
-            if (!persistent) free = free > inv.seized ? free - inv.seized : 0;
-            SliceSettlement memory s =
-                _settleSlice(pairVault, inv, free, params.currentFundingIndex, state, closedSize, settlementPrice);
-            if (persistent) _storeInventory(pairVault, inv);
+            SliceSettlement memory s = _settleSlice(
+                pairVault, leg.inv, free, params.currentFundingIndex, state, closedSize, leg.settlementPrice
+            );
+            _storeInventory(stored, leg.inv);
 
-            _applyAdlVaultUpdate(pairVault, params.adlLongs, closedSize, s.sliceEntry);
+            _applyAdlVaultUpdate(pairVault, !leg.isLong, closedSize, s.sliceEntry);
             bucket.collateral = SafeCast.toUint128(state.effectiveCollateral + s.credit);
 
             if (closedSize == state.adjustedSize) {
                 emit UserAdld(
                     params.pairId,
                     user,
-                    params.adlLongs,
+                    !leg.isLong,
                     closedSize,
                     int256(s.credit),
                     bucket.collateral,
-                    adlScore,
-                    settlementPrice,
+                    leg.scores[k],
+                    leg.settlementPrice,
                     s.withheld
                 );
                 _resetBucket(orders, book, user, bucket, params);
@@ -1239,410 +904,15 @@ library AdlLib {
                 emit UserAdld(
                     params.pairId,
                     user,
-                    params.adlLongs,
+                    !leg.isLong,
                     closedSize,
                     int256(s.credit),
                     bucket.collateral,
-                    adlScore,
-                    settlementPrice,
+                    leg.scores[k],
+                    leg.settlementPrice,
                     s.withheld
                 );
             }
-        }
-    }
-
-    /// @notice The state one pass over the deferred list carries, bundled so the pass and its
-    ///         helpers keep few live locals.
-    /// @param p The batch parameters with `adlLongs` set to the cohort's side
-    /// @param lp The same parameters in the shape the seizure takes
-    /// @param rw The batch's reward accumulator
-    /// @param eligible The cohort's eligible size not yet closed
-    /// @param closedTotal The size closed against deferred accounts so far
-    /// @param heldOnly Whether the pass takes only accounts past their collateral, the ones the
-    ///        window is held open for and the inventory leg was sized to net
-    /// @param keep The inventory whose bankruptcy-priced close every netting must leave backed
-    ///        (LiquidationLib.nettingAffordable): the whole remainder, or, on the pass after an
-    ///        inventory leg that closed what it planned, what the nettings that leg was sized for
-    ///        leave
-    /// @param flat The flat part of the seizure reward of the account _closeSeized is closing,
-    ///        taken before its close and paid after it
-    struct DeferredPass {
-        BazaarTypes.AdlParams p;
-        BazaarTypes.LiquidateParams lp;
-        Rewards rw;
-        uint256 eligible;
-        uint256 closedTotal;
-        bool heldOnly;
-        uint256 keep;
-        uint256 flat;
-    }
-
-    /// @notice Closes deferred accounts against the cohort on the inventory's side.
-    /// @dev Each account is taken whole or not at all: it is seized only when the cohort can
-    ///      absorb its whole position AT ITS SETTLEMENT PRICE — its own bankruptcy price, or the
-    ///      mark when the mark sits on the fund's favorable side of it (_settlementPriceOf) — so
-    ///      nothing seized here can be left half-closed as a second inventory, and nothing is
-    ///      seized that the cohort turns out to refuse. Its counterparties are settled against it
-    ///      at that price, where its seizure covers the loss (exactly at the bankruptcy price,
-    ///      with room to spare at the mark) and no holding window has accrued any carry, so the
-    ///      fund pays nothing.
-    ///
-    ///      The coverage test is _settleableSize rather than the eligibility scan's figure, and
-    ///      the difference is load-bearing: a winner between the live price and the settlement
-    ///      price is profitable at the mark, under water at the settlement, and refused by the
-    ///      close. Counting it would seize an account with nothing to close against, and the
-    ///      seizure would fall through to the netting deferral exists to avoid — which a
-    ///      permissionless caller could therefore trigger by choosing such a cohort.
-    ///
-    ///      An account the cohort cannot cover is netted after all if the closes above freed
-    ///      enough capital for its netting to fit, and otherwise stays deferred for the next
-    ///      batch. Accounts that are flat or solvent again are dropped from the list.
-    /// @return closedTotal The size closed against deferred accounts
-    function _closeDeferred(
-        mapping(uint256 => BazaarTypes.Order) storage orders,
-        BazaarTypes.OrderBook storage book,
-        mapping(address => BazaarTypes.PositionBucket) storage positionBuckets,
-        BazaarTypes.Vault storage pairVault,
-        address[] storage deferred,
-        address[] calldata cohort,
-        BazaarTypes.AdlParams memory params,
-        Rewards memory rw,
-        uint64 scoreEpoch,
-        mapping(address => uint64) storage adlDepositEpoch,
-        mapping(address => uint256) storage adlWindowDeposits
-    ) internal returns (uint256 closedTotal) {
-        DeferredPass memory d = _deferredPass(pairVault, params, rw);
-        (d.eligible,,,) = _scanEligibleWinners(
-            positionBuckets,
-            cohort,
-            d.p,
-            _deferredSize(positionBuckets, deferred),
-            scoreEpoch,
-            adlDepositEpoch,
-            adlWindowDeposits
-        );
-        _walkDeferred(
-            orders,
-            book,
-            positionBuckets,
-            pairVault,
-            deferred,
-            cohort,
-            d,
-            scoreEpoch,
-            adlDepositEpoch,
-            adlWindowDeposits
-        );
-        closedTotal = d.closedTotal;
-    }
-
-    /// @dev The state a pass over the deferred list runs on, with no cohort size yet: a pass
-    ///      built here and walked as is drops and nets but closes nothing against the cohort.
-    ///
-    ///      The cohort is the inventory's own side; a deferred account is always on the other.
-    ///      It ranks at the live price rather than the window's snapshot: a deferred account
-    ///      entered the window after that snapshot was taken, at a price that made it bankrupt,
-    ///      and its counterparties' profit exists at that price and not necessarily at the
-    ///      snapshot — an inventory seized on the way down is ranked at the bottom, where the
-    ///      longs a later rise bankrupted shorts against had no profit at all. The live price is
-    ///      the one this call resolved and stored: the Pyth cache's when the cache is fresh, the
-    ///      caller's update only otherwise. It is fixed for the rest of the call, so the ranking
-    ///      is deterministic within the call, but not across calls the way the snapshot is across
-    ///      a window — a sort made at an older tick is rejected as out of order and must be
-    ///      redone at the stored price. The decay threshold is the window's own.
-    ///
-    ///      It ranks on live collateral too: the window's deposit tags are not subtracted (the
-    ///      caller passes an epoch no tag holds as the walk's `scoreEpoch`). The subtraction
-    ///      keeps the target side's score pinned to the snapshot the price is frozen at; this
-    ///      cohort has no such snapshot, and its tags belong to the side the window was
-    ///      deleveraging against, whose deposits defended against liquidation rather than
-    ///      against a ranking it was not yet subject to. A re-target voids those tags for the
-    ///      same reason; a deferral moves the inventory side into the winners' seat without the
-    ///      re-target, so the pass has to do it itself.
-    ///
-    ///      Built field by field rather than assigned from `params`. A memory-to-memory struct
-    ///      assignment shares the pointer, so setting the side and the snapshot through a copy of
-    ///      `params` would rewrite the caller's own parameters: the inventory phase would then
-    ///      rank its winners against this phase's side, which is the opposite one, and close
-    ///      nothing. `d.rw` is shared on purpose — the reward counters this phase accumulates
-    ///      have to reach the payout and the empty-batch guard — which is exactly why the
-    ///      difference has to be spelled out here. `marginRequirements` is shared too, and only
-    ///      ever read.
-    ///
-    ///      A pass built here has every netting leave the whole remaining inventory backed
-    ///      (`keep`); the pass after an inventory leg that closed what it planned lowers that to
-    ///      what the nettings it was sized for leave.
-    function _deferredPass(BazaarTypes.Vault storage pairVault, BazaarTypes.AdlParams memory params, Rewards memory rw)
-        internal
-        view
-        returns (DeferredPass memory d)
-    {
-        d.p = BazaarTypes.AdlParams({
-            adlLongs: pairVault.pendingLiqIsLong,
-            adlSnapshotPrice: params.currentPrice,
-            adlSnapshotFundingIndex: params.currentFundingIndex,
-            adlAuctionStartTs: params.adlAuctionStartTs,
-            currentPrice: params.currentPrice,
-            currentFundingIndex: params.currentFundingIndex,
-            marginRequirements: params.marginRequirements,
-            pairId: params.pairId,
-            adlId: params.adlId,
-            currentBlock: params.currentBlock
-        });
-        d.lp = _liquidateParams(params);
-        d.rw = rw;
-        d.keep = pairVault.pendingLiqSize;
-    }
-
-    /// @dev Resolves every listed account in turn (_resolveDeferred). A resolved account is
-    ///      swapped out of the list by its last entry, which is then the one at `i`.
-    function _walkDeferred(
-        mapping(uint256 => BazaarTypes.Order) storage orders,
-        BazaarTypes.OrderBook storage book,
-        mapping(address => BazaarTypes.PositionBucket) storage positionBuckets,
-        BazaarTypes.Vault storage pairVault,
-        address[] storage deferred,
-        address[] calldata cohort,
-        DeferredPass memory d,
-        uint64 scoreEpoch,
-        mapping(address => uint64) storage adlDepositEpoch,
-        mapping(address => uint256) storage adlWindowDeposits
-    ) internal {
-        uint256 i;
-        while (i < deferred.length) {
-            if (_resolveDeferred(
-                    orders,
-                    book,
-                    positionBuckets,
-                    pairVault,
-                    deferred,
-                    cohort,
-                    d,
-                    i,
-                    scoreEpoch,
-                    adlDepositEpoch,
-                    adlWindowDeposits
-                )) {
-                continue;
-            }
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-    /// @dev One deferred account: dropped if flat or solvent, seized and closed if the cohort
-    ///      covers it, merged into the inventory if a netting earlier in the pass has moved the
-    ///      inventory onto its side, netted if that has become affordable, left otherwise. On a
-    ///      held-only pass an account within its collateral is left as it is before any of these
-    ///      is tried.
-    /// @return removed True when the entry at `i` was removed from the list
-    function _resolveDeferred(
-        mapping(uint256 => BazaarTypes.Order) storage orders,
-        BazaarTypes.OrderBook storage book,
-        mapping(address => BazaarTypes.PositionBucket) storage positionBuckets,
-        BazaarTypes.Vault storage pairVault,
-        address[] storage deferred,
-        address[] calldata cohort,
-        DeferredPass memory d,
-        uint256 i,
-        uint64 scoreEpoch,
-        mapping(address => uint64) storage adlDepositEpoch,
-        mapping(address => uint256) storage adlWindowDeposits
-    ) internal returns (bool removed) {
-        address user = deferred[i];
-        BazaarTypes.PositionBucket storage bucket = positionBuckets[user];
-        if (bucket.size == 0 || bucket.isLong == d.p.adlLongs) {
-            LiquidationLib.removeDeferredAt(deferred, i);
-            return true;
-        }
-        BazaarTypes.BucketState memory state =
-            BucketLib.calculateState(bucket, d.lp.currentPrice, d.lp.currentFundingIndex, d.lp.marginReqs);
-        if (state.isSolvent) {
-            LiquidationLib.removeDeferredAt(deferred, i);
-            return true;
-        }
-        // The pass after the inventory leg takes only what that leg was sized for: the accounts
-        // past their collateral, which hold the window open. One within its collateral holds
-        // nothing open and was left out of that sizing, so netting it here could spend what the
-        // others' nettings need; it is left for the release that clears the list, or for a
-        // liquidation that names it.
-        if (d.heldOnly && RiskParamsLib.accountExcess(state) == 0) return false;
-        // Priced before anything is taken apart: an account seized without a cohort to absorb it
-        // would fall through to the netting that deferring it avoided.
-        uint256 settlement = _settlementPriceOf(
-            bucket.isLong,
-            LiquidationLib.bankruptcyNotionalOf(state, bucket.isLong),
-            state.adjustedSize,
-            d.p.currentPrice
-        );
-        if (
-            d.eligible != 0
-                && _settleableSize(
-                        positionBuckets,
-                        cohort,
-                        d.p,
-                        settlement,
-                        state.adjustedSize,
-                        scoreEpoch,
-                        adlDepositEpoch,
-                        adlWindowDeposits
-                    ) >= state.adjustedSize
-        ) {
-            _closeSeized(
-                orders,
-                book,
-                positionBuckets,
-                pairVault,
-                cohort,
-                d,
-                user,
-                state,
-                settlement,
-                scoreEpoch,
-                adlDepositEpoch,
-                adlWindowDeposits
-            );
-            LiquidationLib.removeDeferredAt(deferred, i);
-            return true;
-        }
-        // The pass delists an account on the side the inventory held when the pass began, so one
-        // on the inventory's side here got there during the pass: a netting moved the inventory
-        // onto its side, or an earlier account seeded a new inventory there after a netting
-        // emptied the old one. It merges into that inventory, as liquidate() merges it. A merge
-        // realizes nothing, so it is not gated: the gate prices a netting's entry gap against an
-        // inventory on the other side, and could charge a merge a loss it does not have, leaving
-        // the account listed.
-        if (
-            bucket.isLong == pairVault.pendingLiqIsLong
-                || LiquidationLib.nettingAffordable(
-                    pairVault, state, d.lp.currentPrice, d.lp.currentFundingIndex, d.keep
-                )
-        ) {
-            LiquidationLib.Estate memory e = LiquidationLib.seize(user, bucket, state, orders, book, pairVault, d.lp);
-            // On what the absorb retires: the overlap with an inventory on the other side. An
-            // estate larger than that inventory leaves the rest as the new one; once a netting has
-            // done so, a later account sits on the inventory's side and merges into it; and an
-            // inventory a netting emptied exactly is seeded by the next account. None of those
-            // retires anything.
-            {
-                uint256 retired = LiquidationLib.nettedSize(pairVault, e.isLong, e.size);
-                d.rw.seizure += LiquidationLib.seizureReward(state, retired, d.lp.currentPrice);
-            }
-            ++d.rw.seized;
-            LiquidationLib.absorb(pairVault, e);
-            LiquidationLib.removeDeferredAt(deferred, i);
-            return true;
-        }
-        return false;
-    }
-
-    /// @dev Seize one deferred account and close the cohort against it at `settlement`, the price
-    ///      its coverage was tested at. The test applies the close loop's own filters, so the
-    ///      cohort takes the whole account unless the loop stops early, which it does only on a
-    ///      deficit already on the books. Its own slices cannot book one: each settles at the
-    ///      account's bankruptcy price, where its loss is its share of the collateral, paid from the
-    ///      cash the seizure collected and then from the arrears it recorded for what the deposits
-    ///      ledger could not hand over. What an early stop leaves is absorbed into the vault's
-    ///      aggregate, with the netting's own cap as the backstop, and the health check that follows
-    ///      freezes the pair on the deficit either way.
-    ///
-    ///      A remainder with no deficit means the test admitted size the loop could not consume:
-    ///      an account listed more than once adds its size once per entry there and is closed
-    ///      once here. Absorbing that remainder would be the netting the deferral refused, with
-    ///      no affordability gate in front of it, so the batch reverts instead.
-    function _closeSeized(
-        mapping(uint256 => BazaarTypes.Order) storage orders,
-        BazaarTypes.OrderBook storage book,
-        mapping(address => BazaarTypes.PositionBucket) storage positionBuckets,
-        BazaarTypes.Vault storage pairVault,
-        address[] calldata cohort,
-        DeferredPass memory d,
-        address user,
-        BazaarTypes.BucketState memory state,
-        uint256 settlement,
-        uint64 scoreEpoch,
-        mapping(address => uint64) storage adlDepositEpoch,
-        mapping(address => uint256) storage adlWindowDeposits
-    ) internal {
-        LiquidationLib.Estate memory e = LiquidationLib.seize(
-            user, positionBuckets[user], state, orders, book, pairVault, d.lp
-        );
-        ++d.rw.seized;
-        // Kept in the pass rather than a local: nothing more fits on the stack across the close.
-        d.flat = LiquidationLib.flatReward(state);
-        Inventory memory t =
-            Inventory(e.size, e.entryNotional, e.bankruptcyNotional, e.seized, e.entryFundingIndex, e.isLong);
-        uint256 closed = _closeAdlWinners(
-            orders,
-            book,
-            positionBuckets,
-            pairVault,
-            cohort,
-            d.p,
-            e.size,
-            settlement,
-            t,
-            false,
-            scoreEpoch,
-            adlDepositEpoch,
-            adlWindowDeposits
-        );
-        d.closedTotal += closed;
-        d.eligible -= closed;
-        d.rw.averted += _avertedLoss(t.isLong, d.p.currentPrice, settlement, closed);
-        if (t.size != 0) {
-            if (pairVault.deficit == 0) revert AdlLib__CohortDidNotCover(t.size);
-            // The remainder nets against an opposite inventory where it overlaps, which retires
-            // that much too, so the overlap joins `closed` for the reward below; any rest joins the
-            // inventory. One variable rather than two: nothing more fits on the stack here.
-            closed += LiquidationLib.nettedSize(pairVault, t.isLong, t.size);
-            LiquidationLib.absorb(
-                pairVault,
-                LiquidationLib.Estate(
-                    t.size, t.entryNotional, t.bankruptcyNotional, t.seized, t.entryFundingIndex, t.isLong
-                )
-            );
-        }
-        // The seizure reward on what the batch retired with the account
-        // (LiquidationLib.seizureReward): the cohort's close and any netting of the remainder.
-        {
-            uint256 rate = LiquidationLib.rateOn(closed, d.lp.currentPrice);
-            d.rw.seizure += rate > d.flat ? rate : d.flat;
-        }
-    }
-
-    /// @notice Seizes every deferred account still open once the vault holds no inventory, so
-    ///         they become the inventory the next health check re-targets the window at.
-    /// @dev Every entry left here sits on one side: the per-account pass delists every account
-    ///      on the batch-start inventory side before this runs, and nothing lists an account
-    ///      mid-batch. The first seizure therefore seeds the inventory and every later one
-    ///      merges into it, so no seizure nets and no affordability gate is needed.
-    function _seizeRemainingDeferred(
-        mapping(uint256 => BazaarTypes.Order) storage orders,
-        BazaarTypes.OrderBook storage book,
-        mapping(address => BazaarTypes.PositionBucket) storage positionBuckets,
-        BazaarTypes.Vault storage pairVault,
-        address[] storage deferred,
-        BazaarTypes.AdlParams memory params,
-        Rewards memory rw
-    ) internal {
-        BazaarTypes.LiquidateParams memory lp = _liquidateParams(params);
-        while (deferred.length != 0) {
-            address user = deferred[deferred.length - 1];
-            deferred.pop();
-            BazaarTypes.PositionBucket storage bucket = positionBuckets[user];
-            if (bucket.size == 0) continue;
-            BazaarTypes.BucketState memory state =
-                BucketLib.calculateState(bucket, lp.currentPrice, lp.currentFundingIndex, lp.marginReqs);
-            if (state.isSolvent) continue;
-            LiquidationLib.Estate memory e = LiquidationLib.seize(user, bucket, state, orders, book, pairVault, lp);
-            // The account seeds or joins the inventory: exposure moved onto the fund, which earns
-            // the flat reward alone, as liquidate() pays for such a seizure. Whoever later retires
-            // it is paid for that.
-            rw.seizure += LiquidationLib.flatReward(state);
-            ++rw.seized;
-            LiquidationLib.absorb(pairVault, e);
         }
     }
 
@@ -1663,21 +933,20 @@ library AdlLib {
         }
     }
 
-    /// @dev The batch's reward before the cap: every seizure it performed, its share of the bad
-    ///      debt the closes against deferred accounts averted, and what the inventory leg's closes
-    ///      earn.
+    /// @dev The batch's reward before the cap: what the legs' closes earn and the rate on what the
+    ///      netting retired.
     function _rewardOf(Rewards memory rw) internal pure returns (uint256) {
-        return rw.seizure + Math.mulDiv(rw.averted, BazaarTypes.ADL_EXECUTOR_REWARD_BP, BP_SCALE) + rw.closes;
+        return rw.closes + rw.netting;
     }
 
-    /// @dev What the inventory leg pays its executor for closing `closedSize` of its restoring
-    ///      units at `settlementPrice`: the keeper rate on that size at the mark, or
-    ///      ADL_EXECUTOR_REWARD_BP of the bad debt the close averts where that is larger. Those
-    ///      units are the inventory's own exposure, which only closing it takes off the fund while
-    ///      the window halts unloads, so they are paid the rate an unload's sale is paid, at the
-    ///      mark as at the bankruptcy price. The averted share is the larger only once the mark
-    ///      lies past the bankruptcy price by more than the ratio of the two rates, a fifth of the
-    ///      mark. Both are linear in the size closed, so the batch sizing reads them per unit.
+    /// @dev What a leg pays its executor for closing `closedSize` at `settlementPrice`: the keeper
+    ///      rate on that size at the mark, or ADL_EXECUTOR_REWARD_BP of the bad debt the close
+    ///      averts where that is larger. Those units are the inventory's own exposure, which only
+    ///      closing it takes off the fund while the window halts unloads, so they are paid the
+    ///      rate an unload's sale is paid, at the mark as at the bankruptcy price. The averted
+    ///      share is the larger only once the mark lies past the bankruptcy price by more than the
+    ///      ratio of the two rates, a fifth of the mark. Both are linear in the size closed, so the
+    ///      batch sizing reads them per unit.
     function _closeReward(bool inventoryIsLong, uint256 currentPrice, uint256 settlementPrice, uint256 closedSize)
         internal
         pure
@@ -1710,29 +979,25 @@ library AdlLib {
             currentPrice > settlementPrice ? Math.mulDiv(closedSize, currentPrice - settlementPrice, BAZAAR_SCALE) : 0;
     }
 
-    /// @dev The estates' average bankruptcy price is where the inventory realizes exactly the
+    /// @dev The estates' average bankruptcy price is where the bucket realizes exactly the
     ///      collateral seized with it, so a close there is neutral to the fund whatever the
     ///      winner's own entry was. The window can outlive a recovery past that price: it
     ///      releases only once the fund could finish the remainder at the band edge, so a fund
     ///      at its reserve stays pending with the mark up to a band above it. Settling there at
     ///      the bankruptcy price would hand the winners a close better than the market at the
     ///      fund's expense, and executeAdl is permissionless with a caller-chosen winner list,
-    ///      so the batch takes the mark whenever it sits on the fund's favorable side. The close
-    ///      then averts no loss, and its restoring units pay the executor the keeper rate alone
-    ///      (_closeReward).
-    ///
-    ///      executeAdlCore settles at this price the units its restoring figure calls for, and
-    ///      closes the rest of a batch at the mark.
+    ///      so the leg takes the mark whenever it sits on the fund's favorable side. The close
+    ///      then averts no loss, and pays the executor the keeper rate alone (_closeReward).
     function _settlementPrice(Inventory memory inv, uint256 currentPrice) internal pure returns (uint256) {
         return _settlementPriceOf(inv.isLong, inv.bankruptcyNotional, inv.size, currentPrice);
     }
 
-    /// @dev _settlementPrice on the figures alone, so a deferred account can be priced before it
-    ///      is seized. The average bankruptcy price rounds toward the fund: up for long inventory,
-    ///      which the vault sells, and down for short inventory, which it buys back. Closed in
-    ///      full at that price the inventory realizes no less than its bankruptcy notional as a
-    ///      long and pays no more than it as a short, so the seizure covers the close; rounded
-    ///      the other way the close would cost the fund up to a wei per unit of size beyond it.
+    /// @dev _settlementPrice on the figures alone. The average bankruptcy price rounds toward the
+    ///      fund: up for long inventory, which the vault sells, and down for short inventory, which
+    ///      it buys back. Closed in full at that price the inventory realizes no less than its
+    ///      bankruptcy notional as a long and pays no more than it as a short, so the seizure
+    ///      covers the close; rounded the other way the close would cost the fund up to a wei per
+    ///      unit of size beyond it.
     function _settlementPriceOf(bool isLong, uint256 bankruptcyNotional, uint256 size, uint256 currentPrice)
         internal
         pure
@@ -1744,118 +1009,18 @@ library AdlLib {
         return isLong ? Math.max(avgBankruptcyPrice, currentPrice) : Math.min(avgBankruptcyPrice, currentPrice);
     }
 
-    /// @notice The cohort size that can actually be closed against an account settling at
-    ///         `settlementPrice`, read from the live buckets.
-    /// @dev The coverage test the whole-account rule rests on, and it has to apply the close
-    ///      loop's own two filters rather than the eligibility scan's one. Eligibility ranks at
-    ///      the live price; settlement happens at the account's bankruptcy price, which for a
-    ///      bankrupt counterparty lies on the far side of the market from it. A winner between
-    ///      the two prices is profitable at the mark and under water at the settlement, and the
-    ///      close refuses to realize a loss on it — so counting the scan's figure would seize an
-    ///      account its cohort cannot take, leaving the seizure to fall through to the netting
-    ///      that deferring it avoided. Sizes come from the buckets, so a winner already spent on
-    ///      an earlier account in the same batch contributes only what is left of it.
-    /// @param positionBuckets Storage mapping of position buckets
-    /// @param cohort The submitted winners on the inventory's side
-    /// @param params The batch parameters, with `adlLongs` set to the cohort's side and the
-    ///        snapshot fields set to the ranking basis
-    /// @param settlementPrice The price the account would settle its counterparties at
-    /// @param needed The size that must be covered; the scan stops once it is reached
-    /// @return total The settleable size, never more than `needed`
-    function _settleableSize(
-        mapping(address => BazaarTypes.PositionBucket) storage positionBuckets,
-        address[] calldata cohort,
-        BazaarTypes.AdlParams memory params,
-        uint256 settlementPrice,
-        uint256 needed,
-        uint64 adlEpoch,
-        mapping(address => uint64) storage adlDepositEpoch,
-        mapping(address => uint256) storage adlWindowDeposits
-    ) internal view returns (uint256 total) {
-        uint256 threshold = _getAdlScoreThreshold(params.adlAuctionStartTs);
-
-        for (uint256 i = 0; i < cohort.length; i++) {
-            if (total >= needed) break;
-
-            BazaarTypes.PositionBucket storage bucket = positionBuckets[cohort[i]];
-            if (bucket.size == 0) continue;
-            if (bucket.isLong != params.adlLongs) continue;
-
-            BazaarTypes.BucketState memory ranking = BucketLib.calculateState(
-                bucket, params.adlSnapshotPrice, params.adlSnapshotFundingIndex, params.marginRequirements
-            );
-            if (ranking.totalPnl <= 0) continue;
-            uint256 adlScore = Math.mulDiv(
-                uint256(ranking.totalPnl),
-                BAZAAR_SCALE,
-                _scoreCollateral(ranking.effectiveCollateral, cohort[i], adlEpoch, adlDepositEpoch, adlWindowDeposits)
-            );
-            if (adlScore < threshold) continue;
-
-            BazaarTypes.BucketState memory settling = BucketLib.calculateState(
-                bucket, settlementPrice, params.currentFundingIndex, params.marginRequirements
-            );
-            if (settling.totalPnl < 0) continue;
-
-            total += settling.adjustedSize;
+    /// @dev Writes a leg's bucket back after a close: the fields a proportional close moves. A
+    ///      bucket closed to nothing is cleared whole, so its seizure stamp and entry index go
+    ///      with it and the next estate on that side seeds a fresh one.
+    function _storeInventory(BazaarTypes.Inventory storage b, Inventory memory inv) internal {
+        if (inv.size == 0) {
+            RiskParamsLib.clearBucket(b);
+            return;
         }
-    }
-
-    function _liquidateParams(BazaarTypes.AdlParams memory params)
-        internal
-        pure
-        returns (BazaarTypes.LiquidateParams memory lp)
-    {
-        lp.currentPrice = params.currentPrice;
-        lp.currentFundingIndex = params.currentFundingIndex;
-        lp.marginReqs = params.marginRequirements;
-        lp.pairId = params.pairId;
-        lp.currentBlock = params.currentBlock;
-    }
-
-    function _deferredSize(
-        mapping(address => BazaarTypes.PositionBucket) storage positionBuckets,
-        address[] storage deferred
-    ) internal view returns (uint256 total) {
-        for (uint256 i = 0; i < deferred.length; i++) {
-            total += positionBuckets[deferred[i]].size;
-        }
-    }
-
-    /// @dev The size of every listed account past its collateral at the live price, opposite the
-    ///      inventory: what the pass after the inventory leg nets, and what that leg was sized for
-    ///      (_sizeToAffordNettings counts the same accounts).
-    function _heldSize(
-        mapping(address => BazaarTypes.PositionBucket) storage positionBuckets,
-        address[] storage deferred,
-        BazaarTypes.LiquidateParams memory lp,
-        bool inventoryIsLong
-    ) internal view returns (uint256 total) {
-        for (uint256 i = 0; i < deferred.length; i++) {
-            BazaarTypes.PositionBucket storage bucket = positionBuckets[deferred[i]];
-            if (bucket.size == 0 || bucket.isLong == inventoryIsLong) continue;
-            BazaarTypes.BucketState memory state =
-                BucketLib.calculateState(bucket, lp.currentPrice, lp.currentFundingIndex, lp.marginReqs);
-            if (RiskParamsLib.accountExcess(state) != 0) total += state.adjustedSize;
-        }
-    }
-
-    function _loadInventory(BazaarTypes.Vault storage v) internal view returns (Inventory memory inv) {
-        inv.size = v.pendingLiqSize;
-        inv.entryNotional = v.pendingLiqEntryNotional;
-        inv.bankruptcyNotional = v.pendingLiqBankruptcyNotional;
-        inv.seized = v.pendingLiqSeized;
-        inv.entryFundingIndex = v.pendingLiqEntryFundingIndex;
-        inv.isLong = v.pendingLiqIsLong;
-    }
-
-    /// @dev Only the fields a proportional close moves; the side and the size-weighted entry
-    ///      index are unchanged by it.
-    function _storeInventory(BazaarTypes.Vault storage v, Inventory memory inv) internal {
-        v.pendingLiqSize = inv.size;
-        v.pendingLiqEntryNotional = inv.entryNotional;
-        v.pendingLiqBankruptcyNotional = inv.bankruptcyNotional;
-        v.pendingLiqSeized = inv.seized;
+        b.size = inv.size;
+        b.entryNotional = inv.entryNotional;
+        b.bankruptcyNotional = inv.bankruptcyNotional;
+        b.seized = inv.seized;
     }
 
     /// @notice Sizes one close: the winner's credit at the settlement price and the vault's own
@@ -1966,17 +1131,15 @@ library AdlLib {
     ///      then net of the arrears and from free capital (RiskParamsLib.fundLedgerFrom). Netted
     ///      from the arrears first, the loss would leave the inventory left reading worse to the
     ///      netting gate and the ADL gate, which count the arrears in full, while the earmark
-    ///      sat in free capital, which below the reserve they do not count; a deferred account's
-    ///      close against its cohort would take arrears the vault's own inventory relies on for a
-    ///      loss the account's seizure covers. Because the earmark sits in the fund by
-    ///      construction and the arrears net off what the earmark could not hold, the fund can
-    ///      only fall short by the holding-window funding and by rounding. What it cannot pay is
-    ///      withheld from the winner's credit up to `withholdCap`. The cap is the winner's funding
-    ///      income: that income accrued against this inventory, so refusing to pay what the fund
-    ///      cannot back keeps every remaining claim cash-backed without touching the winner's
-    ///      price PnL. Anything beyond the cap is a claim with no backing left, recorded as
-    ///      deficit so the post-batch health check terminates the pair and the settlement
-    ///      waterfall shares it pro-rata.
+    ///      sat in free capital, which below the reserve they do not count. Because the earmark
+    ///      sits in the fund by construction and the arrears net off what the earmark could not
+    ///      hold, the fund can only fall short by the holding-window funding and by rounding.
+    ///      What it cannot pay is withheld from the winner's credit up to `withholdCap`. The cap
+    ///      is the winner's funding income: that income accrued against this inventory, so
+    ///      refusing to pay what the fund cannot back keeps every remaining claim cash-backed
+    ///      without touching the winner's price PnL. Anything beyond the cap is a claim with no
+    ///      backing left, recorded as deficit so the post-batch health check terminates the pair
+    ///      and the settlement waterfall shares it pro-rata.
     ///
     ///      Rounding is the exception to both. The slice's entry basis and earmark are pro-rata
     ///      shares rounded on their own, its notional and funding leg each round once more, and
@@ -2020,11 +1183,15 @@ library AdlLib {
         }
     }
 
-    /// @notice Updates vault OI tracking after closing an ADL'd position
-    function _applyAdlVaultUpdate(BazaarTypes.Vault storage pairVault, bool adlLongs, uint256 size, uint256 entryValue)
-        internal
-    {
-        if (adlLongs) {
+    /// @notice Takes a closed winner's position off the open-interest aggregates on its side.
+    /// @param winnersLong The closed winner's side
+    function _applyAdlVaultUpdate(
+        BazaarTypes.Vault storage pairVault,
+        bool winnersLong,
+        uint256 size,
+        uint256 entryValue
+    ) internal {
+        if (winnersLong) {
             pairVault.totalLongOI -= size;
             pairVault.longWeightedEntrySum -= entryValue;
         } else {

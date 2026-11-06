@@ -22,6 +22,8 @@ import {PythSeed} from "../PythSeed.sol";
 import {MockArbSys} from "../mocks/MockArbSys.sol";
 import {BucketStore} from "../BucketStore.sol";
 
+import {VaultStore} from "../VaultStore.sol";
+
 contract BazaarPairTest is Test {
     using stdStorage for StdStorage;
     StdStorage internal _stdstore;
@@ -172,10 +174,10 @@ contract BazaarPairTest is Test {
     function testSetup_InsuranceFundBalanceMatchesSeed() public view {
         uint256 seedBazaar = PROPOSAL_TOTAL - (bondUsdc * BAZAAR_SCALE / USDC_SCALE);
 
-        (,,,,, uint256 btcInsuranceBal,,,,,,,,,,,) = btcPair.pairVault();
+        (,,,,, uint256 btcInsuranceBal,,,,,,) = btcPair.pairVault();
         assertEq(btcInsuranceBal, seedBazaar);
 
-        (,,,,, uint256 aaplInsuranceBal,,,,,,,,,,,) = aaplPair.pairVault();
+        (,,,,, uint256 aaplInsuranceBal,,,,,,) = aaplPair.pairVault();
         assertEq(aaplInsuranceBal, seedBazaar);
     }
 
@@ -216,7 +218,7 @@ contract BazaarPairTest is Test {
         assertEq(collateral, depositAmount);
 
         // Verify vault totalCollateralDeposited updated
-        (,,,, uint256 totalCollateral,,,,,,,,,,,,) = btcPair.pairVault();
+        (,,,, uint256 totalCollateral,,,,,,,) = btcPair.pairVault();
         assertEq(totalCollateral, depositAmount);
 
         // Verify USDC transferred from user to pair
@@ -509,12 +511,12 @@ contract BazaarPairTest is Test {
         uint256 raw = 100 * BAZAAR_SCALE + 5e11; // $100 + 0.0000005 USDC (sub-µUSDC remainder)
         uint256 expected = raw - (raw % 1e12); // = exactly 100e18
 
-        (,,,, uint256 collBefore,,,,,,,,,,,,) = btcPair.pairVault();
+        (,,,, uint256 collBefore,,,,,,,) = btcPair.pairVault();
         uint256 pairUsdcBefore = usdc.balanceOf(address(btcPair));
 
         _depositCollateral(btcPair, user1, raw);
 
-        (,,,, uint256 collAfter,,,,,,,,,,,,) = btcPair.pairVault();
+        (,,,, uint256 collAfter,,,,,,,) = btcPair.pairVault();
         uint256 pairUsdcAfter = usdc.balanceOf(address(btcPair));
 
         // Bookkeeping credited the rounded amount, not the raw value (no sub-µUSDC over-credit).
@@ -561,7 +563,7 @@ contract BazaarPairTest is Test {
         assertEq(collateral, 0);
 
         // Verify vault totalCollateralDeposited is zero
-        (,,,, uint256 totalCollateral,,,,,,,,,,,,) = btcPair.pairVault();
+        (,,,, uint256 totalCollateral,,,,,,,) = btcPair.pairVault();
         assertEq(totalCollateral, 0);
     }
 
@@ -716,14 +718,14 @@ contract BazaarPairTest is Test {
 
         _depositCollateral(btcPair, user1, depositAmount);
 
-        (,,,, uint256 totalBefore,,,,,,,,,,,,) = btcPair.pairVault();
+        (,,,, uint256 totalBefore,,,,,,,) = btcPair.pairVault();
         assertEq(totalBefore, depositAmount);
 
         bytes[] memory emptyPriceUpdate = new bytes[](0);
         vm.prank(user1);
         btcPair.withdrawCollateral(withdrawAmount, emptyPriceUpdate, 0, 0, 0, "");
 
-        (,,,, uint256 totalAfter,,,,,,,,,,,,) = btcPair.pairVault();
+        (,,,, uint256 totalAfter,,,,,,,) = btcPair.pairVault();
         assertEq(totalAfter, depositAmount - withdrawAmount);
     }
 
@@ -767,10 +769,10 @@ contract BazaarPairTest is Test {
     // pairVault starts at slot 4 (totalLongOI=4, totalShortOI=5, longWeightedEntrySum=6, shortWeightedEntrySum=7)
     uint256 constant SLOT_PAIR_VAULT_TOTAL_LONG_OI = 4;
     uint256 constant SLOT_PAIR_VAULT_LONG_WEIGHTED_ENTRY_SUM = 6;
-    uint256 constant SLOT_PAIR_VAULT_PENDING_LIQ_SIZE = SLOT_PAIR_VAULT_TOTAL_LONG_OI + 6;
-    uint256 constant SLOT_PAIR_VAULT_PENDING_LIQ_ENTRY_NOTIONAL = SLOT_PAIR_VAULT_TOTAL_LONG_OI + 7;
-    uint256 constant SLOT_PAIR_VAULT_PENDING_LIQ_BANKRUPTCY_NOTIONAL = SLOT_PAIR_VAULT_TOTAL_LONG_OI + 8;
-    uint256 constant SLOT_PAIR_VAULT_PENDING_LIQ_IS_LONG = SLOT_PAIR_VAULT_TOTAL_LONG_OI + 10;
+    // The long bucket (Vault.longInv) starts ten slots in: size, entryNotional, bankruptcyNotional, ...
+    uint256 constant SLOT_PAIR_VAULT_LONG_INV_SIZE = SLOT_PAIR_VAULT_TOTAL_LONG_OI + 10;
+    uint256 constant SLOT_PAIR_VAULT_LONG_INV_ENTRY_NOTIONAL = SLOT_PAIR_VAULT_TOTAL_LONG_OI + 11;
+    uint256 constant SLOT_PAIR_VAULT_LONG_INV_BANKRUPTCY_NOTIONAL = SLOT_PAIR_VAULT_TOTAL_LONG_OI + 12;
 
     /// @dev Use stdstore to write a 1-BTC long position into user1's btcPair bucket.
     ///      Also updates vault OI so termination withdrawals don't underflow.
@@ -811,10 +813,10 @@ contract BazaarPairTest is Test {
 
     // ==================== withdrawCollateral With Open Position Tests ====================
 
-    /// @dev isAdlPending is PACKED (slot 27, byte offset 20 — see `forge inspect BazaarPair
+    /// @dev isAdlPending is PACKED (slot 31, byte offset 20 — see `forge inspect BazaarPair
     ///      storage-layout`), which stdstore can't write; set the single byte via vm.store.
     function _setAdlPending(bool v) internal {
-        bytes32 slot = bytes32(uint256(27));
+        bytes32 slot = bytes32(uint256(31));
         bytes32 cur = vm.load(address(btcPair), slot);
         bytes32 mask = bytes32(uint256(0xff) << (20 * 8));
         vm.store(address(btcPair), slot, (cur & ~mask) | bytes32(uint256(v ? 1 : 0) << (20 * 8)));
@@ -838,15 +840,14 @@ contract BazaarPairTest is Test {
     ///      bankruptcy notional vs the $50,000 mark → $10k expected loss, above any threshold
     ///      on the empty insurance fund, so checkLiqExposure opens the ADL window.
     function _setPendingLiqPressure() internal {
-        vm.store(address(btcPair), bytes32(SLOT_PAIR_VAULT_PENDING_LIQ_SIZE), bytes32(POSITION_SIZE));
+        vm.store(address(btcPair), bytes32(SLOT_PAIR_VAULT_LONG_INV_SIZE), bytes32(POSITION_SIZE));
         vm.store(
-            address(btcPair), bytes32(SLOT_PAIR_VAULT_PENDING_LIQ_BANKRUPTCY_NOTIONAL), bytes32(60_000 * BAZAAR_SCALE)
+            address(btcPair), bytes32(SLOT_PAIR_VAULT_LONG_INV_BANKRUPTCY_NOTIONAL), bytes32(60_000 * BAZAAR_SCALE)
         );
         // The exposure is measured from the entry basis, so the aggregate needs one: a long's
         // bankruptcy sits below entry by the collateral that was seized into the fund.
-        vm.store(address(btcPair), bytes32(SLOT_PAIR_VAULT_PENDING_LIQ_ENTRY_NOTIONAL), bytes32(70_000 * BAZAAR_SCALE));
-        vm.store(address(btcPair), bytes32(SLOT_PAIR_VAULT_PENDING_LIQ_IS_LONG), bytes32(uint256(1)));
-        (,,,,,, uint256 pendingLiqSize,,,,,,,,,,) = btcPair.pairVault();
+        vm.store(address(btcPair), bytes32(SLOT_PAIR_VAULT_LONG_INV_ENTRY_NOTIONAL), bytes32(70_000 * BAZAAR_SCALE));
+        uint256 pendingLiqSize = VaultStore.inventorySize(address(btcPair));
         assertEq(pendingLiqSize, POSITION_SIZE, "pendingLiq write landed");
     }
 
@@ -986,7 +987,7 @@ contract BazaarPairTest is Test {
     // storage-layout`: adding or resizing a state variable declared earlier in BazaarPair shifts
     // every slot below it. The helpers assert a public getter afterward where one exists, so a
     // stale slot fails loudly rather than silently writing an unrelated word.
-    uint256 constant SLOT_SCHEDULED_TERMINATION_TS = 31;
+    uint256 constant SLOT_SCHEDULED_TERMINATION_TS = 34;
 
     /// @dev Terminate the pair for real at `termPrice`: fix the price, settle `user`'s position at
     ///      it (a flat user settles nothing), and finalize. Every scenario using this is
@@ -1076,7 +1077,7 @@ contract BazaarPairTest is Test {
         assertEq(remaining, 0);
 
         // Vault totalCollateralDeposited should be zero
-        (,,,, uint256 totalCollateral,,,,,,,,,,,,) = btcPair.pairVault();
+        (,,,, uint256 totalCollateral,,,,,,,) = btcPair.pairVault();
         assertEq(totalCollateral, 0);
     }
 
@@ -1396,7 +1397,7 @@ contract BazaarPairTest is Test {
         assertEq(remaining, 10_000 * BAZAAR_SCALE + fee);
 
         // Vault totalCollateralDeposited decreased by withdrawal
-        (,,,, uint256 totalCollateral,,,,,,,,,,,,) = btcPair.pairVault();
+        (,,,, uint256 totalCollateral,,,,,,,) = btcPair.pairVault();
         assertEq(totalCollateral, 10_000 * BAZAAR_SCALE + fee);
     }
 
@@ -1465,7 +1466,7 @@ contract BazaarPairTest is Test {
         assertEq(remaining, 0);
 
         // Vault totalCollateralDeposited should be zero
-        (,,,, uint256 totalCollateral,,,,,,,,,,,,) = btcPair.pairVault();
+        (,,,, uint256 totalCollateral,,,,,,,) = btcPair.pairVault();
         assertEq(totalCollateral, 0);
     }
 

@@ -43,10 +43,10 @@ contract FeeCurveHarness {
 
     /// @dev Seeds inherited inventory so the coverage numerator's committed-loss leg is reachable.
     function setPendingLiq(uint256 size, uint256 entryNotional, bool isLong, int256 entryFundingIndex) external {
-        pairVault.pendingLiqSize = size;
-        pairVault.pendingLiqEntryNotional = entryNotional;
-        pairVault.pendingLiqIsLong = isLong;
-        pairVault.pendingLiqEntryFundingIndex = entryFundingIndex;
+        BazaarTypes.Inventory storage b = isLong ? pairVault.longInv : pairVault.shortInv;
+        b.size = size;
+        b.entryNotional = entryNotional;
+        b.entryFundingIndex = int192(entryFundingIndex);
     }
 
     function setFundingIndex(int256 i) external {

@@ -398,7 +398,7 @@ library MatchingEngineLib {
     ///        nettings' rate plus the larger of its remaining flat rewards and the rate on what it
     ///        unloaded. Either way the payment is capped at the fund's free capital and, while the
     ///        inventory left carries a loss at the mark, at what that capital above the reserve
-    ///        covers the loss by (RiskParamsLib.unloadRewardPayable), and accrued to the caller's
+    ///        covers the loss by (RiskParamsLib.settleUnloadTail), and accrued to the caller's
     ///        claimable balance (pulled via claimFees).
     /// @return sum Fill totals for the pair's post-walk hooks.
     function unloadBook(
@@ -420,17 +420,22 @@ library MatchingEngineLib {
         // fallback no older than MAX_LIQUIDATION_PRICE_AGE, so only its inline walk waits; a stale
         // unloadVault fills nothing and earns nothing. Every gap-EMA sample the walk records is
         // therefore measured against a fresh oracle, never one whose error would read as depth.
-        if (pairVault.pendingLiqSize == 0 || ctx.isOracleStale) return sum;
+        if (RiskParamsLib.inventorySize(pairVault) == 0 || ctx.isOracleStale) return sum;
         uint256 cap = maxSteps == 0
             ? BazaarTypes.MAX_WALK_STEPS
             : (maxSteps < BazaarTypes.MAX_WALK_STEPS ? maxSteps : BazaarTypes.MAX_WALK_STEPS);
         BazaarTypes.ArrivalResult memory res = _initResult(pairVault, cap);
-        // The vault unwinds its inherited side against the counterparties who take it over:
-        // inherited longs sell to resting bids; inherited shorts buy from resting asks.
-        BazaarTypes.UnloadPlan memory plan =
-            RiskParamsLib.planUnload(pairVault, ctx.cachedPrice, ctx.cachedFundingIdx, ctx.marginReqs, prepaid);
+        // One walk works one bucket (RiskParamsLib.unloadBucketIsLong): the vault unwinds that
+        // side against the counterparties who take it over — inherited longs sell to resting
+        // bids, inherited shorts buy from resting asks. The side rides in `res` so every fill and
+        // its settlement read the same bucket.
+        res.unloadLong = RiskParamsLib.unloadBucketIsLong(pairVault, ctx.cachedPrice);
+        BazaarTypes.Inventory storage inv = RiskParamsLib.bucketOf(pairVault, res.unloadLong);
+        BazaarTypes.UnloadPlan memory plan = RiskParamsLib.planUnload(
+            pairVault, res.unloadLong, ctx.cachedPrice, ctx.cachedFundingIdx, ctx.marginReqs, prepaid
+        );
 
-        while (pairVault.pendingLiqSize > 0) {
+        while (inv.size > 0) {
             uint64 headId = plan.vaultIsLong ? book.bidHead : book.askHead;
             if (headId == 0) break;
             unchecked {
@@ -480,7 +485,7 @@ library MatchingEngineLib {
 
         // The caller is paid the bps rate on whatever it actually unloaded. For a keeper's
         // unloadVault the flat floor is reserved for a call that did a whole unit of work — one
-        // that moved at least UNLOAD_BOUNTY_MIN_NOTIONAL, or finished the inventory. Granting the
+        // that moved at least UNLOAD_BOUNTY_MIN_NOTIONAL, or finished the bucket. Granting the
         // floor to every call would let a keeper slice one large unload into minimum-sized pieces
         // and collect it on each, paying itself many times the intended rate out of insurance.
         // Below that bar the rate still pays, because a keeper that drains every in-band maker on
@@ -492,24 +497,25 @@ library MatchingEngineLib {
         // so the flat rewards and the rate on the sale are never both paid.
         uint256 reward = Math.mulDiv(res.totalMatchedVolume, BazaarTypes.LIQUIDATION_FEE_EBP, BazaarTypes.EBP_SCALE);
         if (prepaid == BazaarTypes.UNLOAD_BY_KEEPER) {
-            if (res.totalMatchedVolume >= BazaarTypes.UNLOAD_BOUNTY_MIN_NOTIONAL || pairVault.pendingLiqSize == 0) {
+            if (res.totalMatchedVolume >= BazaarTypes.UNLOAD_BOUNTY_MIN_NOTIONAL || inv.size == 0) {
                 if (reward < BazaarTypes.UNLOAD_BOUNTY_MIN) reward = BazaarTypes.UNLOAD_BOUNTY_MIN;
             }
         } else {
             reward = reward > prepaid ? reward - prepaid : 0;
         }
-        // A walk that filled nothing earns nothing: no fills means totalMatchedVolume is 0, and
-        // the keeper's floor is unreachable because pendingLiqSize can only reach 0 through a
-        // fill. Capped at the fund's free capital: the seizure still earmarked against open
-        // inventory is what settles that inventory, and a reward drawn from it would resurface as
-        // a shortfall on the next fill, booked as deficit. The reserve may pay it — it is held for
-        // exactly the payouts no bound can refuse — the earmark may not. Capped too at what free
-        // capital above the reserve covers the remaining inventory's loss at the mark by: where
-        // the fills left the pair on the healthy side of the ADL gate, the reward must not carry
-        // it over (RiskParamsLib.unloadRewardPayable). The reward moves from insurance into the
-        // claimable-fee escrow (pulled later via claimFees), so the unload itself never runs a
-        // token transfer.
-        reward = RiskParamsLib.unloadRewardPayable(pairVault, ctx.cachedPrice, ctx.cachedFundingIdx, reward);
+        // A walk that filled nothing earns nothing on its fills: no fills means totalMatchedVolume
+        // is 0, and the keeper's floor is unreachable because the bucket can only reach 0 through
+        // a fill. The tail then nets the two buckets' overlap where the fills have made that
+        // affordable, which pays the rate on what it retires, and caps the total. Capped at the
+        // fund's free capital: the seizure still earmarked against open inventory is what settles
+        // that inventory, and a reward drawn from it would resurface as a shortfall on the next
+        // fill, booked as deficit. The reserve may pay it — it is held for exactly the payouts no
+        // bound can refuse — the earmark may not. Capped too at what free capital above the reserve
+        // covers the remaining inventory's loss at the mark by: where the fills left the pair on
+        // the healthy side of the ADL gate, the reward must not carry it over
+        // (RiskParamsLib.settleUnloadTail). The reward moves from insurance into the claimable-fee
+        // escrow (pulled later via claimFees), so the unload itself never runs a token transfer.
+        reward = RiskParamsLib.settleUnloadTail(pairVault, ctx.cachedPrice, ctx.cachedFundingIdx, reward);
         if (reward > 0) {
             pairVault.insuranceFundBalance -= reward;
             FeeEscrowLib.credit(feeEscrow, ctx.pairId, msg.sender, reward);
@@ -1230,7 +1236,10 @@ library MatchingEngineLib {
         VaultFillData memory data;
         data.fillSize = makerH.remaining;
         if (data.fillSize > sizeCap) data.fillSize = sizeCap;
-        if (data.fillSize > pairVault.pendingLiqSize) data.fillSize = pairVault.pendingLiqSize;
+        {
+            uint256 held = RiskParamsLib.bucketOf(pairVault, res.unloadLong).size;
+            if (data.fillSize > held) data.fillSize = held;
+        }
         if (data.fillSize == 0) return 0;
 
         data.execPrice = makerH.order.limitPrice;
@@ -1346,7 +1355,7 @@ library MatchingEngineLib {
 
     /// @dev Settle one vault-liquidation fill: compute vault PnL (price + funding accrued on the
     ///      inventory from the liquidatees' entries through this close), update gap-EMA
-    ///      accumulators, and decrement the pending-liq aggregates proportionally.
+    ///      accumulators, and decrement the walked bucket proportionally.
     function _settleVaultLiquidation(
         BazaarTypes.Vault storage pairVault,
         BazaarTypes.ArrivalResult memory res,
@@ -1356,19 +1365,20 @@ library MatchingEngineLib {
         uint256 fillNotional
     ) private returns (int256 vaultPnl) {
         int256 currentFundingIndex = ctx.cachedFundingIdx;
+        bool vaultIsLong = res.unloadLong;
+        BazaarTypes.Inventory storage inv = RiskParamsLib.bucketOf(pairVault, vaultIsLong);
         unchecked {
-            uint256 existingSize = pairVault.pendingLiqSize;
+            uint256 existingSize = inv.size;
             // Proportional entry notional for this fill, rounded ONCE and reused verbatim by the
             // aggregate decrement below — the PnL settled into insurance must match exactly the
             // notional released from the books (a via-avg-price recompute double-rounds and drifts).
-            uint256 entryPortion = Math.mulDiv(pairVault.pendingLiqEntryNotional, fillSize, existingSize);
-            vaultPnl = pairVault.pendingLiqIsLong
-                ? int256(fillNotional) - int256(entryPortion)
-                : int256(entryPortion) - int256(fillNotional);
+            uint256 entryPortion = Math.mulDiv(inv.entryNotional, fillSize, existingSize);
+            vaultPnl =
+                vaultIsLong ? int256(fillNotional) - int256(entryPortion) : int256(entryPortion) - int256(fillNotional);
 
-            // Realize funding accrued on the pending-liq inventory from the LIQUIDATEES' ENTRIES
-            // through this close (pendingLiqEntryFundingIndex is their entry-weighted index, not
-            // the liquidation-time index), so funding stays zero-sum: this one signed term settles
+            // Realize funding accrued on the bucket from the LIQUIDATEES' ENTRIES through this
+            // close (Inventory.entryFundingIndex is their entry-weighted index, not the
+            // liquidation-time index), so funding stays zero-sum: this one signed term settles
             // both the dead estates' pre-liquidation balances and the vault's holding window into
             // insurance. The counterparty of this fill settles its own tab (if it is closing)
             // inside its fill via _applyFillMaker into its OWN bucket — its side never routes
@@ -1377,11 +1387,9 @@ library MatchingEngineLib {
             // AdlLib._settleInventorySlice.) The index is a size-weighted average, so it's
             // unchanged on a proportional partial close.
             int256 rawFunding = BazaarMathLib.signedMulDiv(
-                currentFundingIndex - pairVault.pendingLiqEntryFundingIndex,
-                int256(fillSize),
-                int256(BazaarTypes.BAZAAR_SCALE)
+                currentFundingIndex - inv.entryFundingIndex, int256(fillSize), int256(BazaarTypes.BAZAAR_SCALE)
             );
-            vaultPnl += pairVault.pendingLiqIsLong ? -rawFunding : rawFunding;
+            vaultPnl += vaultIsLong ? -rawFunding : rawFunding;
 
             // Gap-EMA accumulators, split at the oracle. SLIPPAGE is the fill against the oracle:
             // the execution cost of closing the inventory, which is what maintenance margin has
@@ -1394,13 +1402,11 @@ library MatchingEngineLib {
             // Both legs read a fresh oracle: unloadBook never walks against the stale fallback.
             uint256 oracle = ctx.cachedPrice;
             if (oracle != 0) {
-                bool vaultIsLong = pairVault.pendingLiqIsLong;
                 int256 slipBp = vaultIsLong
                     ? (int256(oracle) - int256(execPrice)) * int256(BazaarTypes.BP_SCALE) / int256(oracle)
                     : (int256(execPrice) - int256(oracle)) * int256(BazaarTypes.BP_SCALE) / int256(oracle);
 
-                uint256 avgBP =
-                    Math.mulDiv(pairVault.pendingLiqBankruptcyNotional, BazaarTypes.BAZAAR_SCALE, existingSize);
+                uint256 avgBP = Math.mulDiv(inv.bankruptcyNotional, BazaarTypes.BAZAAR_SCALE, existingSize);
                 int256 driftBp;
                 if (avgBP != 0) {
                     driftBp = vaultIsLong
@@ -1436,13 +1442,19 @@ library MatchingEngineLib {
                 res.totalLiqFillSize += fillSize;
             }
 
-            // Decrement vault aggregate proportionally (entryPortion shared with the PnL above)
-            uint256 bkPortion = Math.mulDiv(pairVault.pendingLiqBankruptcyNotional, fillSize, existingSize);
-            uint256 seizedPortion = Math.mulDiv(pairVault.pendingLiqSeized, fillSize, existingSize);
-            pairVault.pendingLiqSize = existingSize - fillSize;
-            pairVault.pendingLiqEntryNotional -= entryPortion;
-            pairVault.pendingLiqBankruptcyNotional -= bkPortion;
-            pairVault.pendingLiqSeized -= seizedPortion;
+            // Decrement the bucket proportionally (entryPortion shared with the PnL above). A
+            // bucket the fill empties is cleared whole, so its seizure stamp and entry index go
+            // with it and the next estate on that side seeds a fresh one.
+            uint256 seizedPortion = Math.mulDiv(inv.seized, fillSize, existingSize);
+            if (fillSize == existingSize) {
+                RiskParamsLib.clearBucket(inv);
+            } else {
+                uint256 bkPortion = Math.mulDiv(inv.bankruptcyNotional, fillSize, existingSize);
+                inv.size = existingSize - fillSize;
+                inv.entryNotional -= entryPortion;
+                inv.bankruptcyNotional -= bkPortion;
+                inv.seized -= seizedPortion;
+            }
             res.vaultEarmarkReleased += seizedPortion;
         }
     }

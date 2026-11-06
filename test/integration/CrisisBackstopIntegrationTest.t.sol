@@ -21,8 +21,8 @@ contract CrisisBackstopIntegrationTest is IntegrationBase {
     ///         first-come-first-served withdrawal window.
     function test_e2e_Deficit_TerminatesPairOnNextHealthCheck() public {
         // Record phantom bad debt directly (the netting-overrun producer is unit-tested elsewhere).
-        _stdstore.target(address(pair)).sig("pairVault()").depth(11).checked_write(100 * BAZAAR_SCALE);
-        (,,,,,,,,,,, uint256 deficit,,,,,) = pair.pairVault();
+        _stdstore.target(address(pair)).sig("pairVault()").depth(6).checked_write(100 * BAZAAR_SCALE);
+        (,,,,,, uint256 deficit,,,,,) = pair.pairVault();
         assertEq(deficit, 100 * BAZAAR_SCALE, "deficit seeded");
 
         // Any liquidation re-runs isVaultHealthy; Check 0 fires before everything else.
@@ -71,7 +71,7 @@ contract CrisisBackstopIntegrationTest is IntegrationBase {
         // deficit lands.
         uint256 futureCutoff = vm.getBlockTimestamp() + 3 days;
         _stdstore.target(address(pair)).sig("scheduledTerminationTs()").checked_write(futureCutoff);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(11).checked_write(100 * BAZAAR_SCALE);
+        _stdstore.target(address(pair)).sig("pairVault()").depth(6).checked_write(100 * BAZAAR_SCALE);
 
         // The notice period keeps the LIVE liquidation path open; its post-liquidation health
         // check hits Check 0 and fixes the settlement price at the live price.

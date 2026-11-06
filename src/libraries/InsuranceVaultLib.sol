@@ -284,17 +284,14 @@ library InsuranceVaultLib {
         if (scheduledTerminationTs != 0 && block.timestamp + BazaarTypes.LIMBO_LEAD >= scheduledTerminationTs) {
             revert InsuranceVaultLib__PairScheduledForTermination(scheduledTerminationTs);
         }
-        // Refused where a health check at this mark would open an ADL window on the inventory leg:
-        // the inventory's loss exceeds free capital above the reserve. The share price leaves that
-        // excess out because the auction charges it to winners, closing them at the estates'
-        // bankruptcy price; shares minted before the auction would take part of that recovery from
-        // the incumbents, and the capital would shrink it or, large enough, keep the window shut
-        // and leave the LPs the loss the winners would have paid. The deferred leg (a listed
-        // account the fund cannot afford to net, VaultHealthLib.checkLiqExposure) is not tested
-        // here, so a deposit can still land just before a window that leg opens. The pair refuses
-        // outright while a window is already open.
+        // Refused where a health check at this mark would open an ADL window: the inventory's loss
+        // exceeds free capital above the reserve. The share price leaves that excess out because
+        // the auction charges it to winners, closing them at the estates' bankruptcy price; shares
+        // minted before the auction would take part of that recovery from the incumbents, and the
+        // capital would shrink it or, large enough, keep the window shut and leave the LPs the loss
+        // the winners would have paid. The pair refuses outright while a window is already open.
         if (
-            vault.pendingLiqSize != 0
+            RiskParamsLib.inventorySize(vault) != 0
                 && RiskParamsLib.lossPastHeadroom(vault, lastPairPrice.spotPrice, currentFundingIndex)
         ) {
             revert InsuranceVaultLib__AdlBlocking();
@@ -667,7 +664,7 @@ library InsuranceVaultLib {
             // the window once the inventory has unloaded, the mark has moved back or new capital
             // has come in to leave room. A claim the headroom cannot pay any of is refused. A
             // terminated pair holds no inventory, so nothing is held back there.
-            if (vault.pendingLiqSize != 0) {
+            if (RiskParamsLib.inventorySize(vault) != 0) {
                 uint256 headroom = RiskParamsLib.redemptionHeadroom(
                     vault, lastPairPrice.spotPrice, params.currentFundingIndex, marginRequirements.mmrBp
                 );

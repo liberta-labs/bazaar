@@ -3,6 +3,7 @@ pragma solidity 0.8.34;
 
 import {IntegrationBase} from "./IntegrationBase.sol";
 import {AdlLib} from "../../src/libraries/AdlLib.sol";
+import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 
 /// @title RefreshPriceHealthTest
 /// @notice refreshPrice judges vault health against the price it stores. The ADL latch that
@@ -50,7 +51,9 @@ contract RefreshPriceHealthTest is IntegrationBase {
 
         assertTrue(pair.isAdlPending(), "the refresh opened the window");
         assertEq(pair.adlPendingSince(), vm.getBlockTimestamp(), "the timeout clock started at the refresh");
-        assertFalse(pair.auxState().adlLongs, "the winners are the side opposite the vault's longs");
+        (BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) = _vaultBuckets();
+        assertGt(l.size, 0, "the window is open on the long bucket, which shorts close");
+        assertEq(s.size, 0, "the short bucket is empty");
 
         // The auction is startable now: the only refusal left is the empty submission, not the latch.
         bytes[] memory pu = _freshPrice();
@@ -83,7 +86,7 @@ contract RefreshPriceHealthTest is IntegrationBase {
         mockPyth.updatePriceFeeds{value: mockPyth.getUpdateFee(warm)}(warm);
         aaplPair.refreshPrice(new bytes[](0));
 
-        (,,,,, uint256 fund,,,,,,,,,,,) = aaplPair.pairVault();
+        (,,,,, uint256 fund,,,,,,) = aaplPair.pairVault();
         // One unit long at an $8k entry with half the fund seized: at the $150 mark the loss
         // beyond the seizure is $7,850 - fund/2, past the whole free half.
         _stageHeldInventory(aaplPair, 8_000 * BAZAAR_SCALE, fund / 2);

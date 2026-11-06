@@ -64,7 +64,8 @@ contract FundingLibTest is Test {
     function _oi(uint256 size) internal {
         vault.totalLongOI = size;
         vault.totalShortOI = size;
-        vault.pendingLiqSize = 0;
+        vault.longInv.size = 0;
+        vault.shortInv.size = 0;
     }
 
     function _floor(uint256 index) internal view returns (uint256) {

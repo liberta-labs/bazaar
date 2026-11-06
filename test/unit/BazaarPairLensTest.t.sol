@@ -22,11 +22,6 @@ contract MockPairForLens {
     bool public isContinuouslyTraded = true;
     uint256 public adlPendingSince;
     uint256 public adlAuctionStartTs;
-    uint256 internal pLiqSize;
-    uint256 internal pLiqEntry;
-    uint256 internal pLiqBk;
-    int256 internal pLiqFundingIdx;
-    bool internal pLiqIsLong;
     mapping(address => BazaarTypes.PositionBucket) internal buckets;
     mapping(address => uint256) public adlScoreDeposit;
     mapping(address => uint256) public terminalProfitClaim;
@@ -38,10 +33,9 @@ contract MockPairForLens {
     address public usdc;
     // The deposits ledger, set high enough that it never caps a withdrawal quote.
     uint256 internal deposited_ = 1e30;
-    uint256 internal snapPrice;
-    int256 internal snapFundingIdx;
-    bool internal snapAdlLongs;
-    uint256 internal deferredCount_;
+    // The vault's two buckets of liquidation inventory.
+    BazaarTypes.Inventory internal longInv_;
+    BazaarTypes.Inventory internal shortInv_;
     int256 internal fundingIdx_;
     uint256 internal frozenPrincipalRatio;
     uint256 internal frozenProfitRatio;
@@ -63,9 +57,9 @@ contract MockPairForLens {
     // Raw storage the lens reads through extsload, at BazaarPair's slots.
     mapping(bytes32 => bytes32) internal slots;
     uint256 internal constant SLOT_USER_ACTIVE_LIMIT_ORDERS = 2;
-    uint256 internal constant SLOT_MARK_PREMIUM_NOTIONAL = 63;
-    uint256 internal constant SLOT_FEE_ESCROW_TOTAL = 106;
-    uint256 internal constant SLOT_FEE_ESCROW_CLAIMABLE = 107;
+    uint256 internal constant SLOT_MARK_PREMIUM_NOTIONAL = 66;
+    uint256 internal constant SLOT_FEE_ESCROW_TOTAL = 108;
+    uint256 internal constant SLOT_FEE_ESCROW_CLAIMABLE = 109;
 
     function extsload(bytes32 slot) external view returns (bytes32) {
         return slots[slot];
@@ -107,19 +101,7 @@ contract MockPairForLens {
         adlAuctionStartTs = since_;
     }
 
-    function setAdlSnapshot(uint256 price_, int256 snapFundingIdx_, bool adlLongs_) external {
-        snapPrice = price_;
-        snapFundingIdx = snapFundingIdx_;
-        snapAdlLongs = adlLongs_;
-    }
-
-    /// @dev Deferred liquidations left open for the auction: while nonzero, the inventory's own
-    ///      side is a candidate cohort too.
-    function setDeferredCount(uint256 n) external {
-        deferredCount_ = n;
-    }
-
-    /// @dev The live funding index, which the deferred cohort ranks against.
+    /// @dev The live funding index, which every ADL candidate ranks against.
     function setFundingIndex(int256 idx_) external {
         fundingIdx_ = idx_;
     }
@@ -232,29 +214,39 @@ contract MockPairForLens {
         );
     }
 
+    /// @dev Stage one bucket on `isLong_`'s side and empty the other.
     function setPendingLiq(uint256 size_, uint256 entry_, uint256 bk_, bool isLong_) external {
-        pLiqSize = size_;
-        pLiqEntry = entry_;
-        pLiqBk = bk_;
-        pLiqIsLong = isLong_;
+        BazaarTypes.Inventory storage b = isLong_ ? longInv_ : shortInv_;
+        BazaarTypes.Inventory storage other = isLong_ ? shortInv_ : longInv_;
+        b.size = size_;
+        b.entryNotional = entry_;
+        b.bankruptcyNotional = bk_;
+        delete other.size;
+        delete other.entryNotional;
+        delete other.bankruptcyNotional;
+        delete other.seized;
+        delete other.entryFundingIndex;
+        delete other.seizedTs;
+    }
+
+    /// @dev The staged bucket: the long one unless only the short one holds inventory.
+    function _staged() internal view returns (BazaarTypes.Inventory storage) {
+        return shortInv_.size != 0 && longInv_.size == 0 ? shortInv_ : longInv_;
     }
 
     function setPendingLiqFundingIndex(int256 idx_) external {
-        pLiqFundingIdx = idx_;
+        _staged().entryFundingIndex = int192(idx_);
     }
 
-    uint256 internal pLiqSeized;
     uint256 internal targetInsuranceRatioBp_;
     uint256 internal mark_;
 
     function setPendingLiqSeized(uint256 seized_) external {
-        pLiqSeized = seized_;
+        _staged().seized = seized_;
     }
 
-    uint64 internal pLiqSeizedTs;
-
     function setPendingLiqSeizedTs(uint64 ts_) external {
-        pLiqSeizedTs = ts_;
+        _staged().seizedTs = ts_;
     }
 
     function setTargetInsuranceRatioBp(uint256 bp) external {
@@ -308,14 +300,9 @@ contract MockPairForLens {
             uint256,
             uint256,
             uint256,
-            int256,
-            bool,
-            uint256,
-            uint256,
-            uint256,
-            uint256,
-            uint64,
-            uint128
+            uint128,
+            BazaarTypes.Inventory memory,
+            BazaarTypes.Inventory memory
         )
     {
         return (
@@ -325,27 +312,18 @@ contract MockPairForLens {
             0,
             deposited_,
             insuranceFundBalance,
-            pLiqSize,
-            pLiqEntry,
-            pLiqBk,
-            pLiqFundingIdx,
-            pLiqIsLong,
             0,
             targetInsuranceRatioBp_,
-            pLiqSeized,
             0,
-            pLiqSeizedTs,
-            0
+            0,
+            longInv_,
+            shortInv_
         );
     }
 
     function auxState() external view returns (BazaarTypes.AuxState memory a) {
         a.lastMarkUpdateTs = markAnchor_;
         a.rollingVolume = markVolume_;
-        a.adlSnapshotPrice = snapPrice;
-        a.adlSnapshotFundingIndex = snapFundingIdx;
-        a.adlLongs = snapAdlLongs;
-        a.deferredCount = deferredCount_;
         a.settlementPrice = fixedSettlementPrice;
         a.terminalPrincipalRatio = frozenPrincipalRatio;
         a.terminalProfitRatio = frozenProfitRatio;
@@ -652,20 +630,22 @@ contract BazaarPairLensTest is Test {
         assertEq(end, 1);
     }
 
-    // ---------------- getAdlScore (mirrors AdlLib's Pass-1 ranking) ----------------
+    // ---------------- getAdlScore (mirrors AdlLib's ranking scan) ----------------
 
     address constant WINNER = address(0xA11CE);
 
-    /// @dev Canonical scenario: LONGS were liquidated, so winners are SHORTS (adlLongs=false).
-    ///      Snapshot $100; a short from $150 entry carries $50 snapshot PnL per unit.
+    /// @dev Canonical scenario: the vault holds a LONG bucket, so its candidates are SHORTS. The
+    ///      stored mark is $100; a short from $150 entry carries $50 PnL per unit there.
     function _setupAdlWindow() internal {
         pair.setAdl(true, block.timestamp);
-        pair.setAdlSnapshot(100 * SCALE, 0, false);
+        pair.setMark(100 * SCALE);
+        pair.setPendingLiq(1 * SCALE, 100 * SCALE, 90 * SCALE, true);
         vm.warp(block.timestamp + DURATION); // decayed threshold = 1: any positive score is eligible
     }
 
     function test_getAdlScore_notPending_zero() public {
-        pair.setAdlSnapshot(100 * SCALE, 0, false);
+        pair.setMark(100 * SCALE);
+        pair.setPendingLiq(1 * SCALE, 100 * SCALE, 90 * SCALE, true);
         pair.setBucket(WINNER, false, 1 * SCALE, 150 * SCALE, 10 * SCALE);
         (uint256 score, bool eligible) = lens.getAdlScore(address(pair), WINNER);
         assertEq(score, 0, "no ADL pending: no score");
@@ -678,15 +658,15 @@ contract BazaarPairLensTest is Test {
         (uint256 score, bool eligible) = lens.getAdlScore(address(pair), address(0xF1A7));
         assertEq(score, 0, "flat user");
         assertFalse(eligible);
-        // Wrong side (long when winners are shorts).
+        // A long has nothing to close against: the short bucket is empty.
         pair.setBucket(WINNER, true, 1 * SCALE, 150 * SCALE, 10 * SCALE);
         (score, eligible) = lens.getAdlScore(address(pair), WINNER);
-        assertEq(score, 0, "wrong side");
+        assertEq(score, 0, "nothing in the bucket opposite the account");
         assertFalse(eligible);
-        // Right side but losing at the snapshot (short from $90 entry, snapshot $100).
+        // Right side but losing at the mark (short from $90 entry, mark $100).
         pair.setBucket(WINNER, false, 1 * SCALE, 90 * SCALE, 10 * SCALE);
         (score, eligible) = lens.getAdlScore(address(pair), WINNER);
-        assertEq(score, 0, "non-positive snapshot PnL");
+        assertEq(score, 0, "non-positive PnL at the ranking price");
         assertFalse(eligible);
     }
 
@@ -717,84 +697,84 @@ contract BazaarPairLensTest is Test {
 
     function test_getAdlScore_belowDecayingThreshold_scoredButIneligible() public {
         pair.setAdl(true, block.timestamp); // auction just opened: threshold = 1 + 25e18
-        pair.setAdlSnapshot(100 * SCALE, 0, false);
+        pair.setMark(100 * SCALE);
+        pair.setPendingLiq(1 * SCALE, 100 * SCALE, 90 * SCALE, true);
         pair.setBucket(WINNER, false, 1 * SCALE, 150 * SCALE, 10 * SCALE);
         (uint256 score, bool eligible) = lens.getAdlScore(address(pair), WINNER);
         assertEq(score, 5 * SCALE, "score is reported either way");
         assertFalse(eligible, "5.0 < opening threshold");
     }
 
-    // -------- each cohort ranks at its own price --------
+    // -------- both sides rank at the stored price and the live funding index --------
 
-    /// @dev A long on the inventory's own side (the window's inventory is long: adlLongs=false),
-    ///      a candidate only against the deferred liquidations.
-    address constant DEFERRED_ALLY = address(0xD1F);
+    /// @dev A long, a candidate only while the vault holds a SHORT bucket.
+    address constant LONG_WINNER = address(0xD1F);
 
-    /// @notice An account on the inventory's own side closes against the deferred liquidations,
-    ///         which the chain ranks at the price the call attests, so the lens scores it at the
-    ///         pair's last stored price: a long from $80 on $10 is $20 up at the $100 snapshot
-    ///         but $40 up at the $120 mark, and a cohort sorted by the snapshot figure is
-    ///         refused on-chain.
-    function test_getAdlScore_deferredCohort_ranksAtTheStoredPrice() public {
-        _setupAdlWindow();
-        pair.setDeferredCount(1);
+    /// @notice A long closes against the short bucket, and the chain ranks it at the price the
+    ///         call resolves, so the lens scores it at the pair's last stored price: a long from
+    ///         $80 on $10 is $40 up at the $120 mark.
+    function test_getAdlScore_shortBucket_longRanksAtTheStoredPrice() public {
+        pair.setAdl(true, block.timestamp);
+        vm.warp(block.timestamp + DURATION);
+        pair.setPendingLiq(1 * SCALE, 100 * SCALE, 110 * SCALE, false);
         pair.setMark(120 * SCALE);
-        pair.setBucket(DEFERRED_ALLY, true, 1 * SCALE, 80 * SCALE, 10 * SCALE);
-        (uint256 score, bool eligible) = lens.getAdlScore(address(pair), DEFERRED_ALLY);
-        assertEq(score, 4 * SCALE, "$40 pnl at the $120 mark / $10, not the snapshot's $20");
+        pair.setBucket(LONG_WINNER, true, 1 * SCALE, 80 * SCALE, 10 * SCALE);
+        (uint256 score, bool eligible) = lens.getAdlScore(address(pair), LONG_WINNER);
+        assertEq(score, 4 * SCALE, "$40 pnl at the $120 mark / $10");
         assertTrue(eligible, "past the auction: threshold 1");
     }
 
-    /// @notice The same cohort reads the live funding index, not the snapshot's: an index of +10
-    ///         per unit since entry debits a long $10, so at a $100 mark the long from $80 is
-    ///         $20 - $10 = $10 up on $10 collateral.
-    function test_getAdlScore_deferredCohort_ranksAtTheLiveFundingIndex() public {
-        _setupAdlWindow();
-        pair.setDeferredCount(1);
+    /// @notice The live funding index is part of the ranking: an index of +10 per unit since entry
+    ///         debits a long $10, so at a $100 mark the long from $80 is $20 - $10 = $10 up on $10
+    ///         collateral.
+    function test_getAdlScore_shortBucket_longRanksAtTheLiveFundingIndex() public {
+        pair.setAdl(true, block.timestamp);
+        vm.warp(block.timestamp + DURATION);
+        pair.setPendingLiq(1 * SCALE, 100 * SCALE, 110 * SCALE, false);
         pair.setMark(100 * SCALE);
         pair.setFundingIndex(10 * int256(SCALE));
-        pair.setBucket(DEFERRED_ALLY, true, 1 * SCALE, 80 * SCALE, 10 * SCALE);
-        (uint256 score,) = lens.getAdlScore(address(pair), DEFERRED_ALLY);
+        pair.setBucket(LONG_WINNER, true, 1 * SCALE, 80 * SCALE, 10 * SCALE);
+        (uint256 score,) = lens.getAdlScore(address(pair), LONG_WINNER);
         assertEq(score, 1 * SCALE, "($20 price pnl - $10 funding) / $10 at the live index");
     }
 
-    /// @notice A profit that exists only at the snapshot is no profit for this cohort: the long
-    ///         from $80 is up at the $100 snapshot and under water at a $75 mark, so it scores 0.
-    function test_getAdlScore_deferredCohort_losingAtTheMark_zero() public {
-        _setupAdlWindow();
-        pair.setDeferredCount(1);
+    /// @notice No profit at the ranking price is no candidacy: the long from $80 is under water
+    ///         at a $75 mark, so it scores 0 although the short bucket is there to close against.
+    function test_getAdlScore_shortBucket_longLosingAtTheMark_zero() public {
+        pair.setAdl(true, block.timestamp);
+        vm.warp(block.timestamp + DURATION);
+        pair.setPendingLiq(1 * SCALE, 100 * SCALE, 110 * SCALE, false);
         pair.setMark(75 * SCALE);
-        pair.setBucket(DEFERRED_ALLY, true, 1 * SCALE, 80 * SCALE, 10 * SCALE);
-        (uint256 score, bool eligible) = lens.getAdlScore(address(pair), DEFERRED_ALLY);
+        pair.setBucket(LONG_WINNER, true, 1 * SCALE, 80 * SCALE, 10 * SCALE);
+        (uint256 score, bool eligible) = lens.getAdlScore(address(pair), LONG_WINNER);
         assertEq(score, 0, "no profit at the ranking price");
         assertFalse(eligible);
     }
 
-    /// @notice The same cohort ranks on its full collateral, as AdlLib._closeDeferred does: a
-    ///         deposit tagged to the live window is not subtracted, so the long from $80 on $10
-    ///         scores $20 / $10 at the $100 mark whatever its tag says, where the inventory's
-    ///         counterparties would be ranked on $10 - $9.
-    function test_getAdlScore_deferredCohort_windowDepositNotSubtracted() public {
-        _setupAdlWindow();
-        pair.setDeferredCount(1);
+    /// @notice A deposit tagged to the live window is subtracted on this side too, as
+    ///         AdlLib._scan subtracts it for every candidate: the long from $80 on $10 with a $9
+    ///         tag scores $20 / ($10 - $9) at the $100 mark.
+    function test_getAdlScore_shortBucket_windowDepositSubtracted() public {
+        pair.setAdl(true, block.timestamp);
+        vm.warp(block.timestamp + DURATION);
+        pair.setPendingLiq(1 * SCALE, 100 * SCALE, 110 * SCALE, false);
         pair.setMark(100 * SCALE);
-        pair.setBucket(DEFERRED_ALLY, true, 1 * SCALE, 80 * SCALE, 10 * SCALE);
-        pair.setAdlScoreDeposit(DEFERRED_ALLY, 9 * SCALE);
-        (uint256 score,) = lens.getAdlScore(address(pair), DEFERRED_ALLY);
-        assertEq(score, 2 * SCALE, "$20 pnl / the full $10, not / ($10 - $9)");
+        pair.setBucket(LONG_WINNER, true, 1 * SCALE, 80 * SCALE, 10 * SCALE);
+        pair.setAdlScoreDeposit(LONG_WINNER, 9 * SCALE);
+        (uint256 score,) = lens.getAdlScore(address(pair), LONG_WINNER);
+        assertEq(score, 20 * SCALE, "$20 pnl / ($10 - $9)");
     }
 
-    /// @notice The inventory's counterparties keep ranking at the frozen snapshot whatever the
-    ///         mark and the funding index do since: the short from $150 scores 5.0 at the $100
-    ///         snapshot although at the $120 mark it is only $30 up and the live index has moved.
-    function test_getAdlScore_winners_stayAtTheSnapshotWhenTheMarkMoves() public {
+    /// @notice The long bucket's counterparties move with the mark and the funding index like
+    ///         every candidate: the short from $150 is $30 up at the $120 mark and receives $10 of
+    ///         funding at an index of +10, so it scores 4.0, not the 5.0 it carried at $100.
+    function test_getAdlScore_winners_followTheMarkAndTheFundingIndex() public {
         _setupAdlWindow();
-        pair.setDeferredCount(1);
         pair.setMark(120 * SCALE);
         pair.setFundingIndex(10 * int256(SCALE));
         pair.setBucket(WINNER, false, 1 * SCALE, 150 * SCALE, 10 * SCALE);
         (uint256 score, bool eligible) = lens.getAdlScore(address(pair), WINNER);
-        assertEq(score, 5 * SCALE, "$50 pnl at the $100 snapshot / $10");
+        assertEq(score, 4 * SCALE, "($30 price pnl + $10 funding received) / $10 at the $120 mark");
         assertTrue(eligible);
     }
 
@@ -922,19 +902,19 @@ contract BazaarPairLensTest is Test {
         assertEq(ebpScale, BazaarTypes.EBP_SCALE);
     }
 
-    /// @notice The entry funding index has to come through with the notionals: without it a
-    ///         caller can only rebuild the price half of the vault's PnL.
+    /// @notice Both buckets come through whole, the entry funding index with the notionals:
+    ///         without it a caller can only rebuild the price half of the vault's PnL.
     function test_getPendingLiquidationExposure_forwardsFields() public {
         pair.setPendingLiq(5 * SCALE, 250_000 * SCALE, 240_000 * SCALE, true);
         pair.setPendingLiqFundingIndex(-7 * int256(SCALE));
         pair.setPendingLiqSeizedTs(1_700_000_123);
-        (uint256 size, uint256 entry, uint256 bk, int256 fundingIdx, bool isLong, uint64 seizedTs) =
+        (BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) =
             lens.getPendingLiquidationExposure(address(pair));
-        assertEq(size, 5 * SCALE);
-        assertEq(entry, 250_000 * SCALE);
-        assertEq(bk, 240_000 * SCALE);
-        assertEq(fundingIdx, -7 * int256(SCALE), "entry funding index forwarded, sign preserved");
-        assertTrue(isLong);
-        assertEq(seizedTs, 1_700_000_123, "seizure stamp forwarded: what the unload floor opens from");
+        assertEq(l.size, 5 * SCALE);
+        assertEq(l.entryNotional, 250_000 * SCALE);
+        assertEq(l.bankruptcyNotional, 240_000 * SCALE);
+        assertEq(l.entryFundingIndex, -7 * int256(SCALE), "entry funding index forwarded, sign preserved");
+        assertEq(l.seizedTs, 1_700_000_123, "seizure stamp forwarded: what the unload floor opens from");
+        assertEq(s.size, 0, "the short bucket is empty");
     }
 }

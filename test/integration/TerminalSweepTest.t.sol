@@ -130,7 +130,7 @@ contract TerminalSweepTest is IntegrationBase {
     /// @dev pairVault.deficit — Vault field index 11; after finalize, the open positions' negative
     ///      equity beyond the principal every other bucket holds.
     function _deficit() internal view returns (uint256 d) {
-        (,,,,,,,,,,, d,,,,,) = pair.pairVault();
+        (,,,,,, d,,,,,) = pair.pairVault();
     }
 
     // ============================ gating ============================

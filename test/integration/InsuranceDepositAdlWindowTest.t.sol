@@ -39,9 +39,9 @@ contract InsuranceDepositAdlWindowTest is IntegrationBase {
         assertEq(pair.liquidate(_arr1(dave), pu), 1, "fixture: dave seized");
     }
 
-    /// @dev Seizing dave at $30k hands the vault a 0.72 long whose $36,000 loss is far past his
-    ///      $19,200 and the fund, so a window opens with bob, the short, as the winner a batch
-    ///      closes.
+    /// @dev Seizing dave at $30k hands the vault's long bucket a 0.72 long whose $36,000 loss is
+    ///      far past his $19,200 and the fund, so a window opens with bob, the short, as the winner
+    ///      a batch closes the long bucket against.
     function _openWindow() internal {
         _openPositions();
         _seizeDaveAt(MARK_USD);
@@ -54,12 +54,8 @@ contract InsuranceDepositAdlWindowTest is IntegrationBase {
     function _holdInventoryWithinHeadroom() internal {
         _openPositions();
         _seizeDaveAt(52_000);
-        assertGt(_pendingLiqSize(), 0, "fixture: the vault holds dave's position");
+        assertGt(_inventorySize(), 0, "fixture: the vault holds dave's position");
         assertFalse(pair.isAdlPending(), "fixture: the loss fits the fund's headroom");
-    }
-
-    function _pendingLiqSize() internal view returns (uint256 size) {
-        (,,,,,, size,,,,,,,,,,) = pair.pairVault();
     }
 
     /// @dev A deposit of `amount` by `user` carrying a fresh update at `priceUsd`, three seconds on,

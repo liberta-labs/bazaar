@@ -517,7 +517,7 @@ library RiskParamsLib {
     ) external {
         if (lastPrice.updateTs <= prevUpdateTs) return;
         uint256 freeCapital = insuranceFreeCapital(vault);
-        uint256 inventoryNotional = Math.mulDiv(vault.pendingLiqSize, lastPrice.spotPrice, BAZAAR_SCALE);
+        uint256 inventoryNotional = Math.mulDiv(inventorySize(vault), lastPrice.spotPrice, BAZAAR_SCALE);
         uint256 minGap = inventoryNotional >= BazaarTypes.UNLOAD_BOUNTY_MIN_NOTIONAL
                 && freeCapital > REFRESH_BOUNTY_FAST_MIN_INSURANCE
             ? REFRESH_BOUNTY_MIN_GAP
@@ -909,11 +909,12 @@ library RiskParamsLib {
     /// @dev Per-side: a position is counted once, not once per counterparty. Every consumer's
     ///      threshold is calibrated against this basis.
     ///
-    ///      The vault's inherited inventory is counted on the side it sits. A liquidation moves
-    ///      size out of the OI aggregates and into pendingLiqSize without changing the exposure —
-    ///      the vault simply stands where the trader stood — so reading the aggregates alone would
-    ///      report the book shrinking at the moment the vault takes on risk, inflating every
-    ///      coverage ratio measured against it.
+    ///      The vault's inventory is counted on the side it sits: liquidated longs on the long
+    ///      side, liquidated shorts on the short side. A liquidation moves size out of the OI
+    ///      aggregates and into a bucket without changing the exposure — the vault simply stands
+    ///      where the trader stood — so reading the aggregates alone would report the book
+    ///      shrinking at the moment the vault takes on risk, inflating every coverage ratio
+    ///      measured against it.
     ///
     ///      max of the two sides rather than either leg alone, because a liquidation can drain
     ///      whichever side it lands on. The sides are equal whenever the aggregates are exact, so
@@ -922,34 +923,175 @@ library RiskParamsLib {
     /// @param v The pair's vault aggregates
     /// @return Per-side open-interest size in BAZAAR_SCALE precision
     function openInterestSize(BazaarTypes.Vault storage v) internal view returns (uint256) {
-        uint256 longSide = v.totalLongOI;
-        uint256 shortSide = v.totalShortOI;
-        uint256 pending = v.pendingLiqSize;
-        if (pending != 0) {
-            if (v.pendingLiqIsLong) longSide += pending;
-            else shortSide += pending;
-        }
+        uint256 longSide = v.totalLongOI + v.longInv.size;
+        uint256 shortSide = v.totalShortOI + v.shortInv.size;
         return longSide > shortSide ? longSide : shortSide;
     }
 
     /// @notice openInterestSize for a caller holding a copy of the vault's aggregates rather than
-    ///         its storage. Same per-side basis: the vault's inventory counts on the side it sits.
+    ///         its storage. Same per-side basis: each bucket counts on its own side.
     /// @param longOI Long-side open interest of live positions
     /// @param shortOI Short-side open interest of live positions
-    /// @param pendingSize Inventory the vault holds
-    /// @param pendingIsLong Side the vault's inventory sits on
+    /// @param longInvSize The size of the vault's long bucket
+    /// @param shortInvSize The size of the vault's short bucket
     /// @return Per-side open-interest size in BAZAAR_SCALE precision
-    function openInterestSizeOf(uint256 longOI, uint256 shortOI, uint256 pendingSize, bool pendingIsLong)
+    function openInterestSizeOf(uint256 longOI, uint256 shortOI, uint256 longInvSize, uint256 shortInvSize)
         internal
         pure
         returns (uint256)
     {
-        if (pendingIsLong) longOI += pendingSize;
-        else shortOI += pendingSize;
+        longOI += longInvSize;
+        shortOI += shortInvSize;
         return longOI > shortOI ? longOI : shortOI;
     }
 
     // -------------------- Vault inventory --------------------
+
+    /// @notice The vault's bucket on one side.
+    /// @param v The pair's vault aggregates
+    /// @param isLong The side
+    /// @return The long bucket for true, the short bucket for false
+    function bucketOf(BazaarTypes.Vault storage v, bool isLong) internal view returns (BazaarTypes.Inventory storage) {
+        return isLong ? v.longInv : v.shortInv;
+    }
+
+    /// @notice The inventory the vault holds across both buckets.
+    /// @param v The pair's vault aggregates
+    /// @return Both buckets' size in BAZAAR_SCALE precision
+    function inventorySize(BazaarTypes.Vault storage v) internal view returns (uint256) {
+        return v.longInv.size + v.shortInv.size;
+    }
+
+    /// @notice Collateral the insurance fund received alongside inventory the vault still holds,
+    ///         both buckets together.
+    /// @dev Tracked per bucket rather than recovered from the two notionals (Inventory.seized).
+    ///      Cash only: an estate the deposits ledger could not fully back leaves a smaller earmark
+    ///      and the rest in `ledgerArrears`, so the balance less this figure is exactly the cash
+    ///      the fund may spend. It takes no price. Free capital, the balance less this figure, is
+    ///      the price-independent part of both share-pricing bases: the part no redemption can
+    ///      time.
+    /// @param v The pair's vault aggregates
+    /// @return The seizure still earmarked against open inventory, in BAZAAR_SCALE precision
+    function seizedTotal(BazaarTypes.Vault storage v) internal view returns (uint256) {
+        return v.longInv.seized + v.shortInv.seized;
+    }
+
+    /// @notice The side the vault's net exposure sits on: long when the long bucket is at least as
+    ///         large as the short one. With the buckets equal the exposure is nil and the side is
+    ///         immaterial.
+    /// @param v The pair's vault aggregates
+    /// @return True when the net exposure is long
+    function netLong(BazaarTypes.Vault storage v) internal view returns (bool) {
+        return v.longInv.size >= v.shortInv.size;
+    }
+
+    /// @notice The overlap of the two buckets and what netting it realizes for the fund.
+    /// @dev The overlap is a long and a short of equal size, so closing both at one price cancels
+    ///      the price in the price leg and the live index in the funding leg. What is left is the
+    ///      gap between the two sides' entry bases on the overlap plus the offset between their
+    ///      entry clocks, and neither moves with the mark: an overlap that survives costs the fund
+    ///      a fixed amount however the price moves. The seizure backing it is each bucket's share
+    ///      of its own, pro rata.
+    /// @param v The pair's vault aggregates
+    /// @return o The overlap: the smaller bucket's size, 0 when either bucket is empty
+    /// @return pnl What netting the overlap realizes for the fund, signed
+    /// @return seized The two netted slices' seizure
+    function overlap(BazaarTypes.Vault storage v) internal view returns (uint256 o, int256 pnl, uint256 seized) {
+        BazaarTypes.Inventory storage l = v.longInv;
+        BazaarTypes.Inventory storage s = v.shortInv;
+        o = l.size < s.size ? l.size : s.size;
+        if (o == 0) return (0, 0, 0);
+        uint256 longEntry = Math.mulDiv(l.entryNotional, o, l.size);
+        uint256 shortEntry = Math.mulDiv(s.entryNotional, o, s.size);
+        // The long sold and the short bought back at one price p: (p − longEntry) + (shortEntry − p).
+        pnl = int256(shortEntry) - int256(longEntry);
+        // The long pays (idx − fL)·o of funding and the short receives (idx − fS)·o; the live index
+        // cancels and (fL − fS)·o is left. The index carries the price factor, so this is USD.
+        pnl += BazaarMathLib.signedMulDiv(
+            int256(l.entryFundingIndex) - int256(s.entryFundingIndex), int256(o), int256(BAZAAR_SCALE)
+        );
+        seized = Math.mulDiv(l.seized, o, l.size) + Math.mulDiv(s.seized, o, s.size);
+    }
+
+    /// @notice inventoryPnl on one bucket.
+    /// @param b The bucket
+    /// @param isLong The bucket's side
+    /// @param price Price to value it at (BAZAAR_SCALE precision)
+    /// @param currentFundingIndex The pair's live cumulative funding index
+    /// @return Signed PnL in BAZAAR_SCALE precision; 0 for an empty bucket
+    function bucketPnl(BazaarTypes.Inventory storage b, bool isLong, uint256 price, int256 currentFundingIndex)
+        internal
+        view
+        returns (int256)
+    {
+        // The size first: an empty bucket costs one storage read, on every path that values the
+        // vault while it holds nothing.
+        uint256 size = b.size;
+        if (size == 0) return 0;
+        return inventoryPnl(size, b.entryNotional, b.entryFundingIndex, isLong, price, currentFundingIndex);
+    }
+
+    /// @notice A bucket's average bankruptcy price, rounded toward the vault: up for the long
+    ///         bucket, which the vault sells, and down for the short bucket, which it buys back.
+    ///         Closed in full at that price the bucket realizes no less than its bankruptcy
+    ///         notional as a long and pays no more than it as a short, so the seizure covers the
+    ///         close; rounded the other way the close would cost the fund up to a wei per unit.
+    /// @param b The bucket
+    /// @param isLong The bucket's side
+    /// @return The price in BAZAAR_SCALE precision; 0 for an empty bucket
+    function bucketBankruptcyPrice(BazaarTypes.Inventory storage b, bool isLong) internal view returns (uint256) {
+        uint256 size = b.size;
+        if (size == 0) return 0;
+        return Math.mulDiv(b.bankruptcyNotional, BAZAAR_SCALE, size, isLong ? Math.Rounding.Ceil : Math.Rounding.Floor);
+    }
+
+    /// @notice What closing a whole bucket at its average bankruptcy price costs the fund beyond
+    ///         the seizure earmarked against it: the collateral the deposits ledger could not hand
+    ///         over at seizure plus the funding accrued while the vault held the bucket, net of
+    ///         funding it received over that stretch. 0 for an empty bucket.
+    /// @dev The bankruptcy price is the entry basis displaced by the estates' full collateral and
+    ///      their pre-liquidation funding, so against a settlement measured from the estates'
+    ///      entry (bucketPnl) only the holding window's funding survives, and against the cash
+    ///      earmark only the collateral the ledger did not pay. A close at that price is paid from
+    ///      the slice's earmark first, then net of the arrears and from free capital
+    ///      (AdlLib._settleInventorySlice, fundLedgerFrom), so this is what the arrears and free
+    ///      capital together must hold for it to book no deficit — the backing a netting of the
+    ///      two buckets must leave the bucket that survives it (overlapAffordable).
+    /// @param b The bucket
+    /// @param isLong The bucket's side
+    /// @param currentFundingIndex The pair's live cumulative funding index
+    /// @return The uncovered cost in BAZAAR_SCALE precision
+    function bucketBankruptcyCloseCost(BazaarTypes.Inventory storage b, bool isLong, int256 currentFundingIndex)
+        internal
+        view
+        returns (uint256)
+    {
+        if (b.size == 0) return 0;
+        int256 net = bucketPnl(b, isLong, bucketBankruptcyPrice(b, isLong), currentFundingIndex) + int256(b.seized);
+        return net < 0 ? uint256(-net) : 0;
+    }
+
+    /// @notice Which bucket an unload walk works: the one above water at `oracle`, where a sale
+    ///         or a cover at the oracle is at or better than the bucket's bankruptcy price, and
+    ///         otherwise the larger one, long on a tie.
+    /// @dev Two buckets both above water seldom persist: whatever loss their overlap carries is
+    ///      within the seizure backing it, and a netting within that backing is taken as it arises
+    ///      (tryNetBuckets) unless the arrears the surviving bucket needs are short. One walk works
+    ///      one bucket; the next call works the other. Public so MatchingEngineLib reaches it
+    ///      through this library's DELEGATECALL rather than carrying the arithmetic.
+    /// @param v The pair's vault aggregates
+    /// @param oracle The walk's oracle price (BAZAAR_SCALE precision)
+    /// @return True for the long bucket
+    function unloadBucketIsLong(BazaarTypes.Vault storage v, uint256 oracle) public view returns (bool) {
+        uint256 l = v.longInv.size;
+        uint256 s = v.shortInv.size;
+        if (s == 0) return true;
+        if (l == 0) return false;
+        bool longAbove = oracle >= bucketBankruptcyPrice(v.longInv, true);
+        bool shortAbove = oracle <= bucketBankruptcyPrice(v.shortInv, false);
+        if (longAbove != shortAbove) return longAbove;
+        return l >= s;
+    }
 
     /// @notice Signed PnL of `size` units of inherited inventory closed at `price`, measured from
     ///         the liquidatees' entry on both legs. The arithmetic behind vaultPnl, on values
@@ -993,10 +1135,14 @@ library RiskParamsLib {
     ///      pre-liquidation funding and the vault's holding window settle into insurance
     ///      together as one signed term.
     ///
+    ///      Both buckets together. On their overlap the price cancels, so the figure moves with
+    ///      the price only by the net exposure (netLong) and carries the overlap's fixed
+    ///      realization (overlap) whatever the price is.
+    ///
     ///      Public rather than internal so it reaches callers through this library's
     ///      DELEGATECALL instead of being inlined into every consumer; BazaarPair reaches it
-    ///      via VaultHealthLib and has no room to carry the arithmetic itself. The size is read
-    ///      first so an empty vault costs one storage read.
+    ///      via VaultHealthLib and has no room to carry the arithmetic itself. Each bucket's size
+    ///      is read first so an empty bucket costs one storage read.
     /// @param v The pair's vault aggregates
     /// @param currentPrice Price to value the inventory at (BAZAAR_SCALE precision)
     /// @param currentFundingIndex The pair's live cumulative funding index
@@ -1006,16 +1152,8 @@ library RiskParamsLib {
         view
         returns (int256)
     {
-        uint256 size = v.pendingLiqSize;
-        if (size == 0) return 0;
-        return inventoryPnl(
-            size,
-            v.pendingLiqEntryNotional,
-            v.pendingLiqEntryFundingIndex,
-            v.pendingLiqIsLong,
-            currentPrice,
-            currentFundingIndex
-        );
+        return bucketPnl(v.longInv, true, currentPrice, currentFundingIndex)
+            + bucketPnl(v.shortInv, false, currentPrice, currentFundingIndex);
     }
 
     /// @notice The three figures the ADL gate and the unload walk share: what the inventory
@@ -1040,11 +1178,13 @@ library RiskParamsLib {
     ///      planned against can only fall or hold during it.
     ///
     ///      `worstFinish` values the inventory at the unload band's edge, min(mmrBp,
-    ///      LIQ_MAX_SLIPPAGE_BP) beyond the oracle against the vault. It is the release side of
-    ///      the gate's hysteresis and the ADL batch's target: the auction ends once the fund
-    ///      above its reserve could sell everything left inside the band, so the walk that
-    ///      resumes afterwards can finish the remainder without reopening the window. Zero
-    ///      whenever the band edge still sits on the profitable side of the fund-neutral price.
+    ///      LIQ_MAX_SLIPPAGE_BP) beyond the oracle against the vault's net exposure (netLong):
+    ///      the overlap of the two buckets is hedged and its loss does not move with the edge,
+    ///      so only the larger bucket's excess does. It is the release side of the gate's
+    ///      hysteresis and the ADL batch's target: the auction ends once the fund above its
+    ///      reserve could finish everything left inside the band, so the walk that resumes
+    ///      afterwards can finish the remainder without reopening the window. Zero whenever the
+    ///      inventory is whole at the band edge.
     /// @param v The pair's vault aggregates
     /// @param currentPrice Price to value the inventory at (BAZAAR_SCALE precision)
     /// @param currentFundingIndex The pair's live cumulative funding index
@@ -1065,9 +1205,8 @@ library RiskParamsLib {
     ) public view returns (uint256 expectedLoss, uint256 base, uint256 worstFinish, uint256 shortfall) {
         expectedLoss = lossAt(v, currentPrice, currentFundingIndex);
         uint256 bandBp = mmrBp < BazaarTypes.LIQ_MAX_SLIPPAGE_BP ? mmrBp : BazaarTypes.LIQ_MAX_SLIPPAGE_BP;
-        uint256 bandEdge = v.pendingLiqIsLong
-            ? currentPrice * (BP_SCALE - bandBp) / BP_SCALE
-            : currentPrice * (BP_SCALE + bandBp) / BP_SCALE;
+        uint256 bandEdge =
+            netLong(v) ? currentPrice * (BP_SCALE - bandBp) / BP_SCALE : currentPrice * (BP_SCALE + bandBp) / BP_SCALE;
         worstFinish = lossAt(v, bandEdge, currentFundingIndex);
         uint256 reserve = adlReserve(v, currentPrice);
         uint256 free = insuranceFreeCapital(v);
@@ -1125,25 +1264,25 @@ library RiskParamsLib {
         return free > held ? free - held : 0;
     }
 
-    /// @notice The unload walk's plan: which side the vault sells, the deepest price it takes,
-    ///         the reference price a fill is measured against, and how much the fund may spend
-    ///         on fills inside that reference (MatchingEngineLib.unloadBook).
+    /// @notice The unload walk's plan for one bucket: the side it sells or covers, the deepest
+    ///         price it takes, the reference price a fill is measured against, and how much the
+    ///         fund may spend on fills inside that reference (MatchingEngineLib.unloadBook).
     /// @dev Computed once from start-of-walk state, and declared here rather than in
     ///      MatchingEngineLib so that library's EIP-170 budget stays free of it: a plan is
-    ///      drawn once per unload walk, so the library hop is paid once, not per fill. Three
-    ///      quantities anchor the walk.
+    ///      drawn once per unload walk, so the library hop is paid once, not per fill. A walk
+    ///      works one bucket (unloadBucketIsLong). Three quantities anchor it.
     ///
-    ///      The fund-neutral price: the price at which closing the inventory pays back exactly
-    ///      what backs it — the collateral seized with it plus the ledger's arrears to the fund,
-    ///      which settlement nets off the fund's payment — net of the funding accrued since the
-    ///      estates entered: the entry basis less that backing, carried forward by that funding,
-    ///      valued per unit. A fill at it costs the fund nothing; each unit sold away from it
-    ///      costs the distance. With the arrears counted this is the estates' own bankruptcy
-    ///      price, funding aside, however much of their collateral the ledger could pay. The
-    ///      arrears are one pair-wide balance, though, so the neutral price is also held from
-    ///      crossing that bankruptcy price (pendingLiqBankruptcyNotional per unit): a balance
-    ///      left behind by inventory already closed would otherwise count as this inventory's
-    ///      cushion.
+    ///      The fund-neutral price: the price at which closing the bucket pays back exactly
+    ///      what backs it — the collateral seized with it plus its share of the ledger's arrears
+    ///      to the fund, which settlement nets off the fund's payment — net of the funding
+    ///      accrued since the estates entered: the entry basis less that backing, carried
+    ///      forward by that funding, valued per unit. A fill at it costs the fund nothing; each
+    ///      unit sold away from it costs the distance. With the arrears counted this is the
+    ///      estates' own bankruptcy price, funding aside, however much of their collateral the
+    ///      ledger could pay. The arrears are one pair-wide balance, so each bucket is given its
+    ///      share by size, and the neutral price is also held from crossing the bucket's own
+    ///      bankruptcy price (Inventory.bankruptcyNotional per unit): a balance left behind by
+    ///      inventory already closed would otherwise count as this bucket's cushion.
     ///
     ///      The bound starts at the band edge, the oracle moved min(LIQ_MAX_SLIPPAGE_BP, MMR)
     ///      against the vault, and where the fund-neutral price lies beyond that edge it opens
@@ -1185,11 +1324,12 @@ library RiskParamsLib {
     ///      auction on a walk that cost the fund nothing. The caller's reward is set aside in the
     ///      headroom, but a fill at or beyond the reference is taken whatever the headroom, so the
     ///      walk can end with the base covering the loss at the mark by less than the reward; the
-    ///      reward is therefore capped at that cover when it is paid (unloadRewardPayable).
+    ///      reward is therefore capped at that cover when it is paid (settleUnloadTail).
     ///
     ///      Rounded toward the vault: the neutral price rounds up as a floor and down as a
     ///      ceiling, and sizes round down.
     /// @param pairVault The pair's vault aggregates
+    /// @param bucketIsLong The bucket the walk works (unloadBucketIsLong)
     /// @param oracle The walk's oracle price (BAZAAR_SCALE precision)
     /// @param currentFundingIndex The pair's live cumulative funding index
     /// @param mr The margin requirements the unload band is derived from
@@ -1197,12 +1337,14 @@ library RiskParamsLib {
     /// @return plan The side, bound, reference price and headroom for the walk
     function planUnload(
         BazaarTypes.Vault storage pairVault,
+        bool bucketIsLong,
         uint256 oracle,
         int256 currentFundingIndex,
         BazaarTypes.MarginRequirements memory mr,
         uint256 prepaid
     ) external view returns (BazaarTypes.UnloadPlan memory plan) {
-        plan.vaultIsLong = pairVault.pendingLiqIsLong;
+        BazaarTypes.Inventory storage b = bucketOf(pairVault, bucketIsLong);
+        plan.vaultIsLong = bucketIsLong;
         uint256 bandBp;
         // The headroom pre-charges the inventory's loss at the mark, so a fill at the mark is
         // free only while the base actually covers that loss. Past the trigger it does not, and
@@ -1225,21 +1367,21 @@ library RiskParamsLib {
             // Either way it raises the fund-neutral price: a long that has paid must sell that
             // much higher to break even, a short that has received can buy back that much higher.
             int256 rawFunding = BazaarMathLib.signedMulDiv(
-                currentFundingIndex - pairVault.pendingLiqEntryFundingIndex,
-                int256(pairVault.pendingLiqSize),
-                int256(BazaarTypes.BAZAAR_SCALE)
+                currentFundingIndex - b.entryFundingIndex, int256(b.size), int256(BazaarTypes.BAZAAR_SCALE)
             );
             // The backing sits on the sale side of the ledger for longs (the vault sells and must
             // recover it) and on the purchase side for shorts (the vault buys and may spend it).
-            int256 backing = int256(pairVault.pendingLiqSeized + pairVault.ledgerArrears);
+            // The arrears are one pair-wide balance; this bucket is given its share by size, so the
+            // two buckets' plans never count the same receivable twice.
+            int256 backing = int256(b.seized + Math.mulDiv(pairVault.ledgerArrears, b.size, inventorySize(pairVault)));
             int256 neutralNotional = plan.vaultIsLong
-                ? int256(pairVault.pendingLiqEntryNotional) - backing + rawFunding
-                : int256(pairVault.pendingLiqEntryNotional) + backing + rawFunding;
+                ? int256(b.entryNotional) - backing + rawFunding
+                : int256(b.entryNotional) + backing + rawFunding;
             if (neutralNotional > 0) {
                 neutral = Math.mulDiv(
                     uint256(neutralNotional),
                     BazaarTypes.BAZAAR_SCALE,
-                    pairVault.pendingLiqSize,
+                    b.size,
                     plan.vaultIsLong ? Math.Rounding.Ceil : Math.Rounding.Floor
                 );
             }
@@ -1247,33 +1389,27 @@ library RiskParamsLib {
         // Held from crossing the estates' own zero-equity price. ledgerArrears is one pair-wide
         // balance: an inventory that closes without a loss large enough to consume the arrears
         // it created leaves them behind, and the backing above would then count that leftover as
-        // the next inventory's cushion, placing the neutral price past the estates' bankruptcy
-        // and so inside the region where every fill is taken as free. A sale past the estates'
+        // this bucket's cushion, placing the neutral price past the estates' bankruptcy and so
+        // inside the region where every fill is taken as free. A sale past the estates'
         // collateral loses the fund the difference whether it is paid in cash or by netting a
         // receivable it was owed, so the bankruptcy notional, an aggregate seeded fresh for this
-        // inventory, bounds it. The hold forgoes funding the inventory has received since
-        // seizure, which the frozen bankruptcy figure does not carry; funding paid since then
-        // moves the neutral price the other way and is untouched. A zero notional is skipped: for
-        // a long it is a floor of zero, which changes nothing, and inventory staged outside absorb
-        // carries none.
-        if (pairVault.pendingLiqBankruptcyNotional != 0) {
-            uint256 bankruptcy = Math.mulDiv(
-                pairVault.pendingLiqBankruptcyNotional,
-                BazaarTypes.BAZAAR_SCALE,
-                pairVault.pendingLiqSize,
-                plan.vaultIsLong ? Math.Rounding.Ceil : Math.Rounding.Floor
-            );
+        // bucket, bounds it. The hold forgoes funding the bucket has received since seizure, which
+        // the frozen bankruptcy figure does not carry; funding paid since then moves the neutral
+        // price the other way and is untouched. A zero notional is skipped: for a long it is a
+        // floor of zero, which changes nothing, and inventory staged outside absorb carries none.
+        if (b.bankruptcyNotional != 0) {
+            uint256 bankruptcy = bucketBankruptcyPrice(b, plan.vaultIsLong);
             if (plan.vaultIsLong ? neutral < bankruptcy : neutral > bankruptcy) neutral = bankruptcy;
         }
         // The nearer of the neutral price and the oracle while the base covers the loss at the
         // mark, the neutral price alone past the trigger.
         plan.referencePrice = funded && (plan.vaultIsLong ? oracle < neutral : oracle > neutral) ? oracle : neutral;
         // How far the floor has opened beyond the band edge toward the neutral price: the part of
-        // UNLOAD_FLOOR_DECAY elapsed since the inventory's size-weighted seizure. A zero stamp is
+        // UNLOAD_FLOOR_DECAY elapsed since the bucket's size-weighted seizure. A zero stamp is
         // inventory staged outside absorb and reads as fully open.
         uint256 opened = BazaarTypes.UNLOAD_FLOOR_DECAY;
         {
-            uint256 seizedTs = pairVault.pendingLiqSeizedTs;
+            uint256 seizedTs = b.seizedTs;
             if (seizedTs != 0 && block.timestamp < seizedTs + opened) {
                 opened = block.timestamp > seizedTs ? block.timestamp - seizedTs : 0;
             }
@@ -1293,17 +1429,13 @@ library RiskParamsLib {
         }
 
         // The caller's reward is paid after the walk on the notional actually filled, so it is
-        // reserved on the notional the walk could fill at most: the whole inventory at the
-        // price furthest from the oracle the bound admits. A liquidation's walk reserves only
-        // the part above the credit its liquidations left (LiquidateResult.unloadPrepaid), which
-        // has already left the fund.
+        // reserved on the notional the walk could fill at most: the whole bucket at the price
+        // furthest from the oracle the bound admits. A liquidation's walk reserves only the part
+        // above the credit its liquidations left (LiquidateResult.unloadPrepaid), which has
+        // already left the fund.
         {
             uint256 dearest = plan.vaultIsLong ? oracle : (plan.bound > oracle ? plan.bound : oracle);
-            uint256 reward = Math.mulDiv(
-                Math.mulDiv(pairVault.pendingLiqSize, dearest, BazaarTypes.BAZAAR_SCALE),
-                BazaarTypes.LIQUIDATION_FEE_EBP,
-                BazaarTypes.EBP_SCALE
-            );
+            uint256 reward = keeperRateOn(b.size, dearest);
             if (prepaid == BazaarTypes.UNLOAD_BY_KEEPER) {
                 if (reward < BazaarTypes.UNLOAD_BOUNTY_MIN) reward = BazaarTypes.UNLOAD_BOUNTY_MIN;
             } else {
@@ -1330,10 +1462,18 @@ library RiskParamsLib {
         return lossAt(v, price, currentFundingIndex) > (free > reserve ? free - reserve : 0);
     }
 
-    /// @notice The most of `reward` an unload walk may pay its caller once its fills are booked:
-    ///         free capital, and where the inventory left carries a loss at `price` that free
+    /// @notice Settles an unload walk's tail once its fills are booked: nets the two buckets'
+    ///         overlap where the walk's fills have made that affordable (tryNetBuckets), adds the
+    ///         keeper rate on what it netted to `reward`, and returns the most of that the fund
+    ///         pays: free capital, and where the inventory left carries a loss at `price` that free
     ///         capital above the reserve covers, no more than what it covers the loss by.
-    /// @dev The walk sets the reward aside in its headroom, but a fill at or beyond the reference
+    /// @dev The walk works one bucket, and a sale of the above-water bucket at or beyond its
+    ///      neutral price hands the fund cash; the netting the fund could not afford before the
+    ///      walk can fit after it, so the overlap is re-tested here, in the call that already
+    ///      runs after every walk, and the caller is paid the rate on what the netting retires as
+    ///      a liquidation's caller is.
+    ///
+    ///      The walk sets the reward aside in its headroom, but a fill at or beyond the reference
     ///      price is taken whatever the headroom (MatchingEngineLib.unloadBook), so a walk can end
     ///      with the base covering the loss at the mark by less than the reward. Paid in full, the
     ///      reward would take the base under the loss and the post-walk verdict would open the
@@ -1344,14 +1484,13 @@ library RiskParamsLib {
     /// @param v The pair's vault aggregates
     /// @param price The walk's oracle price (BAZAAR_SCALE precision)
     /// @param currentFundingIndex The pair's live cumulative funding index
-    /// @param reward The reward the walk earned, in BAZAAR_SCALE precision
-    /// @return The part of it the fund pays
-    function unloadRewardPayable(
-        BazaarTypes.Vault storage v,
-        uint256 price,
-        int256 currentFundingIndex,
-        uint256 reward
-    ) public view returns (uint256) {
+    /// @param reward The reward the walk's fills earned, in BAZAAR_SCALE precision
+    /// @return The reward the fund pays, the netting's rate included
+    function settleUnloadTail(BazaarTypes.Vault storage v, uint256 price, int256 currentFundingIndex, uint256 reward)
+        public
+        returns (uint256)
+    {
+        reward += keeperRateOn(tryNetBuckets(v, price, currentFundingIndex), price);
         uint256 free = insuranceFreeCapital(v);
         if (reward > free) reward = free;
         uint256 loss = lossAt(v, price, currentFundingIndex);
@@ -1425,7 +1564,7 @@ library RiskParamsLib {
         view
         returns (int256)
     {
-        return int256(pendingLiqSeizedCollateral(v) + v.ledgerArrears) + vaultPnl(v, price, currentFundingIndex);
+        return int256(seizedTotal(v) + v.ledgerArrears) + vaultPnl(v, price, currentFundingIndex);
     }
 
     /// @notice What closing the inventory at `price` would cost the fund beyond the seizure and
@@ -1443,56 +1582,6 @@ library RiskParamsLib {
         return net < 0 ? uint256(-net) : 0;
     }
 
-    /// @notice What closing the whole inventory at the estates' average bankruptcy price costs
-    ///         the fund beyond the seizure earmarked against it: the collateral the deposits
-    ///         ledger could not hand over at seizure plus the funding accrued while the vault held
-    ///         the inventory, net of funding it received over that stretch. 0 with no inventory.
-    /// @dev The bankruptcy price is the entry basis displaced by the estates' full collateral and
-    ///      their pre-liquidation funding, so against a settlement measured from the estates'
-    ///      entry (vaultPnl) only the holding window's funding survives, and against the cash
-    ///      earmark only the collateral the ledger did not pay. A close at that price is paid from
-    ///      the slice's earmark first, then net of the arrears and from free capital
-    ///      (AdlLib._settleInventorySlice, fundLedgerFrom), so this is what the arrears and free
-    ///      capital together must hold for it to book no deficit — the backing an opposite-side
-    ///      netting must leave the surviving inventory (LiquidationLib.nettingAffordable). The
-    ///      price rounds toward the vault, as the ADL settlement price does.
-    /// @param v The pair's vault aggregates
-    /// @param currentFundingIndex The pair's live cumulative funding index
-    /// @return The uncovered cost in BAZAAR_SCALE precision
-    function bankruptcyCloseCost(BazaarTypes.Vault storage v, int256 currentFundingIndex)
-        internal
-        view
-        returns (uint256)
-    {
-        uint256 size = v.pendingLiqSize;
-        if (size == 0) return 0;
-        uint256 bankruptcy = Math.mulDiv(
-            v.pendingLiqBankruptcyNotional,
-            BAZAAR_SCALE,
-            size,
-            v.pendingLiqIsLong ? Math.Rounding.Ceil : Math.Rounding.Floor
-        );
-        int256 net = vaultPnl(v, bankruptcy, currentFundingIndex) + int256(v.pendingLiqSeized);
-        return net < 0 ? uint256(-net) : 0;
-    }
-
-    /// @notice Collateral the insurance fund received alongside inventory the vault still holds.
-    /// @dev Tracked as its own aggregate rather than recovered from the two notionals. The
-    ///      bankruptcy price folds in the funding the estate had accrued before liquidation, and
-    ///      vaultPnl realizes that stretch again from the estate's entry, so entry − bankruptcy
-    ///      overstates or understates the seizure by exactly that term and misplaces the price
-    ///      at which the inventory is whole. Cash only: an estate the deposits ledger could not
-    ///      fully back leaves a smaller earmark here and the rest in `ledgerArrears`, so the
-    ///      balance less this figure is exactly the cash the fund may spend.
-    ///
-    ///      It takes no price. Free capital, the balance less this figure, is the
-    ///      price-independent part of both share-pricing bases: the part no redemption can time.
-    /// @param v The pair's vault aggregates
-    /// @return The seizure still earmarked against open inventory, in BAZAAR_SCALE precision
-    function pendingLiqSeizedCollateral(BazaarTypes.Vault storage v) internal view returns (uint256) {
-        return v.pendingLiqSeized;
-    }
-
     /// @notice The insurance fund less the seizure earmarked against inventory the vault holds.
     /// @dev Falls to zero rather than underflowing should the fund ever hold less than it has
     ///      earmarked.
@@ -1500,55 +1589,165 @@ library RiskParamsLib {
     /// @return Capital not spoken for by open inventory, in BAZAAR_SCALE precision
     function insuranceFreeCapital(BazaarTypes.Vault storage v) internal view returns (uint256) {
         uint256 fund = v.insuranceFundBalance;
-        uint256 seized = pendingLiqSeizedCollateral(v);
+        uint256 seized = seizedTotal(v);
         return fund > seized ? fund - seized : 0;
     }
 
-    /// @notice What a position owes beyond its collateral at the state it was valued at: the
-    ///         part of its loss the collateral does not cover, 0 while any equity remains.
-    /// @param state The position's bucket state at the price and funding index in question
-    /// @return The uncovered loss in BAZAAR_SCALE precision
-    function accountExcess(BazaarTypes.BucketState memory state) internal pure returns (uint256) {
-        if (state.totalPnl >= 0) return 0;
-        uint256 loss = uint256(-state.totalPnl);
-        return loss > state.effectiveCollateral ? loss - state.effectiveCollateral : 0;
+    // -------------------- Bucket netting --------------------
+    //
+    // An estate joins its own side's bucket (LiquidationLib.absorb), and the two buckets' overlap
+    // is netted here: at once when the netting is a gain or a loss the fund can afford above its
+    // reserve, and otherwise whenever a later call has moved the fund's means — a liquidation, an
+    // unload walk, an ADL batch — until it fits. An overlap the fund cannot afford therefore
+    // persists as a hedged pair, and the auction closes each leg against its own counterparties
+    // at that leg's bankruptcy price, where the fund pays nothing; netting it would instead charge
+    // the fund a loss that belongs to those counterparties.
+
+    /// @notice The keeper rate, LIQUIDATION_FEE_EBP, on `size` valued at `price`.
+    /// @param size The size retired (BAZAAR_SCALE precision)
+    /// @param price The price it is valued at (BAZAAR_SCALE precision)
+    /// @return The rate in BAZAAR_SCALE precision
+    function keeperRateOn(uint256 size, uint256 price) internal pure returns (uint256) {
+        return
+            Math.mulDiv(Math.mulDiv(size, price, BAZAAR_SCALE), BazaarTypes.LIQUIDATION_FEE_EBP, BazaarTypes.EBP_SCALE);
     }
 
-    /// @notice The loss beyond collateral across the deferred liquidations opposite the vault's
-    ///         inventory, valued at `price`.
-    /// @dev Exposure no earmark backs: each of these positions sits opposite the vault's
-    ///      inventory and could not be netted against it without taking the fund below its
-    ///      reserve, so its shortfall is resolved only by closing its own counterparties against
-    ///      it. The ADL gate holds a window open while any is positive. Read from the buckets
-    ///      every time, so an account that turned solvent again through a reversal or a deposit
-    ///      contributes nothing without any bookkeeping.
+    /// @notice Whether netting the two buckets' overlap would cost the fund no more than it may
+    ///         spend on it: true for a gain, and with either bucket empty.
+    /// @dev The overlap's realization (overlap) against what backs it: free capital above the
+    ///      reserve, the two netted slices' seizure and the ledger's arrears, which a loss is paid
+    ///      net of. The reserve is the line the unload walk never crosses either, so a netting the
+    ///      fund can afford leaves it in the state every other resolution would.
     ///
-    ///      A listed account on the inventory's own side is skipped. It was deferred while the
-    ///      inventory sat opposite it, and a netting that flipped the inventory's side left it
-    ///      listed; nothing resolves it through the window, since no cohort closes an account on
-    ///      the side the window targets, and the inventory leg sizes its batch without it. It is
-    ///      an unliquidated position like any other on its side: the next liquidation that names
-    ///      it seizes it into the inventory, which realizes nothing. Counting it would hold a
-    ///      window open that no batch can clear.
-    /// @param positionBuckets Storage mapping of position buckets
-    /// @param deferred The deferred liquidations
-    /// @param inventoryIsLong Side the vault's inventory sits on
-    /// @param price Price to value the positions at (BAZAAR_SCALE precision)
+    ///      The arrears are one pair-wide balance, and the bucket that survives the netting — the
+    ///      larger one's remainder — needs its share of them. A close at the estates' bankruptcy
+    ///      price is paid from the slice's earmark, the arrears and free capital
+    ///      (AdlLib._settleInventorySlice), and what it needs beyond the earmark
+    ///      (bucketBankruptcyCloseCost) is the collateral the ledger never handed over plus the
+    ///      holding-window funding. Spent on this netting, that backing would be missing when the
+    ///      survivor settles, and the shortfall would surface there as a deficit with no
+    ///      insolvency verdict in between — the hazard netBuckets guards the surviving earmark
+    ///      against. So of the arrears and the free capital above the reserve, only what exceeds
+    ///      the survivor's need, pro rata to what the netting leaves of it, is spendable here.
+    ///
+    ///      The netting is paid so that it spends only what this lets it: from the two slices'
+    ///      seizure first, and only then net of the arrears and from free capital (netBuckets).
+    ///      Paid net of the arrears first, a loss the slices' seizure covers would cancel the
+    ///      survivor's arrears and release the seizure into free capital, which below the reserve
+    ///      this reading does not count: a netting passed here could leave the survivor reading
+    ///      short by up to its whole loss while the fund held the same value.
+    /// @param v The pair's vault aggregates
+    /// @param price The price the reserve is valued at (BAZAAR_SCALE precision)
     /// @param currentFundingIndex The pair's live cumulative funding index
-    /// @return total The summed uncovered loss in BAZAAR_SCALE precision
-    function deferredExcess(
-        mapping(address => BazaarTypes.PositionBucket) storage positionBuckets,
-        address[] storage deferred,
-        bool inventoryIsLong,
-        uint256 price,
-        int256 currentFundingIndex
-    ) public view returns (uint256 total) {
-        BazaarTypes.MarginRequirements memory zeroReqs;
-        for (uint256 i = 0; i < deferred.length; i++) {
-            BazaarTypes.PositionBucket storage bucket = positionBuckets[deferred[i]];
-            if (bucket.size == 0 || bucket.isLong == inventoryIsLong) continue;
-            total += accountExcess(BucketLib.calculateState(bucket, price, currentFundingIndex, zeroReqs));
+    /// @return True when the overlap's loss is within that backing, or there is none
+    function overlapAffordable(BazaarTypes.Vault storage v, uint256 price, int256 currentFundingIndex)
+        internal
+        view
+        returns (bool)
+    {
+        (uint256 o, int256 pnl, uint256 seized) = overlap(v);
+        if (o == 0 || pnl >= 0) return true;
+        uint256 free = insuranceFreeCapital(v);
+        uint256 reserve = adlReserve(v, price);
+        uint256 backing = (free > reserve ? free - reserve : 0) + v.ledgerArrears;
+        bool big = netLong(v);
+        BazaarTypes.Inventory storage survivor = bucketOf(v, big);
+        // The survivor's per-unit need is the bucket's: a netting decrements it pro rata.
+        uint256 needed = Math.mulDiv(
+            bucketBankruptcyCloseCost(survivor, big, currentFundingIndex), survivor.size - o, survivor.size
+        );
+        backing = backing > needed ? backing - needed : 0;
+        backing += seized;
+        return uint256(-pnl) <= backing;
+    }
+
+    /// @notice Nets the two buckets' overlap: takes the smaller bucket whole and an equal size off
+    ///         the larger, books the realization, and leaves the larger bucket's remainder. A
+    ///         gain is collected from the deposits ledger; a loss is paid from the two netted
+    ///         slices' seizure first, then net of the ledger's arrears and from the fund's free
+    ///         capital, never from the earmark of the inventory that survives, and what that
+    ///         cannot cover is realized as deficit.
+    /// @dev The realization is an insurance <-> deposits-ledger TRANSFER (the rationale of the
+    ///      vaultPnl booking in MatchingEngineLib._finalizeTx): the netted estates' PnL is offset
+    ///      by the surviving counterparties' opposite unrealized PnL, which realizes into their
+    ///      buckets and settles against the deposits ledger at their closes and withdrawals. A
+    ///      one-sided entry would drift expectedBalance (I + D) away from actual USDC; I + D is
+    ///      invariant under the transfer. A gain the ledger cannot pay is carried as its arrears.
+    ///
+    ///      The cash a loss may draw is free capital plus the netted slices' seizure. The balance
+    ///      also holds the surviving earmark, and that earmark is all that stands between the
+    ///      surviving bucket and bad debt: spent here, the bucket would read as backed while the
+    ///      cash behind it was gone, and the shortfall would surface only when it settled, with no
+    ///      insolvency verdict in between. Capping the draw books the shortfall as deficit now, so
+    ///      the health check that follows terminates the pair in the transaction the bad debt is
+    ///      realized in. Within that cap the loss spends the netted slices' seizure first, and
+    ///      only then nets the arrears and draws on free capital (fundLedgerFrom): the arrears back
+    ///      the survivor, and overlapAffordable passed this loss against the seizure plus what the
+    ///      arrears and free capital above the reserve exceed the survivor's need by.
+    ///
+    ///      Nothing here reads a price: the realization does not depend on one, and the caller
+    ///      has already judged the affordability. A bucket the netting empties is cleared whole,
+    ///      so its seizure stamp and entry index go with it and the next estate on that side seeds
+    ///      a fresh bucket.
+    /// @param v The pair's vault aggregates
+    /// @return o The size netted off each bucket
+    function netBuckets(BazaarTypes.Vault storage v) internal returns (uint256 o) {
+        int256 pnl;
+        uint256 seized;
+        (o, pnl, seized) = overlap(v);
+        if (o == 0) return 0;
+        uint256 survivingEarmark = seizedTotal(v) - seized;
+        _releaseOverlap(v.longInv, o);
+        _releaseOverlap(v.shortInv, o);
+        if (pnl >= 0) {
+            collectFromLedger(v, uint256(pnl));
+        } else {
+            uint256 fund = v.insuranceFundBalance;
+            uint256 fundable = fund > survivingEarmark ? fund - survivingEarmark : 0;
+            uint256 uncovered = fundLedgerFrom(v, uint256(-pnl), seized, fundable);
+            if (uncovered > 0) v.deficit += uncovered;
         }
+    }
+
+    /// @dev Takes `o` units off a bucket pro rata, with the same rounding `overlap` priced the
+    ///      slice's seizure at; a bucket the netting empties is cleared whole.
+    function _releaseOverlap(BazaarTypes.Inventory storage b, uint256 o) private {
+        uint256 size = b.size;
+        if (o == size) {
+            clearBucket(b);
+            return;
+        }
+        b.entryNotional -= Math.mulDiv(b.entryNotional, o, size);
+        b.bankruptcyNotional -= Math.mulDiv(b.bankruptcyNotional, o, size);
+        b.seized -= Math.mulDiv(b.seized, o, size);
+        b.size = size - o;
+    }
+
+    /// @notice Empties a bucket: every field, so its seizure stamp and entry index go with the
+    ///         inventory and the next estate on that side seeds a fresh one.
+    /// @param b The bucket
+    function clearBucket(BazaarTypes.Inventory storage b) internal {
+        b.size = 0;
+        b.entryNotional = 0;
+        b.bankruptcyNotional = 0;
+        b.seized = 0;
+        b.entryFundingIndex = 0;
+        b.seizedTs = 0;
+    }
+
+    /// @notice Nets the two buckets' overlap when the netting is a gain or a loss the fund can
+    ///         afford (overlapAffordable); otherwise leaves both buckets as they are.
+    /// @param v The pair's vault aggregates
+    /// @param price The price the reserve is valued at (BAZAAR_SCALE precision)
+    /// @param currentFundingIndex The pair's live cumulative funding index
+    /// @return netted The size netted off each bucket, 0 when nothing was
+    function tryNetBuckets(BazaarTypes.Vault storage v, uint256 price, int256 currentFundingIndex)
+        internal
+        returns (uint256 netted)
+    {
+        if (v.longInv.size == 0 || v.shortInv.size == 0) return 0;
+        if (!overlapAffordable(v, price, currentFundingIndex)) return 0;
+        netted = netBuckets(v);
     }
 
     // -------------------- Insurance <-> deposits ledger transfers --------------------
@@ -1714,7 +1913,7 @@ library RiskParamsLib {
         returns (uint256)
     {
         uint256 free = insuranceFreeCapital(v);
-        if (v.pendingLiqSize == 0) return free + v.ledgerArrears;
+        if (inventorySize(v) == 0) return free + v.ledgerArrears;
         return insuranceNavOf(free, inventoryNet(v, price, currentFundingIndex), adlReserve(v, price));
     }
 
@@ -1730,7 +1929,7 @@ library RiskParamsLib {
         returns (uint256)
     {
         uint256 free = insuranceFreeCapital(v);
-        if (v.pendingLiqSize == 0) return free;
+        if (inventorySize(v) == 0) return free;
         return insuranceRedemptionBasisOf(free, inventoryNet(v, price, currentFundingIndex), adlReserve(v, price));
     }
 

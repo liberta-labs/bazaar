@@ -14,6 +14,8 @@ import {MockArbSys} from "../mocks/MockArbSys.sol";
 import {MockPyth} from "@pythnetwork/pyth-sdk-solidity/MockPyth.sol";
 import {PythSeed} from "../PythSeed.sol";
 
+import {VaultStore} from "../VaultStore.sol";
+
 /// @title ZeroSumInvariantTest
 /// @notice Books-conservation invariants asserted at every step of realistic trading lifecycles.
 ///         Two invariants, checked together by _assertZeroSum:
@@ -27,7 +29,7 @@ import {PythSeed} from "../PythSeed.sol";
 ///             ⟺   Σ trader equity + vault inventory == totalCollateralDeposited
 ///
 ///         where equity = collateral + price PnL + funding PnL, and the vault inventory value is
-///         the pendingLiq aggregate marked at the same (P, F). Because every long unit is offset
+///         the vault's two buckets marked at the same (P, F). Because every long unit is offset
 ///         by a short unit (trader or vault inventory), the P- and F-dependent terms cancel in
 ///         the sum — the invariant holds at ANY consistent (P, F) if and only if no state
 ///         transition mints or drops value between traders, the vault, and insurance.
@@ -151,19 +153,26 @@ contract ZeroSumInvariantTest is Test {
         equity += pricePnl + fundingPnl;
     }
 
-    /// @dev The vault's pendingLiq inventory marked at the same (P, F): price PnL vs its entry
+    /// @dev The vault's two buckets marked at the same (P, F): each bucket's price PnL vs its entry
     ///      notional basis plus funding from the liquidatees' entry-weighted index — the same
     ///      bases the unload walk settles against, so realizing inventory moves value to
     ///      insurance 1:1.
     function _vaultInventoryAt(uint256 p, int256 f) internal view returns (int256 value) {
-        (,,,,,, uint256 plSize, uint256 plEntry,, int256 plFundIdx, bool plIsLong,,,,,,) = pair.pairVault();
-        if (plSize == 0) return 0;
+        (,,,,,,,,,, BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) = pair.pairVault();
+        value = _bucketValueAt(l, true, p, f) + _bucketValueAt(s, false, p, f);
+    }
 
-        int256 notional = int256(plSize * p / BAZAAR_SCALE);
-        int256 pricePnl = plIsLong ? notional - int256(plEntry) : int256(plEntry) - notional;
-        int256 rawFunding = (f - plFundIdx) * int256(plSize) / int256(BAZAAR_SCALE);
-        int256 windowFunding = plIsLong ? -rawFunding : rawFunding;
-        value = pricePnl + windowFunding;
+    function _bucketValueAt(BazaarTypes.Inventory memory b, bool isLong, uint256 p, int256 f)
+        internal
+        pure
+        returns (int256)
+    {
+        if (b.size == 0) return 0;
+        int256 notional = int256(b.size * p / BAZAAR_SCALE);
+        int256 pricePnl = isLong ? notional - int256(b.entryNotional) : int256(b.entryNotional) - notional;
+        int256 rawFunding = (f - b.entryFundingIndex) * int256(b.size) / int256(BAZAAR_SCALE);
+        int256 windowFunding = isLong ? -rawFunding : rawFunding;
+        return pricePnl + windowFunding;
     }
 
     /// @dev Assert THE invariant:
@@ -180,7 +189,7 @@ contract ZeroSumInvariantTest is Test {
     ///      `priceUsd` is only a marking price — conservation is price-independent because long
     ///      and short sizes (traders + vault inventory) always balance.
     function _assertZeroSum(uint256 priceUsd, string memory label) internal view {
-        (,,,,, uint256 I,,,,,, uint256 deficit,,, uint256 arrears,,) = pair.pairVault();
+        (,,,,, uint256 I, uint256 deficit,, uint256 arrears,,,) = pair.pairVault();
         assertEq(deficit, 0, string.concat(label, ": no realized bad debt expected in this scenario"));
 
         uint256 p = priceUsd * BAZAAR_SCALE;
@@ -205,7 +214,7 @@ contract ZeroSumInvariantTest is Test {
     ///      be the fixed price: every leg is realized at it, so nothing else keeps the sum exact
     ///      once positions leave one side at a time.
     function _assertZeroSumWithBadDebt(uint256 priceUsd, string memory label) internal view {
-        (,,,,, uint256 I,,,,,, uint256 deficit,,, uint256 arrears,,) = pair.pairVault();
+        (,,,,, uint256 I, uint256 deficit,, uint256 arrears,,,) = pair.pairVault();
         BazaarTypes.AuxState memory aux = pair.auxState();
         uint256 p = priceUsd * BAZAAR_SCALE;
         int256 f = pair.currentFundingIndex();
@@ -435,7 +444,7 @@ contract ZeroSumInvariantTest is Test {
         _deposit(carol, 12_000 * BAZAAR_SCALE);
         _placeLimit(carol, true, 1 * BAZAAR_SCALE, 41_400 * BAZAAR_SCALE);
         assertEq(_unloadAt(41_000), 1 * BAZAAR_SCALE, "vault inventory closed");
-        (,,,,,, uint256 plSize,,,,,,,,,,) = pair.pairVault();
+        uint256 plSize = VaultStore.inventorySize(address(pair));
         assertEq(plSize, 0, "vault fully unwound");
         _assertZeroSum(41_000, "after vault close");
 
@@ -483,7 +492,7 @@ contract ZeroSumInvariantTest is Test {
         _deposit(carol, 12_000 * BAZAAR_SCALE);
         _placeLimitAt(carol, false, 1 * BAZAAR_SCALE, 48_200 * BAZAAR_SCALE, 48_000);
         assertEq(_unloadAt(48_000), 1 * BAZAAR_SCALE, "vault inventory closed at a profit");
-        (,,,,,, uint256 plSize,,,,,,,,,,) = pair.pairVault();
+        uint256 plSize = VaultStore.inventorySize(address(pair));
         assertEq(plSize, 0, "vault fully unwound");
         _assertZeroSum(48_000, "after profitable vault close");
 
@@ -500,7 +509,7 @@ contract ZeroSumInvariantTest is Test {
     /// @dev Total claims marked at `priceUsd` (same computation as _assertZeroSum, without the
     ///      equality assertion): insurance + unclaimed fee escrow + Σ trader equity + vault inventory.
     function _claimsAt(uint256 priceUsd) internal view returns (int256 claims) {
-        (,,,,, uint256 I,,,,,,,,, uint256 arrears,,) = pair.pairVault();
+        (,,,,, uint256 I,,, uint256 arrears,,,) = pair.pairVault();
         uint256 p = priceUsd * BAZAAR_SCALE;
         int256 f = pair.currentFundingIndex();
         claims = int256(I) + int256(_escrowTotal()) + int256(arrears);
@@ -543,7 +552,7 @@ contract ZeroSumInvariantTest is Test {
         // Precondition of the whole scenario: bob's book collateral now exceeds the entire
         // deposits ledger, while bob's EQUITY is only just below zero (solvent boundary).
         (,,, uint256 bobBook,,,) = pair.positionBuckets(bob);
-        (,,,, uint256 dBefore, uint256 iBefore,,,,,,,,,,,) = pair.pairVault();
+        (,,,, uint256 dBefore, uint256 iBefore,,,,,,) = pair.pairVault();
         assertGt(bobBook, dBefore, "bob's book must exceed the deposits ledger");
 
         int256 gapBefore = int256(usdc.balanceOf(address(pair)) * 1e12) - _claimsAt(68_500);
@@ -558,7 +567,7 @@ contract ZeroSumInvariantTest is Test {
 
         uint256 arrears;
         {
-            (,,,, uint256 dAfter, uint256 iAfter,,,,,, uint256 deficit,,, uint256 owed,,) = pair.pairVault();
+            (,,,, uint256 dAfter, uint256 iAfter, uint256 deficit,, uint256 owed,,,) = pair.pairVault();
             arrears = owed;
             assertEq(dAfter, 0, "ledger seized to exactly zero");
             assertEq(deficit, 0, "no deficit: solvency is decided at estate settlement");
@@ -580,13 +589,19 @@ contract ZeroSumInvariantTest is Test {
         // Insurance funds the estate's entry-basis loss into the ledger, which re-covers carol's
         // claim, and separately pays the caller's unload reward as cash.
         (,, uint256 carolEntry, uint256 carolCollBefore, int256 carolFundIdx,,) = pair.positionBuckets(carol);
-        (,,,,, uint256 iPreClose,,,, int256 plFundIdx,,,,,,,) = pair.pairVault();
+        uint256 iPreClose;
+        int256 plFundIdx;
+        {
+            (,,,,, uint256 I,,,,, BazaarTypes.Inventory memory l,) = pair.pairVault();
+            iPreClose = I;
+            plFundIdx = l.entryFundingIndex;
+        }
 
         _placeLimitAt(carol, false, 1 * BAZAAR_SCALE, 68_500 * BAZAAR_SCALE, 68_500);
         assertEq(_unloadAt(68_500), 1 * BAZAAR_SCALE, "estate closed against carol");
 
         {
-            (,,,,,, uint256 plSize,,,,,,,,,,) = pair.pairVault();
+            uint256 plSize = VaultStore.inventorySize(address(pair));
             assertEq(plSize, 0, "vault fully unwound");
         }
         {
@@ -609,7 +624,7 @@ contract ZeroSumInvariantTest is Test {
             uint256 expectedLoss = uint256(int256(17_500 * BAZAAR_SCALE) - (pair.currentFundingIndex() - plFundIdx));
             uint256 netPaid = expectedLoss - arrears;
             uint256 unloadReward = 68_500 * BAZAAR_SCALE * BazaarTypes.LIQUIDATION_FEE_EBP / BazaarTypes.EBP_SCALE;
-            (,,,, uint256 dPost, uint256 iPost,,,,,, uint256 deficit,,, uint256 arrearsPost,,) = pair.pairVault();
+            (,,,, uint256 dPost, uint256 iPost, uint256 deficit,, uint256 arrearsPost,,,) = pair.pairVault();
             assertEq(deficit, 0, "estate loss fully funded by insurance");
             assertEq(arrearsPost, 0, "the settlement netted the whole arrears");
             assertApproxEqAbs(
@@ -632,7 +647,7 @@ contract ZeroSumInvariantTest is Test {
         {
             (,,, uint256 carolCollFinal,,,) = pair.positionBuckets(carol);
             assertLt(carolCollFinal, 1e12, "carol withdrew her entire claim");
-            (,,,, uint256 dFinal,,,,,,, uint256 deficit,,,,,) = pair.pairVault();
+            (,,,, uint256 dFinal,, uint256 deficit,,,,,) = pair.pairVault();
             assertEq(deficit, 0, "pair ends live and solvent");
             assertLt(dFinal, CLAIMS_TOL, "ledger empties with the last claim: nothing stranded");
         }
@@ -654,7 +669,7 @@ contract ZeroSumInvariantTest is Test {
         _withdrawAll(dave);
 
         (,,, uint256 bobBook,,,) = pair.positionBuckets(bob);
-        (,,,, uint256 dBefore,,,,,,,,,,,,) = pair.pairVault();
+        (,,,, uint256 dBefore,,,,,,,) = pair.pairVault();
         assertGt(bobBook, dBefore, "bob's book must exceed the deposits ledger");
 
         _advance(4);
@@ -696,7 +711,7 @@ contract ZeroSumInvariantTest is Test {
     function _assertFinalizeReservedOnlyTheSurvivor() internal view returns (uint256 entitlement) {
         uint256 carolColl = carolCollAfterOf();
         uint256 claim = pair.terminalProfitClaim(carol);
-        (,,,, uint256 principal, uint256 I,,,,,,,,,,,) = pair.pairVault();
+        (,,,, uint256 principal, uint256 I,,,,,,) = pair.pairVault();
         assertApproxEqAbs(principal, carolColl, CLAIMS_TOL, "principal reserved == the survivor's bucket");
         uint256 pot = usdc.balanceOf(address(pair)) * 1e12 - _escrowTotal();
         assertApproxEqAbs(
@@ -706,11 +721,11 @@ contract ZeroSumInvariantTest is Test {
     }
 
     function _vaultArrears() internal view returns (uint256 arrears) {
-        (,,,,,,,,,,,,,, arrears,,) = pair.pairVault();
+        (,,,,,,,, arrears,,,) = pair.pairVault();
     }
 
     function _vaultInsurance() internal view returns (uint256 I) {
-        (,,,,, I,,,,,,,,,,,) = pair.pairVault();
+        (,,,,, I,,,,,,) = pair.pairVault();
     }
 
     function carolCollAfterOf() internal view returns (uint256 coll) {
@@ -719,8 +734,11 @@ contract ZeroSumInvariantTest is Test {
 
     /// @notice Mixed-direction liquidations: a long is liquidated on the way down, then a short
     ///         (opened near the bottom) is liquidated on the way back up while the vault still
-    ///         holds the long inventory — `_netOpposingLiquidation` fires and settles the two
-    ///         estates against each other. Exercises the netting transfer arms end-to-end.
+    ///         holds the long bucket. The short's seizure seeds the short bucket, and the netting
+    ///         that follows every absorb (RiskParamsLib.tryNetBuckets) finds the overlap's loss —
+    ///         the gap between the two entry bases — within the two slices' seizure plus the fund's
+    ///         free capital above its reserve, so it settles the two estates against each other at
+    ///         once. Exercises the netting transfer arms end-to-end.
     function test_zeroSum_opposingNettingLiquidations() public {
         _deposit(alice, 12_000 * BAZAAR_SCALE);
         _deposit(bob, 15_000 * BAZAAR_SCALE);
@@ -747,7 +765,7 @@ contract ZeroSumInvariantTest is Test {
 
         // Rally until carol's short has ~$300 of equity left (well under any MMR, still positive
         // so no bad debt): P = (entry + collateral − 300) for her 1-unit short. Liquidating her
-        // while the vault still holds alice's long fires the opposing-netting arm.
+        // while the vault still holds alice's long nets the two buckets' overlap at once.
         uint256 liqPriceUsd;
         {
             (,, uint256 carolEntry, uint256 carolColl,,,) = pair.positionBuckets(carol);
@@ -757,8 +775,8 @@ contract ZeroSumInvariantTest is Test {
         users[0] = carol;
         vm.prank(bob);
         assertEq(pair.liquidate(users, _pu(liqPriceUsd)), 1, "carol liquidated");
-        (,,,,,, uint256 plSize,,,,,,,,,,) = pair.pairVault();
-        assertEq(plSize, 0, "1-vs-1 netting fully cleared the vault");
+        uint256 plSize = VaultStore.inventorySize(address(pair));
+        assertEq(plSize, 0, "1-vs-1 netting fully cleared both buckets");
         _assertZeroSum(49_000, "after opposing netting");
 
         // Unwind the survivors: bob (short from ~50k) closes against dave (long from ~41k).
@@ -800,20 +818,36 @@ contract ZeroSumInvariantTest is Test {
         _assertZeroSum(41_000, "after liquidation of funded position");
     }
 
-    /// @notice An opposing liquidation whose netting the fund cannot afford is deferred: the
-    ///         position stays open and listed, the window it needs stays pending with no bad debt
-    ///         anywhere, and one auction batch then closes each cohort against its own
-    ///         counterparties — the deferred account against the inventory's side at its
-    ///         bankruptcy price, the inventory against the other side. The identity must hold at
-    ///         every step, and nothing is ever booked as deficit.
+    /// @dev What netting the two buckets' overlap would cost the fund beyond the two netted
+    ///      slices' seizure (RiskParamsLib.overlap): the gap between the sides' entry bases on the
+    ///      overlap plus the offset of their entry clocks, less the seizure pro rata. 0 when the
+    ///      netting is a gain or either bucket is empty.
+    function _overlapUncovered() internal view returns (uint256) {
+        (,,,,,,,,,, BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) = pair.pairVault();
+        uint256 o = l.size < s.size ? l.size : s.size;
+        if (o == 0) return 0;
+        int256 pnl = int256(s.entryNotional * o / s.size) - int256(l.entryNotional * o / l.size)
+            + (l.entryFundingIndex - s.entryFundingIndex) * int256(o) / int256(BAZAAR_SCALE);
+        int256 net = pnl + int256(l.seized * o / l.size + s.seized * o / s.size);
+        return net < 0 ? uint256(-net) : 0;
+    }
+
+    /// @notice An opposing liquidation whose netting the fund cannot afford is seized into the
+    ///         vault's bucket on its own side: the fund pays the flat reward and nothing else, both
+    ///         buckets stand under the pending window with no bad debt anywhere, and one auction
+    ///         batch then closes each bucket against its own counterparties at that bucket's
+    ///         bankruptcy price — the short bucket against carol, the long bucket against bob. The
+    ///         identity must hold at every step, and nothing is ever booked as deficit.
     ///
-    ///         The netting arm runs only when its loss fits in the fund's free capital above the
+    ///         The netting runs only when its loss fits in the fund's free capital above the
     ///         reserve plus the seizure of the two slices it cancels and the ledger's arrears; the
-    ///         loss here is the $50k entry gap over 0.72, far past that, so the seizure is refused
-    ///         rather than run at a loss the fund would have to book as deficit.
-    function test_zeroSum_unaffordableNetting_defersAndClosesEachCohortAgainstItsOwn() public {
-        // Top of the range: dave long 0.72 vs bob short 0.72 at $80k, a third of notional each.
-        _deposit(dave, 19_200 * BAZAAR_SCALE);
+    ///         loss here is the $50k entry gap over 0.72, far past that, so the two estates are
+    ///         held hedged rather than netted at a loss the fund would have to book as deficit.
+    function test_zeroSum_unaffordableNetting_seizesIntoTheOppositeBucket_oneBatchClosesEachBucket() public {
+        // Top of the range: dave long 0.72 vs bob short 0.72 at $80k. dave carries $13,000, a
+        // little over the warmup initial margin, so his seizure earmarks less than a quarter of
+        // the notional and the long bucket's loss beyond it is what the batch has to resolve.
+        _deposit(dave, 13_000 * BAZAAR_SCALE);
         _deposit(bob, 16_000 * BAZAAR_SCALE);
         _crossAt(dave, 80_000 * BAZAAR_SCALE, bob, 80_000 * BAZAAR_SCALE, 72 * BAZAAR_SCALE / 100, 80_000);
         _assertZeroSum(80_000, "after top open");
@@ -825,8 +859,9 @@ contract ZeroSumInvariantTest is Test {
         _crossAt(carol, 30_000 * BAZAAR_SCALE, alice, 30_000 * BAZAAR_SCALE, 88 * BAZAAR_SCALE / 100, 30_000);
         _assertZeroSum(30_000, "after bottom open");
 
-        // Seize dave at $30k: the vault inherits a 0.72 long from $80k with his $19,200 earmarked
-        // against it, $36,000 under water — far past what the seed can absorb, so ADL latches.
+        // Seize dave at $30k: the long bucket holds a 0.72 long from $80k with his $13,000
+        // earmarked against it, $36,000 under water — far past what the seed can absorb, so ADL
+        // latches.
         address[] memory users = new address[](1);
         users[0] = dave;
         _advance(4);
@@ -835,59 +870,79 @@ contract ZeroSumInvariantTest is Test {
         assertTrue(pair.isAdlPending(), "the estate's loss exceeds the fund");
         _assertZeroSum(30_000, "after long seizure");
 
-        // Recover to $52,600: alice's $30k short is $19,888 under water on her collateral, and
-        // netting 0.72 of it against the vault's long would realize the $36,000 entry gap. The
-        // fund's free capital above its reserve, the two slices' seizure and the (empty) arrears
-        // are nowhere near it, so she is deferred: open, listed, and nothing seized or booked.
+        // Recover to $50k: alice's $30k short is $4,400 past bankruptcy, and netting 0.72 of it
+        // against the long bucket would realize the $36,000 entry gap against the two slices'
+        // seizure of about $23,600 and a fund above its reserve of under $4,000. She is seized into
+        // the short bucket instead: her collateral reaches the fund, the fund pays the flat reward
+        // for a seizure that retired nothing, and both buckets stand.
         (,,, uint256 aliceColl,,,) = pair.positionBuckets(alice);
         uint256 iBefore;
         {
-            (,,,,, uint256 I,,,,,,,,,,,) = pair.pairVault();
+            (,,,,, uint256 I,,,,,,) = pair.pairVault();
             iBefore = I;
         }
         users[0] = alice;
         _advance(4);
         vm.prank(seq);
-        assertEq(pair.liquidate(users, _pu(52_600)), 0, "alice deferred, not seized");
-        assertEq(pair.auxState().deferredCount, 1, "one deferred liquidation");
-        assertEq(pair.deferredLiquidations(0), alice, "alice is listed");
+        assertEq(pair.liquidate(users, _pu(50_000)), 1, "alice seized");
         {
-            (, uint256 aliceSize,, uint256 aliceCollNow,,,) = pair.positionBuckets(alice);
-            assertEq(aliceSize, 88 * BAZAAR_SCALE / 100, "her position is left open");
-            assertEq(aliceCollNow, aliceColl, "and her collateral untouched");
-            (,,,,, uint256 I, uint256 plSize,,,,, uint256 deficit,,,,,) = pair.pairVault();
-            assertEq(plSize, 72 * BAZAAR_SCALE / 100, "the vault's long is untouched");
+            (, uint256 aliceSize,,,,,) = pair.positionBuckets(alice);
+            assertEq(aliceSize, 0, "her position is gone");
+            (,,,,, uint256 I, uint256 deficit,,,, BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) =
+                pair.pairVault();
+            assertEq(l.size, 72 * BAZAAR_SCALE / 100, "the long bucket is untouched");
+            assertEq(s.size, 88 * BAZAAR_SCALE / 100, "the short bucket holds her estate");
             assertEq(deficit, 0, "nothing booked as bad debt");
-            assertEq(I, iBefore - BazaarTypes.MIN_LIQUIDATOR_REWARD, "the fund paid the recording tip and nothing else");
+            assertEq(
+                I,
+                iBefore + aliceColl - BazaarTypes.MIN_LIQUIDATOR_REWARD,
+                "the fund banked her collateral and paid the flat reward, nothing else"
+            );
+            assertGt(_overlapUncovered(), I - l.seized - s.seized, "netting the overlap is beyond the fund");
         }
-        assertTrue(pair.isAdlPending(), "the window stays open for her");
+        assertTrue(pair.isAdlPending(), "the window stays open over both buckets");
         assertEq(pair.settlementPriceFixedTs(), 0, "no insolvency verdict");
-        _assertZeroSum(52_600, "after the deferral");
+        _assertZeroSum(50_000, "after the opposite seizure");
 
-        // One batch, both cohorts. Carol — alice's counterparty, on the inventory's own side — is
-        // closed against alice at alice's bankruptcy price, where alice's whole collateral is
-        // exactly the profit carol is credited; bob is closed against the vault's long. The fund
-        // moves only by the executor's rewards, and the list and the window are released.
+        // One batch, both cohorts, both buckets under water at $50k, so each leg settles at its
+        // own bankruptcy price. The short bucket is the larger and runs first: its excess over the
+        // long bucket closes against carol alone, and the units the long bucket hedges close in
+        // pairs with bob's, each at its own bucket's price, as far as restoring the fund takes and
+        // no further. Carol is credited alice's bankruptcy on exactly the share closed, her
+        // collateral pro rata. The fund moves only by the executor's rewards, the window is
+        // released, and an overlap the two remainders still form is one the fund cannot afford
+        // to net, or the batch would have netted it as it ended.
         (,,, uint256 carolColl,,,) = pair.positionBuckets(carol);
         address[] memory cohort = new address[](1);
         cohort[0] = carol;
         users[0] = bob;
         _advance(15 minutes + 1);
         vm.prank(seq);
-        pair.executeAdl(users, cohort, _pu(52_600));
+        pair.executeAdl(users, cohort, _pu(50_000));
         {
-            (, uint256 aliceSize,,,,,) = pair.positionBuckets(alice);
             (, uint256 carolSize,, uint256 carolCollNow,,,) = pair.positionBuckets(carol);
-            assertEq(aliceSize, 0, "alice seized in the batch");
-            assertEq(carolSize, 0, "carol closed against her");
+            (, uint256 bobSize,,,,,) = pair.positionBuckets(bob);
+            uint256 shortClosed = 88 * BAZAAR_SCALE / 100 - carolSize;
+            uint256 longClosed = 72 * BAZAAR_SCALE / 100 - bobSize;
+            assertGt(shortClosed, 0, "carol closed against part of the short bucket");
+            assertGt(longClosed, 0, "bob closed against part of the long bucket");
             assertApproxEqAbs(
-                carolCollNow, carolColl + aliceColl, 1e12, "credited alice's bankruptcy: her whole collateral"
+                carolCollNow,
+                carolColl + aliceColl * shortClosed / (88 * BAZAAR_SCALE / 100),
+                1e13,
+                "credited alice's bankruptcy on the share closed: her collateral pro rata"
             );
-            (,,,,,,,,,,, uint256 deficit,,,,,) = pair.pairVault();
+            (,,,,, uint256 I, uint256 deficit,,,, BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) =
+                pair.pairVault();
+            assertLe(s.size, carolSize, "the short bucket holds at most what carol still holds against it");
+            assertLe(l.size, bobSize, "the long bucket holds at most what bob still holds against it");
+            assertEq(carolSize - s.size, bobSize - l.size, "what left the buckets past the closes was netted off both");
+            if (l.size != 0 && s.size != 0) {
+                assertGt(_overlapUncovered(), I - l.seized - s.seized, "a surviving overlap is one the fund cannot net");
+            }
             assertEq(deficit, 0, "still nothing booked as bad debt");
         }
-        assertEq(pair.auxState().deferredCount, 0, "list emptied");
         assertFalse(pair.isAdlPending(), "window released");
-        _assertZeroSum(52_600, "after the two-cohort batch");
+        _assertZeroSum(50_000, "after the two-bucket batch");
     }
 }
