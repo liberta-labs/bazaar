@@ -7,6 +7,8 @@ import {FundingLib} from "../../src/libraries/FundingLib.sol";
 import {RiskParamsLib} from "../../src/libraries/RiskParamsLib.sol";
 import {OrderView} from "../OrderView.sol";
 
+import {VaultStore} from "../VaultStore.sol";
+
 /// @title TradingGasBenchTest
 /// @notice Gas of the trading and keeper entry points on a pair that has already traded: resting,
 ///         taking, closing, order management, collateral, liquidation and the price refresh. The
@@ -195,7 +197,7 @@ contract TradingGasBenchTest is IntegrationBase {
     }
 
     function _heldInventory() internal view returns (uint256 held) {
-        (,,,,,, held,,,,,,,,,,) = pair.pairVault();
+        held = VaultStore.inventorySize(address(pair));
     }
 
     function _stopLossSpec(uint256 size, uint256 triggerPrice) internal pure returns (BazaarTypes.OrderSpec memory s) {

@@ -5,6 +5,7 @@ import {StdStorage, stdStorage} from "forge-std/Test.sol";
 import {IntegrationBase} from "./IntegrationBase.sol";
 import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 import {RiskParamsLib} from "../../src/libraries/RiskParamsLib.sol";
+import {VaultStore} from "../VaultStore.sol";
 
 /// @title LiquidationMarginRefreshTest
 /// @notice liquidate judges at the lower of the stored margin curve and the one the price it runs
@@ -201,10 +202,11 @@ contract LiquidationMarginRefreshTest is IntegrationBase {
 
     // ---------------- executeAdl ----------------
 
-    /// @dev Dave's 5 BTC long at $52k against bob's 3 and alice's 2, seized at $36k: the loss past
-    ///      his collateral exceeds the seed fund, so the window opens on the liquidation's own
-    ///      verdict. The fund is then written down to $16k, under the collateral the seizure
-    ///      banked, so a batch of bob alone leaves alice's slice, and the window, open.
+    /// @dev Dave's 5 BTC long at $52k against bob's 3 and alice's 2, seized at $36k into the long
+    ///      bucket: the loss past his collateral exceeds the seed fund, so the window opens on the
+    ///      liquidation's own verdict. The fund is then written down to $16k, under the collateral
+    ///      the seizure banked, so a batch of bob alone — a short, closing the long bucket — leaves
+    ///      alice's slice, and the window, open.
     function _openPendingAuction() internal {
         _deposit(bob, 200_000 * BAZAAR_SCALE);
         _deposit(alice, 200_000 * BAZAAR_SCALE);
@@ -221,7 +223,7 @@ contract LiquidationMarginRefreshTest is IntegrationBase {
         assertEq(pair.liquidate(_arr1(dave), pu), 1, "fixture: dave seized");
         assertTrue(pair.isAdlPending(), "fixture: the window is open");
 
-        _stdstore.target(address(pair)).sig("pairVault()").depth(5).checked_write(16_000 * BAZAAR_SCALE);
+        VaultStore.setInsuranceFundBalance(_stdstore, address(pair), 16_000 * BAZAAR_SCALE);
     }
 
     /// @notice executeAdl refreshes the curve before the gate and the batch sizing read it: past the
@@ -255,9 +257,9 @@ contract LiquidationMarginRefreshTest is IntegrationBase {
         // window stays open on a thin coverage and the batch can heal it. The fund is written
         // rather than deposited, so the cash behind the books is minted to match: every verdict
         // compares the two first, and a short balance would fix the settlement instead.
-        uint256 fund = _stdstore.target(address(pair)).sig("pairVault()").depth(5).read_uint();
+        uint256 fund = _insuranceBal();
         usdc.mint(address(pair), (81_000 * BAZAAR_SCALE - fund) / 1e12);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(5).checked_write(81_000 * BAZAAR_SCALE);
+        VaultStore.setInsuranceFundBalance(_stdstore, address(pair), 81_000 * BAZAAR_SCALE);
 
         vm.warp(vm.getBlockTimestamp() + BazaarTypes.ADL_AUCTION_DURATION + 1);
         _refreshAt(36_000);

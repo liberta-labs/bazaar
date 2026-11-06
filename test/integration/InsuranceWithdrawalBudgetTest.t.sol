@@ -20,9 +20,9 @@ contract InsuranceWithdrawalBudgetTest is IntegrationBase {
 
     // BazaarPair storage slots, from `forge inspect BazaarPair storage-layout`. The tests below
     // write and read through these directly, so a stale value fails an absolute assertion.
-    uint256 internal constant SLOT_LIQUIDATION_GAP_EMA = 43;
-    uint256 internal constant SLOT_INSURANCE_RATE_LIMIT = 57;
-    uint256 internal constant SLOT_REOPEN_GAP_EMA = 105;
+    uint256 internal constant SLOT_LIQUIDATION_GAP_EMA = 48;
+    uint256 internal constant SLOT_INSURANCE_RATE_LIMIT = 62;
+    uint256 internal constant SLOT_REOPEN_GAP_EMA = 109;
 
     // ------------------------------------------------------------------ helpers
 
@@ -124,7 +124,7 @@ contract InsuranceWithdrawalBudgetTest is IntegrationBase {
         (uint256 remaining, uint256 cap,, uint256 coverage, uint256 target) = _budget();
         assertLt(coverage, target, "fixture sits below target");
 
-        (uint256 longOI,,,,,,,,,,,,,,,,) = pair.pairVault();
+        (uint256 longOI,,,,,,,,,,,) = pair.pairVault();
         uint256 oiTerm = Math.mulDiv(longOI, P, BAZAAR_SCALE) * 50 / 10_000; // 0.5% of OI notional
         uint256 fundTerm = 900 * BAZAAR_SCALE * 500 / 10_000; // 5% of the fund
         assertEq(cap, oiTerm < fundTerm ? oiTerm : fundTerm, "below target: the stricter of the two terms");
@@ -200,7 +200,7 @@ contract InsuranceWithdrawalBudgetTest is IntegrationBase {
         vm.store(address(aaplPair), bytes32(SLOT_REOPEN_GAP_EMA), bytes32((seededJumpTs << 192) | (reopenBp << 64)));
         aaplPair.refreshPrice(_priceUpdateFor(AAPL_USD_FEED_ID, 150, uint64(nowTs)));
 
-        (,,,,,,,,,,,, cachedTarget,,,,) = aaplPair.pairVault();
+        (,,,,,,, cachedTarget,,,,) = aaplPair.pairVault();
         (,,,, lensTarget) = lens.getInsuranceWithdrawalBudget(address(aaplPair), 150 * BAZAAR_SCALE);
     }
 

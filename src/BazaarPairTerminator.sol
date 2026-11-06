@@ -1120,7 +1120,7 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
     ///      `forge inspect BazaarPair storage-layout`; every pair is a clone of one
     ///      implementation, so it holds for every pair, and a layout change needs it re-read. The
     ///      insurer-vote epoch tests pin it against the pair's own recap behaviour.
-    uint256 internal constant PAIR_SLOT_SHARE_EPOCH = 92;
+    uint256 internal constant PAIR_SLOT_SHARE_EPOCH = 97;
 
     /// @notice A claim-backed vote's UMA verdict: none yet, TRUE, or FALSE.
     uint8 public constant VERDICT_PENDING = 0;

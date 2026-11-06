@@ -100,8 +100,6 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     // -------------------- Pair State --------------------
     bool public isAdlPending = false; // if true, all trading and order creation is frozen until ADL settles and Check 1 passes
     uint256 public adlPendingSince = 0; // timestamp when ADL was first triggered (0 if not pending)
-    uint256 internal adlSnapshotPrice = 0; // price snapshot when ADL was triggered, used for consistent ranking across batches
-    bool internal adlLongs = false; // locked direction: true if ADL'ing long winners, set when ADL triggers
     bool public isPairTerminated = false; // finalized: no deposits/orders/matching, only terminal withdrawals
     uint256 public scheduledTerminationTs; // settlement instant, limbo from LIMBO_LEAD before it: an accepted UMA proposal or a passed insurer vote sets it; every price fix stamps it
 
@@ -533,9 +531,8 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
 
         // Epoch-tag deposits made during a live ADL window: the deposit fully protects the
         // bucket and counts at settlement, but ADL scoring subtracts it (AdlLib._scoreCollateral)
-        // so a mid-auction top-up cannot re-rank the queue on the side the window targets. Only
-        // that side's ranking reads the tag: the deferred cohort, the inventory's own side, ranks
-        // on its full collateral, and a re-target advances the epoch past the tag.
+        // so a mid-auction top-up cannot re-rank the queue, on whichever side the depositor is
+        // ranked.
         if (isAdlPending) {
             if (adlDepositEpoch[user] != adlEpoch) {
                 adlDepositEpoch[user] = adlEpoch;
@@ -765,7 +762,7 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
         // and no ETH. A fresh resolution stores the mark in lastPairPrice and advances the funding
         // index the inventory is then valued with, so the library reads both from storage.
         uint256 ethRefund = msg.value;
-        if (pairVault.pendingLiqSize != 0) {
+        if (RiskParamsLib.inventorySize(pairVault) != 0) {
             (, uint256 unusedEth, bool isStale) = _getCurrentPairPrice(priceUpdate, msg.value);
             if (isStale) revert BazaarPair__InsuranceDepositRequiresFreshPrice();
             ethRefund = unusedEth;
@@ -1139,7 +1136,6 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
             positionBuckets,
             pairVault,
             feeEscrow,
-            deferredLiquidations,
             BazaarTypes.LiquidateParams({
                 currentPrice: currentPrice,
                 currentFundingIndex: currentFundingIndex,
@@ -1149,23 +1145,21 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
             })
         );
 
-        // The liquidator's per-account reward (LiquidationLib.flatReward per account seized or
-        // newly deferred, or 2 bps of what a netting retires when larger) is debited from
-        // insurance and accrued to its claimable balance inside processLiquidations; the inline
-        // unload below pays 2 bps of what it sells into the book past result.unloadPrepaid, the
-        // part of that reward beyond the nettings' rate.
+        // The liquidator's per-account reward (LiquidationLib.flatReward per account seized, or
+        // 2 bps of what its netting retires when larger) is debited from insurance and accrued to
+        // its claimable balance inside processLiquidations; the inline unload below pays 2 bps of
+        // what it sells into the book past result.unloadPrepaid, the part of that reward beyond
+        // the nettings' rate.
         liquidatedCount = result.liquidatedCount;
 
-        // A deferral changes the exposure the gate reads without seizing anything, so it is
-        // judged like a seizure: the window a deferred position needs opens in this call.
-        if (liquidatedCount > 0 || result.deferredCount > 0) {
+        if (liquidatedCount > 0) {
             // Cross the freshly seized inventory into the book BEFORE judging vault health, so
             // exposure the book can absorb right now never false-latches an ADL window. Judging
             // after the walk is safe because the walk (RiskParamsLib.planUnload) spends at
             // most the fund's headroom — free capital above the reserve, less the loss the
             // remaining inventory carries at the mark — so its fills can neither take the fund
             // below its reserve nor carry the pair over the trigger, and the caller's reward,
-            // paid after them, is capped so it cannot either (RiskParamsLib.unloadRewardPayable).
+            // paid after them, is capped so it cannot either (RiskParamsLib.settleUnloadTail).
             // Bounded by a fixed node budget to keep the liquidator's gas predictable; the
             // permissionless unloadVault finishes anything deeper. Skipped while ADL is already
             // pending — matching is frozen then and
@@ -1214,19 +1208,13 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     uint256 internal nextAdlId;
 
     // -------------------- Events --------------------
-    /// @notice Emitted whenever an ADL cohort is set: a window opening (false→true trigger) and a
-    ///         mid-auction side flip that re-targets one both qualify. Carries the frozen ranking
-    ///         basis — adlSnapshotPrice and adlSnapshotFundingIndex — so keepers score winners
-    ///         against the same values the contract ranks with; adlEpoch identifies the ranking
-    ///         epoch, which is what deposit tags and the decay gate are keyed to, so one pending
-    ///         window spans several when it flips. A re-target withheld for staleness emits
-    ///         nothing, since it leaves the basis untouched. auxState() always reflects the current
-    ///         basis (including adlLongs and the auction clock), so keepers re-read it before each
-    ///         submission rather than depending on this event alone. Kept lean to hold the pair
-    ///         under the EIP-170 code-size limit.
-    event AdlTriggered(
-        bytes32 indexed pairId, uint64 indexed adlEpoch, uint256 adlSnapshotPrice, int256 adlSnapshotFundingIndex
-    );
+    /// @notice Emitted when an ADL window opens. Carries the price and funding index the window
+    ///         opened at, and the epoch its deposit tags are keyed to. Both of a batch's cohorts
+    ///         rank at the price that batch resolves, so keepers score candidates against the
+    ///         pair's stored price (BazaarPairLens.getAdlScore) rather than against these values,
+    ///         and read the auction clock from adlAuctionStartTs before each submission. Kept lean
+    ///         to hold the pair under the EIP-170 code-size limit.
+    event AdlTriggered(bytes32 indexed pairId, uint64 indexed adlEpoch, uint256 price, int256 fundingIndex);
 
     /// @notice Emitted when a timed-out auction's termination deadline is fixed, which happens once
     ///         per window on the first price stored past the timeout.
@@ -1248,30 +1236,27 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
 
     // -------------------- Functions --------------------
 
-    /// @notice Deleverages profitable counterparties against the vault's liquidation inventory.
+    /// @notice Deleverages profitable counterparties against the vault's two buckets: shorts
+    ///         against the long bucket, longs against the short bucket, each at its bucket's
+    ///         settlement price (AdlLib.executeAdlCore).
     /// @dev Requires a price the oracle currently attests: the stale fallback is refused, so on a
     ///      non-continuously traded pair whose market is shut the auction waits for the reopen. The
     ///      timeout waits with it — it needs a fresh price too, and then ADL_TERMINATION_GRACE more
     ///      (see adlTerminationTs) — so waiting cannot cost the pair its chance to deleverage.
-    /// @param winners Candidate accounts on the side opposite the vault's inventory, sorted by
-    ///        DESCENDING ADL score at the window's frozen snapshot; AdlLib rejects a batch that
-    ///        is out of order. Preview a score with BazaarPairLens.getAdlScore.
-    /// @param deferredWinners Candidate accounts on the inventory's own side, sorted the same
-    ///        way but scored at the price this call resolves, to be closed against the deferred
-    ///        liquidations (auxState reports their count, deferredLiquidations(i) names them) at
-    ///        those positions' bankruptcy price. That price is the Pyth cache's whenever the
-    ///        cache is within MAX_PRICE_STALENESS, and only otherwise the one in priceUpdate, so
-    ///        a sort made at a tick the cache has since overtaken can be rejected as out of
-    ///        order; the caller then re-scores at the stored price and resubmits. Either list
-    ///        may be empty; not both.
+    /// @param longBucketWinners Candidate shorts to close the long bucket against, in any order:
+    ///        the batch scores every candidate at the price this call resolves and sorts them
+    ///        itself. That price is the Pyth cache's whenever the cache is within
+    ///        MAX_PRICE_STALENESS, and only otherwise the one in priceUpdate. Preview a score with
+    ///        BazaarPairLens.getAdlScore. Either list may be empty; not both.
+    /// @param shortBucketWinners Candidate longs to close the short bucket against, likewise
     /// @param priceUpdate Signed Pyth price update messages. May be empty only when the on-chain
     ///        Pyth cache is already fresh within MAX_PRICE_STALENESS; otherwise the call reverts
     ///        rather than falling back to the pair's stored price.
-    function executeAdl(address[] calldata winners, address[] calldata deferredWinners, bytes[] calldata priceUpdate)
-        external
-        payable
-        nonReentrant
-    {
+    function executeAdl(
+        address[] calldata longBucketWinners,
+        address[] calldata shortBucketWinners,
+        bytes[] calldata priceUpdate
+    ) external payable nonReentrant {
         // Once the settlement price is fixed only settlement at that price may mutate
         // positions — an ADL at a live oracle price would corrupt the book — and a finalized
         // pair has its inventory retired and settles via withdrawals only. Past a scheduled
@@ -1292,13 +1277,11 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
         // executable), the batch sizing (the size that restores health is measured against
         // it), the settlement price (the mark replaces the estates' bankruptcy price whenever
         // it sits on the fund's favorable side, so a stale one would close winners at a price
-        // the market has left), and the executor reward (the keeper rate is valued at it, and the
-        // averted loss is the gap between it and the settlement price). The ranking of `winners`
-        // is immune, being frozen at the snapshot; the deferred cohort ranks at this price (see
-        // AdlLib._closeDeferred). Neither is enough to let the rest run on a mark nobody just
-        // confirmed. A caller who cannot resolve a fresh price supplies priceUpdate; while the
-        // feed is genuinely down, the auction waits, and the timeout cannot claim the pair out
-        // from under it either — see adlTerminationTs.
+        // the market has left), the ranking of both cohorts (AdlLib._scan), and the executor
+        // reward (the keeper rate is valued at it, and the averted loss is the gap between it and
+        // the settlement price). A caller who cannot resolve a fresh price supplies priceUpdate;
+        // while the feed is genuinely down, the auction waits, and the timeout cannot claim the
+        // pair out from under it either — see adlTerminationTs.
         if (isPriceStale) revert BazaarPair__AdlPriceStale();
         uint256 currentPrice = priceStruct.spotPrice;
         // Refreshed from this price before the gate and the batch sizing read it: the stored
@@ -1312,32 +1295,20 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
         (, uint8 healthReason) = isVaultHealthy(currentPrice, isPriceStale, mr);
 
         if (healthReason == 1) {
-            // The auction is guaranteed to be aimed away from the side the vault itself holds,
-            // and nothing here re-checks it. The freshness gate above admits only a non-stale
-            // resolution, which is precisely the condition under which the isVaultHealthy call
-            // applies a flipped auction's re-target instead of withholding it — so any flip is
-            // already corrected by the time execution begins. The deferred cohort is the other
-            // side by construction: a deferred position is always opposite the inventory, so
-            // its counterparties are on the inventory's own side.
-            //
-            // The library accrues every reward — the seizure of each deferred position it
-            // takes, the executor's share of the bad debt the closes against those averted, and
-            // for the inventory's own closes the keeper rate or that share where larger — to the
-            // caller's claimable balance, capped at the fund's free capital, and emits
-            // AdlExecuted from this contract's address, so it needs the adlId.
+            // The library accrues every reward — for each leg's closes the keeper rate or the
+            // executor's share of the bad debt they avert where larger, and the rate on what the
+            // netting that ends the batch retires — to the caller's claimable balance, capped at
+            // the fund's free capital, and emits AdlExecuted from this contract's address, so it
+            // needs the adlId.
             AdlLib.executeAdlCore(
                 orders,
                 book,
                 positionBuckets,
                 pairVault,
                 feeEscrow,
-                deferredLiquidations,
-                winners,
-                deferredWinners,
+                longBucketWinners,
+                shortBucketWinners,
                 BazaarTypes.AdlParams({
-                    adlLongs: adlLongs,
-                    adlSnapshotPrice: adlSnapshotPrice,
-                    adlSnapshotFundingIndex: adlSnapshotFundingIndex,
                     adlAuctionStartTs: adlAuctionStartTs,
                     currentPrice: currentPrice,
                     currentFundingIndex: currentFundingIndex,
@@ -1351,8 +1322,7 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
                 adlWindowDeposits
             );
 
-            // Re-evaluate vault health: releases the window once the exposure is resolved, or
-            // re-targets it when the batch seized the deferred positions as the new inventory.
+            // Re-evaluate vault health: releases the window once the exposure is resolved.
             isVaultHealthy(currentPrice, isPriceStale, mr);
         }
 
@@ -1787,7 +1757,7 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     ///         UNLOAD_BOUNTY_MIN only when the call moved at least UNLOAD_BOUNTY_MIN_NOTIONAL
     ///         or emptied the inventory, and capped at the fund's free capital and, while the
     ///         inventory left carries a loss at the mark, at what that capital above the reserve
-    ///         covers the loss by (RiskParamsLib.unloadRewardPayable). The walk library accrues it
+    ///         covers the loss by (RiskParamsLib.settleUnloadTail). The walk library accrues it
     ///         to the caller's claimable balance, pulled via claimFees. Against the stale fallback
     ///         it fills nothing and pays nothing: the inventory waits for a fresh mark
     ///         (MatchingEngineLib.unloadBook).
@@ -2276,131 +2246,49 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
 
         // Check 2: liquidation exposure vs insurance fund (delegated to VaultHealthLib)
         VaultHealthLib.LiqExposureResult memory result = VaultHealthLib.checkLiqExposure(
-            pairVault,
-            positionBuckets,
-            deferredLiquidations,
-            currentPrice,
-            isAdlPending,
-            adlPendingSince,
-            adlSnapshotPrice,
-            adlLongs,
-            currentFundingIndex,
-            adlSnapshotFundingIndex,
-            BucketLib.effectiveMmrBp(mr)
+            pairVault, currentPrice, isAdlPending, adlPendingSince, currentFundingIndex, BucketLib.effectiveMmrBp(mr)
         );
 
-        // Opening a NEW window is gated on a fresh price. Everything an auction is judged by is
-        // frozen at the instant it opens — which side is deleveraged, the ranking snapshot, and the
-        // 24h clock — and a stale mark is whichever real tick someone last recorded, not the book's
-        // exposure now. Opening on one deleverages profitable counterparties in response to stress
-        // that may no longer exist, and they are not in breach of anything. The verdict is still
-        // reported (reason 1), so callers that gate on vault health stay conservative; only the
-        // irreversible latch is withheld. Extending and clearing a window already opened against a
-        // fresh price are untouched: executing the auction needs a fresh mark, but a stale-priced
-        // liquidate can still shrink the exposure — by netting an affordable opposing seizure
-        // against the inventory, or by dropping a listed account now solvent or flat — and
-        // releases the latch here once that carries it back under the release level, so a quiet
-        // feed cannot strand a pair that has already recovered.
+        // Opening a NEW window is gated on a fresh price. What an auction is judged by is fixed at
+        // the instant it opens — the 24h clock and the epoch its deposit tags are keyed to — and a
+        // stale mark is whichever real tick someone last recorded, not the book's exposure now.
+        // Opening on one deleverages profitable counterparties in response to stress that may no
+        // longer exist, and they are not in breach of anything. The verdict is still reported
+        // (reason 1), so callers that gate on vault health stay conservative; only the irreversible
+        // latch is withheld. Extending and clearing a window already opened against a fresh price
+        // are untouched: executing the auction needs a fresh mark, but a stale-priced liquidate can
+        // still shrink the exposure — a seizure that makes netting the two buckets' overlap
+        // affordable nets it — and releases the latch here once that carries it back under the
+        // release level, so a quiet feed cannot strand a pair that has already recovered.
         if (result.newIsAdlPending && !isAdlPending && isPriceStale) return 1;
 
-        // A mid-auction side flip is the one path that moves adlSnapshotPrice after the window
-        // opened, so it needs the same freshness gate. That snapshot is not merely a sort key:
-        // AdlLib's eligibility scan skips every account whose PnL measured at it is non-positive,
-        // so the snapshot decides who can be deleveraged at all. Re-snapshotting from a stale mark
-        // would let whoever triggers the flip choose a price at which an account underwater at the
-        // live market shows a paper profit, and close it as a winner — in the same transaction,
-        // since liquidating the opposing side both causes the flip and lands here.
-        //
-        // Withholding the re-target leaves adlLongs pointing at the side the vault itself holds,
-        // which is not a safe state to execute in — eligibility only requires positive PnL against
-        // an account's own entry, so profitable positions exist on both sides. What makes
-        // withholding safe is that the state is unreachable from executeAdl at all: it admits only
-        // a fresh price, and a fresh price takes the re-targeting path here rather than this one,
-        // so execution never begins against a flip this branch left standing. The timeout cannot
-        // claim the pair meanwhile either, since it requires a fresh price on the same terms.
-        //
-        // The flip condition is derived here rather than reported by checkLiqExposure: the target
-        // side it compares against is this contract's own state, already read on this line, so
-        // naming it costs nothing where widening the result struct would. Must be computed before
-        // the adlLongs write below, which is what it tests.
-        bool sideFlipped = isAdlPending && result.newIsAdlPending && adlLongs == pairVault.pendingLiqIsLong;
-        bool staleRetarget = isPriceStale && sideFlipped;
-
-        // Apply ADL state changes. Opening a window and a side flip that re-targets one are the
-        // same event for everything scoped to the cohort being deleveraged, because a flip replaces
-        // that cohort wholesale — every account newly in range was, an instant earlier, on the side
-        // the vault was inheriting from.
-        //
-        // The epoch bump re-bases the deposit tags. A tag exists to stop a top-up made while its
-        // owner was in range from improving their queue position; after a flip the live tags belong
-        // to the side that was NOT in range, whose deposits were defending against liquidation, not
-        // against a ranking they were never subject to. Subtracting those would rank the newly
-        // targeted cohort as though it had no collateral at all — a bump restores the rule the
-        // mechanism means: a deposit discounts your score only if you made it while your own side
-        // was the one being deleveraged. It cannot cost anything but queue position, since the
-        // deposit is already booked to the bucket and the ledger and counts in full at settlement.
-        //
-        // Restarting the decay gives the new cohort the auction it never had. The gate narrows from
-        // ADL_MAX_SCORE only as an auction fails to turn up eligible accounts, so inherited decay
-        // means a flip ten minutes in exposes every profitable account on the new side at once,
-        // with no ranking protection. The two termination clocks are deliberately left standing:
-        // adlPendingSince and the runway armed off it stay monotone, so a caller who can induce
-        // flips — liquidating the opposing side both causes one and lands here — cannot defer the
-        // deadline that resolves a stuck auction. A pair that keeps flipping therefore keeps
-        // restarting the decay and may stay out of executeAdl's reach, and still terminates on
-        // schedule underneath.
-        //
-        // Both are withheld when the re-target itself is (staleRetarget): the snapshot does not
-        // move, so the cohort does not either, and spending a fresh epoch and a fresh gate on an
-        // unchanged target would void honest tags and re-arm the gate for nothing. The two arms are
-        // mutually exclusive — one needs isAdlPending false, the other true — so the epoch advances
-        // at most once per evaluation.
-        if ((result.newIsAdlPending && !isAdlPending) || (sideFlipped && !staleRetarget)) {
+        // Apply ADL state changes. The epoch bump re-bases the deposit tags: a tag exists to stop
+        // a top-up made while a window is open from improving its owner's queue position, and tags
+        // from an earlier window must not count against this one's cohorts. The decay starts with
+        // the window: the gate narrows from ADL_MAX_SCORE only as an auction fails to turn up
+        // eligible accounts.
+        if (result.newIsAdlPending && !isAdlPending) {
             unchecked {
                 ++adlEpoch;
             }
             adlAuctionStartTs = block.timestamp;
-            emit AdlTriggered(pairId, adlEpoch, result.newAdlSnapshotPrice, result.newAdlSnapshotFundingIndex);
+            emit AdlTriggered(pairId, adlEpoch, currentPrice, currentFundingIndex);
         }
         // Clear both auction clocks on the way out of a window. Reaching here with
         // newIsAdlPending false means the hysteresis released — the fund above its reserve can
         // finish the remaining inventory inside the band — since the timeout branch of
-        // checkLiqExposure re-asserts the
-        // latch rather than dropping it. Without this the termination deadline would outlive the
-        // auction it was measured for, and the pair's next window would open already armed with an
-        // instant in the past: terminable on its first block, with no runway at all. Reads the
-        // pre-assignment flag, so it must precede the write below.
-        //
-        // The deferred list is emptied whenever the verdict leaves no window open, whether it
-        // releases one or finds none to open. The list holds liquidations back for a window's
-        // auction to close against their own counterparties, and a verdict that wants no window
-        // leaves it nothing to do: while the vault still holds inventory, no listed account
-        // carries loss beyond its collateral and the fund above its reserve covers the inventory,
-        // which makes netting any of them affordable; with no inventory there is nothing to net
-        // one against. Every listed account is an ordinary liquidation candidate again. One
-        // liquidate call can list an account and reach this verdict wanting no window, because
-        // its inline unload runs between the deferral and the verdict and can sell or cover the
-        // inventory the account was deferred against. Left in place, the entries would be walked
-        // by every later health check while inventory remains, would hold slots in the bounded
-        // list, and could open a later window on inventory nobody has tried to net them against.
-        // A deferral on the stale fallback is the one that keeps its entry with no window stored:
-        // the verdict wanting its window returns above before reaching here, and the account
-        // stays listed for the fresh verdict that opens it.
-        if (!result.newIsAdlPending) {
-            delete deferredLiquidations;
-            if (isAdlPending) {
-                adlTerminationTs = 0;
-                adlAuctionStartTs = 0;
-                emit AdlResolved(pairId, adlEpoch);
-            }
+        // checkLiqExposure re-asserts the latch rather than dropping it. Without this the
+        // termination deadline would outlive the auction it was measured for, and the pair's next
+        // window would open already armed with an instant in the past: terminable on its first
+        // block, with no runway at all. Reads the pre-assignment flag, so it must precede the
+        // write below.
+        if (!result.newIsAdlPending && isAdlPending) {
+            adlTerminationTs = 0;
+            adlAuctionStartTs = 0;
+            emit AdlResolved(pairId, adlEpoch);
         }
         isAdlPending = result.newIsAdlPending;
         adlPendingSince = result.newAdlPendingSince;
-        if (!staleRetarget) {
-            adlSnapshotPrice = result.newAdlSnapshotPrice;
-            adlSnapshotFundingIndex = result.newAdlSnapshotFundingIndex;
-            adlLongs = result.newAdlLongs;
-        }
 
         if (result.adlTimeoutExpired && !isPriceStale && adlTerminationTs != 0 && block.timestamp >= adlTerminationTs) {
             // Price-driven insolvency: the vault could not deleverage a real move within the auction
@@ -2619,8 +2507,8 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
             // makes it the one place that observes the feed actually serving this pair — a price
             // the caller merely supplied but that fails the guard above stores nothing and arms
             // nothing. The adlPendingSince term also bounds how much runway a single window can
-            // hand out: it is monotone across a mid-auction side flip, so re-targeting cannot
-            // rewind the clock and buy another grace period.
+            // hand out: it is set once, when the window opens, so nothing that happens inside the
+            // window can rewind the clock and buy another grace period.
             if (
                 isAdlPending && adlTerminationTs == 0
                     && block.timestamp > adlPendingSince + VaultHealthLib.ADL_TIMEOUT_DURATION
@@ -2721,23 +2609,18 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
         s.rollingVolume = rollingVolume;
         s.pairCreatedTs = pairCreatedTs;
         s.priceUpdateCount = priceUpdateCount;
-        s.adlSnapshotPrice = adlSnapshotPrice;
-        s.adlSnapshotFundingIndex = adlSnapshotFundingIndex;
-        s.adlLongs = adlLongs;
         s.settlementPrice = fixedSettlementPrice;
         s.terminalPrincipalRatio = terminalState.principalRatio;
         s.terminalProfitRatio = terminalState.profitRatio;
         s.terminalProfitClaims = terminalState.totalProfitClaims;
         s.terminalBadDebt = terminalState.terminalBadDebt;
         s.bugBountyAddress = bugBountyAddress;
-        s.deferredCount = deferredLiquidations.length;
     }
 
     /// @notice The window-deposit amount ADL ranking subtracts from `user`'s collateral: their
     ///         deposits epoch-tagged to the CURRENT ranking epoch, 0 when the tag is absent or
-    ///         superseded — which a side flip does to every live tag. Read by
-    ///         BazaarPairLens.getAdlScore and by keepers pre-sorting executeAdl batches, so score
-    ///         previews apply the same epoch check the on-chain ranking does.
+    ///         superseded. Read by BazaarPairLens.getAdlScore and by keepers previewing executeAdl
+    ///         candidates, so score previews apply the same epoch check the on-chain ranking does.
     function adlScoreDeposit(address user) external view returns (uint256) {
         return adlDepositEpoch[user] == adlEpoch ? adlWindowDeposits[user] : 0;
     }
@@ -2747,29 +2630,17 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     //  preserves the storage slots of all earlier state)
     // ----------------------------------------------------------
 
-    /// @notice ADL ranking-epoch counter — increments whenever a cohort is set: each false→true
-    ///         isAdlPending transition, and each mid-auction side flip that re-targets the
-    ///         auction. (Distinct from nextAdlId, which numbers individual executeAdl
-    ///         installments; one pending window can span several of both.) Deposits made while a
-    ///         window is live are epoch-tagged so ADL scoring ranks the side the window targets on
-    ///         the book as of the moment it came into range: a mid-auction top-up cannot dodge the
-    ///         queue, while still fully counting for liquidation protection and ADL settlement.
-    ///         The deferred cohort, the inventory's own side, ranks on its full collateral (its
-    ///         tags defended against liquidation, not against a ranking it was not yet subject
-    ///         to); a re-target voids them the same way by advancing the epoch. Tags from
-    ///         superseded epochs fail the equality check and are ignored — lazy invalidation, no
-    ///         cleanup pass, and the stale amount is overwritten by the depositor's next deposit.
+    /// @notice ADL ranking-epoch counter — increments on each false→true isAdlPending transition.
+    ///         (Distinct from nextAdlId, which numbers individual executeAdl installments; one
+    ///         pending window spans several of those.) Deposits made while a window is live are
+    ///         epoch-tagged so ADL scoring ranks every account on the collateral it held before
+    ///         them: a mid-auction top-up cannot dodge the queue on either side, while still fully
+    ///         counting for liquidation protection and ADL settlement. Tags from superseded epochs
+    ///         fail the equality check and are ignored — lazy invalidation, no cleanup pass, and
+    ///         the stale amount is overwritten by the depositor's next deposit.
     uint64 internal adlEpoch; // read off-chain through BazaarPairLens.adlEpoch
     mapping(address => uint64) internal adlDepositEpoch; // window the user's tagged deposits belong to
     mapping(address => uint256) internal adlWindowDeposits; // collateral added during that window
-
-    /// @notice Funding index frozen when the current ADL window opened (and re-frozen on a
-    ///         mid-auction side flip), paired with adlSnapshotPrice. ADL ranking scores against
-    ///         this frozen value so the descending-order check stays deterministic across batches;
-    ///         a funding move between the keeper's off-chain sort and on-chain execution can no
-    ///         longer reorder the queue and revert the batch. Settlement still uses the live index.
-    ///         (Appended last to preserve the storage slots of all earlier state.)
-    int256 internal adlSnapshotFundingIndex = 0;
 
     /// @notice Per-user registered profit claims and the aggregate terminal-settlement state
     ///         (the settlement tallies and the frozen payout ratios). The claim mapping is
@@ -2822,22 +2693,13 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
 
     /// @notice Start of the ADL auction's current Dutch-decay run; 0 while no auction is open
     ///         (appended last to preserve the storage slots of all earlier state).
-    /// @dev Set when a window opens, restarted on a mid-auction side flip that re-targets one, and
-    ///      restarted by _buildAndStorePairPrice whenever a stored price ends a market
-    ///      discontinuity. Deliberately separate from adlPendingSince: that one dates the window
-    ///      and feeds the termination clock, which stays monotone so neither a closure nor a flip
-    ///      can defer it, while this one measures only how far the eligibility threshold has
+    /// @dev Set when a window opens, and restarted by _buildAndStorePairPrice whenever a stored
+    ///      price ends a market discontinuity. Deliberately separate from adlPendingSince: that one
+    ///      dates the window and feeds the termination clock, which stays monotone so a closure
+    ///      cannot defer it, while this one measures only how far the eligibility threshold has
     ///      descended against a cohort that could actually be submitted, and may move forward.
     ///      AdlLib._getAdlScoreThreshold reads it, and 0 yields a threshold no score can reach.
     uint256 public adlAuctionStartTs;
-
-    /// @notice Liquidations the vault could not take: insolvent positions opposite its inventory
-    ///         whose netting against it would have taken the insurance fund below its reserve.
-    ///         Left open and listed here for the auction to close against their own
-    ///         counterparties, and emptied by any health check that leaves no window open
-    ///         (_vaultHealthVerdict); bounded by MAX_DEFERRED_LIQUIDATIONS, with the count
-    ///         reported by auxState. Declared last so the storage layout ahead of it is unchanged.
-    address[] public deferredLiquidations;
 
     /// @notice Per-user insurance redemption locks, packed `lockedAmount << 64 | lockTs`: what the
     ///         requested shares were worth when the first execute call of a live-pair redemption

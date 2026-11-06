@@ -15,6 +15,7 @@ import {MockArbSys} from "../mocks/MockArbSys.sol";
 import {MockPyth} from "@pythnetwork/pyth-sdk-solidity/MockPyth.sol";
 import {PythSeed} from "../PythSeed.sol";
 import {BucketStore} from "../BucketStore.sol";
+import {VaultStore} from "../VaultStore.sol";
 
 /// @title IntegrationBase
 /// @notice Shared deployment harness for the Bazaar integration suite. Every integration test
@@ -419,7 +420,7 @@ abstract contract IntegrationBase is Test {
     }
 
     function _insuranceBal() internal view returns (uint256 b) {
-        (,,,,, b,,,,,,,,,,,) = pair.pairVault();
+        (,,,,, b,,,,,,) = pair.pairVault();
     }
 
     // ---------------------------- misc array helpers ----------------------------
@@ -446,7 +447,7 @@ abstract contract IntegrationBase is Test {
 
     /// @dev totalCollateralDeposited (D) — Vault field index 4.
     function _totalDeposited() internal view returns (uint256 d) {
-        (,,,, d,,,,,,,,,,,,) = pair.pairVault();
+        (,,,, d,,,,,,,) = pair.pairVault();
     }
 
     /// @dev The Check-3 expected balance: insuranceFundBalance (I) + totalCollateralDeposited (D)
@@ -454,7 +455,7 @@ abstract contract IntegrationBase is Test {
     ///      cash the contract still holds against a third-party claim, so they belong on the
     ///      books side of the comparison exactly like I and D.
     function _ledgerBaz() internal view returns (uint256) {
-        (,,,, uint256 d, uint256 i,,,,,,,,,,,) = pair.pairVault();
+        (,,,, uint256 d, uint256 i,,,,,,) = pair.pairVault();
         return d + i + _escrowTotal();
     }
 
@@ -513,17 +514,20 @@ abstract contract IntegrationBase is Test {
         return usdc.balanceOf(who) - before;
     }
 
-    /// @dev Stage inventory `target`'s vault holds — one unit long at `entryNotional` — with
-    ///      `seized` of collateral banked into its insurance fund alongside it. A long's
-    ///      bankruptcy notional sits below its entry by that collateral, which is how the seizure
-    ///      is recovered without being tracked. Vault struct depths: 6 pendingLiqSize,
-    ///      7 pendingLiqEntryNotional, 8 pendingLiqBankruptcyNotional, 10 pendingLiqIsLong.
+    /// @dev Stage inventory in one of `target`'s vault buckets — `size` on `isLong`'s side at
+    ///      `entryNotional` — with `seized` of collateral banked into its insurance fund alongside
+    ///      it. The bucket's bankruptcy notional sits that collateral away from its entry (below
+    ///      it for longs, above it for shorts); its funding anchor is a zero index and its seizure
+    ///      stamp is unset, which the unload walk treats as fully aged (VaultStore).
+    function _stageHeldInventory(BazaarPair target, bool isLong, uint256 size, uint256 entryNotional, uint256 seized)
+        internal
+    {
+        VaultStore.stage(_stdstore, address(target), isLong, size, entryNotional, seized, 0);
+    }
+
+    /// @dev A long bucket.
     function _stageHeldInventory(BazaarPair target, uint256 size, uint256 entryNotional, uint256 seized) internal {
-        _stdstore.target(address(target)).sig("pairVault()").depth(6).checked_write(size);
-        _stdstore.target(address(target)).sig("pairVault()").depth(7).checked_write(entryNotional);
-        _stdstore.target(address(target)).sig("pairVault()").depth(8).checked_write(entryNotional - seized);
-        _stdstore.target(address(target)).sig("pairVault()").depth(10).checked_write(true);
-        _stdstore.target(address(target)).sig("pairVault()").depth(13).checked_write(seized);
+        _stageHeldInventory(target, true, size, entryNotional, seized);
     }
 
     function _stageHeldInventory(BazaarPair target, uint256 entryNotional, uint256 seized) internal {
@@ -534,10 +538,37 @@ abstract contract IntegrationBase is Test {
         _stageHeldInventory(pair, entryNotional, seized);
     }
 
-    /// @dev Write the vault's cached insurance target (Vault struct depth 12), which sizes the
-    ///      reserve the unload walk keeps and the share-pricing loss cap.
+    /// @dev Write the vault's cached insurance target, which sizes the reserve the unload walk
+    ///      keeps and the share-pricing loss cap.
     function _setTargetInsuranceRatioBp(BazaarPair target, uint256 targetBp) internal {
-        _stdstore.target(address(target)).sig("pairVault()").depth(12).checked_write(targetBp);
+        VaultStore.setTargetInsuranceRatioBp(_stdstore, address(target), targetBp);
+    }
+
+    /// @dev The vault's two buckets, read through the getter.
+    function _vaultBuckets() internal view returns (BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) {
+        (,,,,,,,,,, l, s) = pair.pairVault();
+    }
+
+    /// @dev Both buckets' size.
+    function _inventorySize() internal view returns (uint256) {
+        (BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) = _vaultBuckets();
+        return l.size + s.size;
+    }
+
+    /// @dev Both buckets' seizure, the fund's earmark.
+    function _seizedTotal() internal view returns (uint256) {
+        (BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) = _vaultBuckets();
+        return l.seized + s.seized;
+    }
+
+    /// @dev The vault's scalar fields: deposits ledger, insurance balance, deficit, target ratio,
+    ///      arrears.
+    function _vaultScalars()
+        internal
+        view
+        returns (uint256 ledger, uint256 insurance, uint256 deficit, uint256 targetBp, uint256 arrears)
+    {
+        (,,,, ledger, insurance, deficit, targetBp, arrears,,,) = pair.pairVault();
     }
 
     /// @dev Overwrite a user's position bucket via stdstore (isLong/size/entryValue). Collateral must

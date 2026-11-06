@@ -59,17 +59,12 @@ interface IBazaarPairLens {
             uint256 shortWeightedEntrySum,
             uint256 totalCollateralDeposited,
             uint256 insuranceFundBalance,
-            uint256 pendingLiqSize,
-            uint256 pendingLiqEntryNotional,
-            uint256 pendingLiqBankruptcyNotional,
-            int256 pendingLiqEntryFundingIndex,
-            bool pendingLiqIsLong,
             uint256 deficit,
             uint256 targetInsuranceRatioBp,
-            uint256 pendingLiqSeized,
             uint256 ledgerArrears,
-            uint64 pendingLiqSeizedTs,
-            uint128 trailingOiSize
+            uint128 trailingOiSize,
+            BazaarTypes.Inventory memory longInv,
+            BazaarTypes.Inventory memory shortInv
         );
     function isAdlPending() external view returns (bool);
     function adlPendingSince() external view returns (uint256);
@@ -124,22 +119,22 @@ contract BazaarPairLens {
     // these hold for every pair that implementation deploys; a layout change needs them re-read,
     // and the budget view's tests pin them against the contract's own behaviour.
     uint256 internal constant SLOT_USER_ACTIVE_LIMIT_ORDERS = 2; // mapping(user => EnumerableSet.UintSet)
-    uint256 internal constant SLOT_NEXT_ORDER_ID = 22; // the counter ids and queue positions are drawn from
-    uint256 internal constant SLOT_MARK_PREMIUM_NOTIONAL = 63;
-    uint256 internal constant SLOT_ADL_EPOCH = 94; // uint64 in the low bits
-    uint256 internal constant SLOT_FEE_ESCROW_TOTAL = 106; // FeeEscrow.total
-    uint256 internal constant SLOT_FEE_ESCROW_CLAIMABLE = 107; // FeeEscrow.claimable: mapping(recipient => owed)
-    uint256 internal constant SLOT_ADL_TERMINATION_TS = 109;
+    uint256 internal constant SLOT_NEXT_ORDER_ID = 28; // the counter ids and queue positions are drawn from
+    uint256 internal constant SLOT_MARK_PREMIUM_NOTIONAL = 68;
+    uint256 internal constant SLOT_ADL_EPOCH = 99; // uint64 in the low bits
+    uint256 internal constant SLOT_FEE_ESCROW_TOTAL = 110; // FeeEscrow.total
+    uint256 internal constant SLOT_FEE_ESCROW_CLAIMABLE = 111; // FeeEscrow.claimable: mapping(recipient => owed)
+    uint256 internal constant SLOT_ADL_TERMINATION_TS = 113;
     // +0 slippage line, +1 drift line, +2 their anchors and the weight's (low to high, 64 bits
     // each), +3 weight (BazaarTypes.LiquidationGapEma)
-    uint256 internal constant SLOT_LIQUIDATION_GAP_EMA = 43;
-    uint256 internal constant SLOT_INSURANCE_RATE_LIMIT = 57; // +0 withdrawn, +1 period start, +2 OI term
-    uint256 internal constant SLOT_REOPEN_GAP_EMA = 105; // lastObsTs bits 0-63, gapEmaBp 64-191, lastJumpTs 192-255
-    uint256 internal constant SLOT_TRIGGER_BOUNTY = 108; // FeeEscrow.bounty: mapping(orderId => held bounty)
-    uint256 internal constant SLOT_INSURANCE_WITHDRAWAL_LOCK = 112; // mapping(user => lockedAmount << 64 | lockTs)
+    uint256 internal constant SLOT_LIQUIDATION_GAP_EMA = 48;
+    uint256 internal constant SLOT_INSURANCE_RATE_LIMIT = 62; // +0 withdrawn, +1 period start, +2 OI term
+    uint256 internal constant SLOT_REOPEN_GAP_EMA = 109; // lastObsTs bits 0-63, gapEmaBp 64-191, lastJumpTs 192-255
+    uint256 internal constant SLOT_TRIGGER_BOUNTY = 112; // FeeEscrow.bounty: mapping(orderId => held bounty)
+    uint256 internal constant SLOT_INSURANCE_WITHDRAWAL_LOCK = 115; // mapping(user => lockedAmount << 64 | lockTs)
     // mapping(user => BazaarTypes.RestingTally): +0 bidSize bits 0-95, askSize 96-191, stopCount
     // 192-223; +1 bidLimitNotional low half, askLimitNotional high; +2 highestBid low, lowestAsk high
-    uint256 internal constant SLOT_RESTING_TALLY = 113;
+    uint256 internal constant SLOT_RESTING_TALLY = 116;
 
     error BazaarPairLens__ZeroAddress();
 
@@ -220,38 +215,37 @@ contract BazaarPairLens {
         view
         returns (uint256 free, uint256 fund, uint256 inventory, uint256 arrears)
     {
-        (,,,,, uint256 balance, uint256 size,,,,,,, uint256 seized, uint256 owed,,) = IBazaarPairLens(pair).pairVault();
+        (,,,,, uint256 balance,,, uint256 owed,, BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) =
+            IBazaarPairLens(pair).pairVault();
+        uint256 seized = l.seized + s.seized;
         free = balance > seized ? balance - seized : 0;
         fund = balance;
-        inventory = size;
+        inventory = l.size + s.size;
         arrears = owed;
     }
 
     /// @dev The inventory's net position at `price` and the reserve the unload walk keeps, read
     ///      from the pair's vault: the two mark-dependent inputs of the share-pricing bases. The
-    ///      backing is the seizure plus the ledger's arrears to the fund, as RiskParamsLib.inventoryNet
-    ///      reads it, and the reserve is sized on live open interest capped at its trailing
-    ///      minimum, as RiskParamsLib.adlReserve sizes it.
+    ///      backing is both buckets' seizure plus the ledger's arrears to the fund, as
+    ///      RiskParamsLib.inventoryNet reads it, and the reserve is sized on live open interest
+    ///      capped at its trailing minimum, as RiskParamsLib.adlReserve sizes it.
     function _inventoryNetAndReserve(address pair, uint256 price) internal view returns (int256 net, uint256 reserve) {
         (
             uint256 longOI,
-            uint256 shortOI,,,,,
-            uint256 size,
-            uint256 entryNotional,,
-            int256 entryFundingIndex,
-            bool isLong,,
+            uint256 shortOI,,,,,,
             uint256 targetInsuranceRatioBp,
-            uint256 seized,
-            uint256 arrears,,
-            uint256 trailingOiSize
+            uint256 arrears,
+            uint256 trailingOiSize,
+            BazaarTypes.Inventory memory l,
+            BazaarTypes.Inventory memory s
         ) = IBazaarPairLens(pair).pairVault();
-        net = int256(seized + arrears)
-            + RiskParamsLib.inventoryPnl(
-                size, entryNotional, entryFundingIndex, isLong, price, IBazaarPairLens(pair).currentFundingIndex()
-            );
+        int256 fundingIndex = IBazaarPairLens(pair).currentFundingIndex();
+        net = int256(l.seized + s.seized + arrears)
+            + RiskParamsLib.inventoryPnl(l.size, l.entryNotional, l.entryFundingIndex, true, price, fundingIndex)
+            + RiskParamsLib.inventoryPnl(s.size, s.entryNotional, s.entryFundingIndex, false, price, fundingIndex);
         reserve = RiskParamsLib.adlReserveOf(
             RiskParamsLib.reserveOiSizeOf(
-                RiskParamsLib.openInterestSizeOf(longOI, shortOI, size, isLong), trailingOiSize
+                RiskParamsLib.openInterestSizeOf(longOI, shortOI, l.size, s.size), trailingOiSize
             ),
             price,
             targetInsuranceRatioBp
@@ -343,37 +337,27 @@ contract BazaarPairLens {
     }
 
     /// @notice ADL auction score for `user`: PnL over the window-deposit-adjusted collateral
-    ///         (AdlLib._scoreCollateral), priced the way the on-chain ranking prices the cohort
-    ///         the user belongs to. Keepers sort executeAdl candidates by this score DESCENDING —
-    ///         a submission that disagrees with the on-chain order reverts
-    ///         (AdlLib__NotDescendingAdlScoreOrder).
+    ///         (AdlLib._scoreCollateral), priced the way the on-chain ranking prices every
+    ///         candidate. Keepers use it to pick candidates; the batch itself sorts whatever it
+    ///         is given (AdlLib._scan), so no submission order can be wrong.
     ///
-    ///      Both sides can be candidates, and each cohort ranks at its own price. An account
-    ///      opposite the vault's inventory closes against the inventory (submit it in `winners`)
-    ///      and ranks at the window's frozen snapshot price and funding index, as AdlLib's scan
-    ///      pass does. An account on the inventory's own side closes against the deferred
-    ///      liquidations, is a candidate only while auxState reports some (submit it in
-    ///      `deferredWinners`), and ranks at the price the transaction resolves and stores
-    ///      (AdlLib._closeDeferred): a deferred account entered the window after the snapshot
-    ///      was taken, so its counterparties' profit exists at the live price. The pair's last
+    ///      Both sides can be candidates: a short closes against the long bucket (submit it in
+    ///      `longBucketWinners`), a long against the short bucket (`shortBucketWinners`), and
+    ///      each is a candidate only while the bucket opposite it holds inventory. Every
+    ///      candidate ranks at the price the transaction resolves and stores, with the live
+    ///      funding index, less the deposits tagged to the current window. The pair's last
     ///      stored price and live funding index stand in for that key here; they are the key
     ///      exactly when the transaction stores nothing newer. The pair reads the Pyth cache
-    ///      before the caller's update, so a keeper cannot pin that price by what it submits;
-    ///      a submission sorted at a tick the store overtakes reverts and is re-scored here at
-    ///      the price it stored, and the funding that store accrues can move near-tied scores.
-    ///      That cohort also ranks on its full collateral: window deposits are subtracted only
-    ///      from the inventory's counterparties, whose score is pinned to the snapshot their
-    ///      price is frozen at.
+    ///      before the caller's update, so a keeper cannot pin that price by what it submits.
     /// @param pair The BazaarPair to read
     /// @param user The candidate winner
     /// @return adlScore The ranking score; 0 when the user cannot be a candidate at all (no ADL
-    ///         pending, flat, on a side with nothing to close against, or non-positive PnL at
-    ///         the cohort's ranking price)
+    ///         pending, flat, nothing in the bucket opposite the user, or non-positive PnL at
+    ///         the ranking price)
     /// @return eligible True when the user would pass the eligibility scan right now:
     ///         adlScore > 0 and at or above the current (decaying) auction threshold
     function getAdlScore(address pair, address user) external view returns (uint256 adlScore, bool eligible) {
         if (!IBazaarPairLens(pair).isAdlPending()) return (0, false);
-        BazaarTypes.AuxState memory aux = IBazaarPairLens(pair).auxState();
 
         BazaarTypes.PositionBucket memory bucket;
         (
@@ -386,29 +370,25 @@ contract BazaarPairLens {
             bucket.stopLossOrderId
         ) = IBazaarPairLens(pair).positionBuckets(user);
         if (bucket.size == 0) return (0, false);
-        if (bucket.isLong != aux.adlLongs && aux.deferredCount == 0) return (0, false);
+        {
+            (,,,,,,,,,, BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) =
+                IBazaarPairLens(pair).pairVault();
+            if ((bucket.isLong ? s.size : l.size) == 0) return (0, false);
+        }
 
         BazaarTypes.MarginRequirements memory marginReqs;
         (marginReqs.imrBp, marginReqs.mmrBp, marginReqs.lastUpdateTs,) = IBazaarPairLens(pair).marginRequirements();
         marginReqs.laggedMmrBp = IBazaarPairLens(pair).getLaggedMmr();
 
-        // Each cohort ranks at its own price and collateral, as AdlLib does: the inventory's
-        // counterparties at the window's frozen snapshot less their window deposits, the deferred
-        // cohort at the price the call attests, for which the last stored price and the live
-        // funding index stand in, on its full collateral.
-        uint256 rankPrice = aux.adlSnapshotPrice;
-        int256 rankFundingIndex = aux.adlSnapshotFundingIndex;
-        uint256 windowDeposit = IBazaarPairLens(pair).adlScoreDeposit(user);
-        if (bucket.isLong != aux.adlLongs) {
-            (rankPrice,,,,) = IBazaarPairLens(pair).lastPairPrice();
-            rankFundingIndex = IBazaarPairLens(pair).currentFundingIndex();
-            windowDeposit = 0;
-        }
-        BazaarTypes.BucketState memory state = BucketLib.calculateState(bucket, rankPrice, rankFundingIndex, marginReqs);
+        (uint256 rankPrice,,,,) = IBazaarPairLens(pair).lastPairPrice();
+        BazaarTypes.BucketState memory state =
+            BucketLib.calculateState(bucket, rankPrice, IBazaarPairLens(pair).currentFundingIndex(), marginReqs);
         if (state.totalPnl <= 0) return (0, false);
 
         adlScore = Math.mulDiv(
-            uint256(state.totalPnl), BAZAAR_SCALE, AdlLib._scoreCollateral(state.effectiveCollateral, windowDeposit)
+            uint256(state.totalPnl),
+            BAZAAR_SCALE,
+            AdlLib._scoreCollateral(state.effectiveCollateral, IBazaarPairLens(pair).adlScoreDeposit(user))
         );
         eligible = adlScore >= AdlLib._getAdlScoreThreshold(IBazaarPairLens(pair).adlAuctionStartTs());
     }
@@ -480,9 +460,9 @@ contract BazaarPairLens {
     ///      One refusal is not reproduced. A position holder's withdrawal is also refused when the
     ///      vault's liquidation exposure exceeds what the fund can carry (verdict reason 1) before
     ///      an ADL window is latched: on the stale fallback, which withholds the latch, or in the
-    ///      transaction whose own verdict opens the window. Judging that walks the deferred accounts
-    ///      at the withdrawal's own price (VaultHealthLib.checkLiqExposure), which a view outside
-    ///      the pair cannot run, so the bound returned can revert there.
+    ///      transaction whose own verdict opens the window. That verdict values the vault at the
+    ///      withdrawal's own price (VaultHealthLib.checkLiqExposure), which a view outside the
+    ///      pair cannot run, so the bound returned can revert there.
     ///
     ///      After finalizeTermination the bound is the terminal withdrawal's (_terminalMaxWithdrawable),
     ///      in collateral units: the withdrawal pays it times the frozen principal ratio, the cash
@@ -561,7 +541,7 @@ contract BazaarPairLens {
         }
 
         // Ceiling 4: the deposits ledger.
-        (,,,, uint256 ledger,,,,,,,,,,,,) = IBazaarPairLens(pair).pairVault();
+        (,,,, uint256 ledger,,,,,,,) = IBazaarPairLens(pair).pairVault();
         if (ledger < maxAmount) maxAmount = ledger;
     }
 
@@ -578,7 +558,7 @@ contract BazaarPairLens {
     function _verdictRefuses(address pair, bool priced) internal view returns (bool refused) {
         if (_isBalanceShort(pair)) return true;
         if (!priced) return false;
-        (,,,,,,,,,,, uint256 deficit,,,,,) = IBazaarPairLens(pair).pairVault();
+        (,,,,,, uint256 deficit,,,,,) = IBazaarPairLens(pair).pairVault();
         if (deficit != 0) return true;
         uint256 deadline = uint256(IBazaarPairLens(pair).extsload(bytes32(SLOT_ADL_TERMINATION_TS)));
         return IBazaarPairLens(pair).isAdlPending() && deadline != 0 && block.timestamp >= deadline;
@@ -590,7 +570,7 @@ contract BazaarPairLens {
     /// @param pair The BazaarPair to read
     /// @return short True when the books promise materially more than the pair holds
     function _isBalanceShort(address pair) internal view returns (bool short) {
-        (,,,, uint256 ledger, uint256 insurance,,,,,,,,,,,) = IBazaarPairLens(pair).pairVault();
+        (,,,, uint256 ledger, uint256 insurance,,,,,,) = IBazaarPairLens(pair).pairVault();
         uint256 escrow = uint256(IBazaarPairLens(pair).extsload(bytes32(SLOT_FEE_ESCROW_TOTAL)));
         uint256 expected = (insurance + ledger + escrow) / 1e12;
         (bool ok, bytes memory data) = IBazaarPairLens(pair).usdc().staticcall(abi.encodeWithSelector(0x70a08231, pair));
@@ -615,7 +595,7 @@ contract BazaarPairLens {
         BazaarTypes.PositionBucket memory bucket;
         (bucket.isLong, bucket.size, bucket.entryValue, bucket.collateral, bucket.entryFundingIndex,,) =
             IBazaarPairLens(pair).positionBuckets(user);
-        (uint256 longOi, uint256 shortOi,,, uint256 ledger,,,,,,,,,,,,) = IBazaarPairLens(pair).pairVault();
+        (uint256 longOi, uint256 shortOi,,, uint256 ledger,,,,,,,) = IBazaarPairLens(pair).pairVault();
         BazaarTypes.AuxState memory aux = IBazaarPairLens(pair).auxState();
 
         amount = bucket.collateral;
@@ -637,36 +617,22 @@ contract BazaarPairLens {
         if (amount > ledger && (longOi != 0 || shortOi != 0)) amount = ledger;
     }
 
-    /// @notice Returns pending liquidation exposure (single-direction aggregate)
-    /// @dev Includes the entry funding index so a caller can reproduce the vault PnL the
-    ///      protocol itself values this inventory at — price leg against `pendingLiqEntryNotional`
-    ///      plus the funding leg from `pendingLiqEntryFundingIndex` to the pair's live index.
-    ///      Without it only the price half is derivable, and a reader would systematically
-    ///      understate the fund's claim on a vault holding the funding-paying side. The seizure
-    ///      stamp is what the unload floor opens from: a keeper can tell from it how far the
-    ///      floor has moved from the band edge toward the fund-neutral price over
-    ///      UNLOAD_FLOOR_DECAY, and so when a bid beyond the band becomes fillable.
+    /// @notice Returns the vault's two buckets of liquidation inventory: liquidated longs and
+    ///         liquidated shorts.
+    /// @dev Each carries its entry funding index so a caller can reproduce the vault PnL the
+    ///      protocol itself values the bucket at — price leg against `entryNotional` plus the
+    ///      funding leg from `entryFundingIndex` to the pair's live index. Without it only the
+    ///      price half is derivable, and a reader would systematically understate the fund's
+    ///      claim on a bucket on the funding-paying side. The seizure stamp is what the unload
+    ///      floor opens from: a keeper can tell from it how far the floor has moved from the band
+    ///      edge toward the fund-neutral price over UNLOAD_FLOOR_DECAY, and so when a bid beyond
+    ///      the band becomes fillable.
     function getPendingLiquidationExposure(address pair)
         external
         view
-        returns (
-            uint256 pendingLiqSize,
-            uint256 pendingLiqEntryNotional,
-            uint256 pendingLiqBankruptcyNotional,
-            int256 pendingLiqEntryFundingIndex,
-            bool pendingLiqIsLong,
-            uint64 pendingLiqSeizedTs
-        )
+        returns (BazaarTypes.Inventory memory longInv, BazaarTypes.Inventory memory shortInv)
     {
-        (
-            ,,,,,,
-            pendingLiqSize,
-            pendingLiqEntryNotional,
-            pendingLiqBankruptcyNotional,
-            pendingLiqEntryFundingIndex,
-            pendingLiqIsLong,,,,,
-            pendingLiqSeizedTs,
-        ) = IBazaarPairLens(pair).pairVault();
+        (,,,,,,,,,, longInv, shortInv) = IBazaarPairLens(pair).pairVault();
     }
 
     // ---- Library constant getters ----
@@ -913,25 +879,24 @@ contract BazaarPairLens {
         (
             uint256 longOI,
             uint256 shortOI,,,,
-            uint256 balance,
-            uint256 size,
-            uint256 entryNotional,,
-            int256 entryFundingIndex,
-            bool isLong,,,,
-            uint256 arrears,,
-            uint256 trailingOiSize
+            uint256 balance,,,
+            uint256 arrears,
+            uint256 trailingOiSize,
+            BazaarTypes.Inventory memory l,
+            BazaarTypes.Inventory memory s
         ) = IBazaarPairLens(pair).pairVault();
         fund = balance;
         // An unvaluable price reads as no OI notional, which execution does not rate-limit either.
         if (price == 0) return (0, 0, 0, fund);
-        uint256 liveOiSize = RiskParamsLib.openInterestSizeOf(longOI, shortOI, size, isLong);
+        uint256 liveOiSize = RiskParamsLib.openInterestSizeOf(longOI, shortOI, l.size, s.size);
         oiNotional = Math.mulDiv(liveOiSize, price, BAZAAR_SCALE);
         heldCap = InsuranceVaultLib.heldOiTermOf(liveOiSize, trailingOiSize, price);
-        int256 pnl = size == 0
-            ? int256(0)
-            : RiskParamsLib.inventoryPnl(
-                size, entryNotional, entryFundingIndex, isLong, price, IBazaarPairLens(pair).currentFundingIndex()
-            );
+        int256 pnl;
+        if (l.size + s.size != 0) {
+            int256 fundingIndex = IBazaarPairLens(pair).currentFundingIndex();
+            pnl = RiskParamsLib.inventoryPnl(l.size, l.entryNotional, l.entryFundingIndex, true, price, fundingIndex)
+                + RiskParamsLib.inventoryPnl(s.size, s.entryNotional, s.entryFundingIndex, false, price, fundingIndex);
+        }
         (ratioBp,) = RiskParamsLib.insuranceFundToOIRatioOf(balance, pnl, pnl < 0 ? arrears : 0, oiNotional);
     }
 
@@ -1063,9 +1028,10 @@ contract BazaarPairLens {
         if (aux.lastMarkUpdateTs == 0) return 0;
         int256 premiumNotional = int256(uint256(p.extsload(bytes32(SLOT_MARK_PREMIUM_NOTIONAL))));
         (uint256 spot,,,,) = p.lastPairPrice();
-        (uint256 longOI, uint256 shortOI,,,,, uint256 size,,,, bool isLong,,,,,,) = p.pairVault();
+        (uint256 longOI, uint256 shortOI,,,,,,,,, BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) =
+            p.pairVault();
         uint256 floorVolume =
-            FundingLib.floorVolumeOf(RiskParamsLib.openInterestSizeOf(longOI, shortOI, size, isLong), spot);
+            FundingLib.floorVolumeOf(RiskParamsLib.openInterestSizeOf(longOI, shortOI, l.size, s.size), spot);
         return FundingLib.currentMark(premiumNotional, aux.rollingVolume, aux.lastMarkUpdateTs, floorVolume, spot);
     }
 
@@ -1103,8 +1069,8 @@ contract BazaarPairLens {
         );
     }
 
-    /// @notice The pair's ADL epoch: advanced each time a window opens and on each mid-auction
-    ///         re-target, the tag window deposits are ranked by.
+    /// @notice The pair's ADL epoch: advanced each time a window opens, the tag window deposits
+    ///         are ranked by.
     function adlEpoch(address pair) external view returns (uint64) {
         return uint64(uint256(IBazaarPairLens(pair).extsload(bytes32(SLOT_ADL_EPOCH))));
     }

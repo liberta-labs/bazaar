@@ -7,6 +7,8 @@ import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 import {OrderView} from "../OrderView.sol";
 import {BucketStore} from "../BucketStore.sol";
 
+import {VaultStore} from "../VaultStore.sol";
+
 /// @title UnloadStaleOracleTest
 /// @notice Vault unloads on a non-continuously-traded pair wait for a fresh price. Against the
 ///         stale fallback neither unloadVault nor liquidate()'s inline unload crosses the book,
@@ -65,19 +67,18 @@ contract UnloadStaleOracleTest is IntegrationBase {
     ///      the unload floor reads as fully open and only the band and the neutral price bound it.
     function _stageLongInventory(uint256 size, uint256 entryNotional, uint256 bankruptcyNotional) internal {
         uint256 seized = entryNotional - bankruptcyNotional;
-        _stdstore.target(address(aaplPair)).sig("pairVault()").depth(6).checked_write(size);
-        _stdstore.target(address(aaplPair)).sig("pairVault()").depth(7).checked_write(entryNotional);
-        _stdstore.target(address(aaplPair)).sig("pairVault()").depth(8).checked_write(bankruptcyNotional);
-        _stdstore.target(address(aaplPair)).sig("pairVault()").depth(10).checked_write(true);
-        _stdstore.target(address(aaplPair)).sig("pairVault()").depth(13).checked_write(seized);
+        VaultStore.setSize(_stdstore, address(aaplPair), true, size);
+        VaultStore.setEntryNotional(_stdstore, address(aaplPair), true, entryNotional);
+        VaultStore.setBankruptcyNotional(_stdstore, address(aaplPair), true, bankruptcyNotional);
+        VaultStore.setSeized(_stdstore, address(aaplPair), true, seized);
     }
 
     function _pendingLiqSize() internal view returns (uint256 s) {
-        (,,,,,, s,,,,,,,,,,) = aaplPair.pairVault();
+        s = VaultStore.inventorySize(address(aaplPair));
     }
 
     function _aaplInsurance() internal view returns (uint256 b) {
-        (,,,,, b,,,,,,,,,,,) = aaplPair.pairVault();
+        (,,,,, b,,,,,,) = aaplPair.pairVault();
     }
 
     function _aaplEscrowOwed(address who) internal view returns (uint256 owed) {

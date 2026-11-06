@@ -284,7 +284,7 @@ contract InsuranceGuardsTest is IntegrationBase {
         uint256 loss = 14_000 * BAZAAR_SCALE - fund / 2;
         uint256 finish = 16_300 * BAZAAR_SCALE - fund / 2;
         uint256 reserveBound = 48_300 * BAZAAR_SCALE / 100;
-        (uint256 longOI, uint256 shortOI,,,,,,,,,,,,,,,) = pair.pairVault();
+        (uint256 longOI, uint256 shortOI,,,,,,,,,,) = pair.pairVault();
         assertEq(longOI + shortOI, 0, "fixture: the inventory is the only open interest");
         uint256 supply = pair.totalInsuranceShares();
         uint256 claim = 200 * BAZAAR_SCALE * (fund / 2 - loss) / supply;
@@ -486,7 +486,7 @@ contract InsuranceGuardsTest is IntegrationBase {
         _execute(carol);
         assertEq(usdc.balanceOf(carol) - usdcBefore, 100 * USDC_SCALE, "withdrew exactly her deposit");
         assertEq(pair.totalInsuranceShares(), orphan, "only locked shares remain");
-        (,,,,, uint256 fund,,,,,,,,,,,) = pair.pairVault();
+        (,,,,, uint256 fund,,,,,,) = pair.pairVault();
         assertEq(fund, orphan, "orphan stays in the fund as buffer");
     }
 
@@ -630,7 +630,7 @@ contract InsuranceGuardsTest is IntegrationBase {
     ///         the same count.
     function test_shareEpoch_cashUnderOneDollarWithArrears_isNotReset() public {
         _stdstore.target(address(pair)).sig("pairVault()").depth(5).checked_write(BAZAAR_SCALE / 2); // $0.50
-        _stdstore.target(address(pair)).sig("pairVault()").depth(14).checked_write(99.5e18); // $99.50 owed
+        _stdstore.target(address(pair)).sig("pairVault()").depth(8).checked_write(99.5e18); // $99.50 owed
         uint256 seedShares = pair.insuranceShares(deployer);
         uint256 supply = pair.totalInsuranceShares();
         assertGt(seedShares, 0, "premise: the seed LP holds live shares");

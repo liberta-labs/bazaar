@@ -44,15 +44,15 @@ contract TerminationHarness {
     ) external {
         vault.totalCollateralDeposited = totalCollateralDeposited;
         vault.insuranceFundBalance = insuranceFundBalance;
-        vault.pendingLiqSize = pendingLiqSize;
-        vault.pendingLiqEntryNotional = pendingLiqEntryNotional;
-        vault.pendingLiqBankruptcyNotional = pendingLiqBankruptcyNotional;
+        BazaarTypes.Inventory storage b = pendingLiqIsLong ? vault.longInv : vault.shortInv;
+        b.size = pendingLiqSize;
+        b.entryNotional = pendingLiqEntryNotional;
+        b.bankruptcyNotional = pendingLiqBankruptcyNotional;
         // The gap between the two notionals is staged as the collateral seized with the inventory.
-        vault.pendingLiqSeized = pendingLiqEntryNotional > pendingLiqBankruptcyNotional
+        b.seized = pendingLiqEntryNotional > pendingLiqBankruptcyNotional
             ? pendingLiqEntryNotional - pendingLiqBankruptcyNotional
             : pendingLiqBankruptcyNotional - pendingLiqEntryNotional;
-        vault.pendingLiqEntryFundingIndex = pendingLiqEntryFundingIndex;
-        vault.pendingLiqIsLong = pendingLiqIsLong;
+        b.entryFundingIndex = pendingLiqEntryFundingIndex;
     }
 
     function setTallies(uint256 totalProfitClaims, uint256 terminalBadDebt) external {
@@ -77,11 +77,11 @@ contract TerminationHarness {
     }
 
     function pendingLiqSize() external view returns (uint256) {
-        return vault.pendingLiqSize;
+        return vault.longInv.size + vault.shortInv.size;
     }
 
     function pendingLiqSeized() external view returns (uint256) {
-        return vault.pendingLiqSeized;
+        return vault.longInv.seized + vault.shortInv.seized;
     }
 
     function principalRatio() external view returns (uint256) {
@@ -643,7 +643,7 @@ contract Phase2InsurerVoteTest is Test {
     }
 
     function _insuranceFund() internal view returns (uint256 fund) {
-        (,,,,, fund,,,,,,,,,,,) = pair.pairVault();
+        (,,,,, fund,,,,,,) = pair.pairVault();
     }
 
     /// @dev Two-stage termination: a successful terminator path only FIXES the settlement price
@@ -1451,7 +1451,7 @@ contract Phase2InsurerVoteTest is Test {
         // path: cascading liquidations land all-at-once, last loss clamps balance to 0,
         // pending-liq cleared so isVaultHealthy still passes.)
         vm.store(address(pair), bytes32(SLOT_VAULT_INSURANCE_FUND_BALANCE), bytes32(uint256(0)));
-        (,,,,, uint256 fundAfter,,,,,,,,,,,) = pair.pairVault();
+        (,,,,, uint256 fundAfter,,,,,,) = pair.pairVault();
         assertEq(fundAfter, 0, "fund drained to 0");
         // totalShares should still be > 0 (the bookkeeping zeroing didn't touch them).
         assertGt(pair.totalInsuranceShares(), 0, "shares still issued");
@@ -1465,7 +1465,7 @@ contract Phase2InsurerVoteTest is Test {
         pair.depositToInsurance(recap, new bytes[](0), 0, 0, 0, "", "");
         vm.stopPrank();
 
-        (,,,,, uint256 fundPostRecap,,,,,,,,,,,) = pair.pairVault();
+        (,,,,, uint256 fundPostRecap,,,,,,) = pair.pairVault();
         assertEq(fundPostRecap, recap, "fund equals recap amount");
 
         uint256 attackerShares = pair.insuranceShares(attacker);
@@ -1507,7 +1507,7 @@ contract Phase2InsurerVoteTest is Test {
         pair.depositToInsurance(recap, new bytes[](0), 0, 0, 0, "", "");
         vm.stopPrank();
 
-        (,,,,, uint256 fund,,,,,,,,,,,) = pair.pairVault();
+        (,,,,, uint256 fund,,,,,,) = pair.pairVault();
         assertEq(fund, recap, "fund equals the second rescue amount");
         // The second rescuer owns 100% outright: every earlier generation reads as zero.
         assertEq(pair.insuranceShares(majorityVoter), recap, "supply restarted at the rescue amount");
@@ -1840,7 +1840,7 @@ contract Phase2InsurerVoteTest is Test {
         pair.executeAdl(new address[](0), new address[](0), new bytes[](0));
     }
 
-    uint256 constant PAIR_SLOT_SHARE_EPOCH = 92; // mirror of BazaarPairTerminator's pin
+    uint256 constant PAIR_SLOT_SHARE_EPOCH = 97; // mirror of BazaarPairTerminator's pin
 
     function _pairEpoch() internal view returns (uint256) {
         return uint256(vm.load(address(pair), bytes32(PAIR_SLOT_SHARE_EPOCH)));
@@ -3277,7 +3277,7 @@ contract Phase4StaleTerminationTest is Test {
         address deployer = makeAddr("deployer");
         uint256 seedShares = pair.insuranceShares(deployer);
         assertGt(seedShares, 0, "sanity: the deployer holds the seed shares");
-        (,,,,, uint256 fund,,,,,,,,,,,) = pair.pairVault();
+        (,,,,, uint256 fund,,,,,,) = pair.pairVault();
         uint256 balanceBefore = usdc.balanceOf(deployer);
         vm.startPrank(deployer);
         pair.requestInsuranceWithdrawal(seedShares, 0, 0, 0, "", "");

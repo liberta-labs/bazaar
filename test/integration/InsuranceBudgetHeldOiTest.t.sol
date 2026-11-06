@@ -23,7 +23,7 @@ contract InsuranceBudgetHeldOiTest is IntegrationBase {
 
     // BazaarPair storage slot of the withdrawal rate-limit state, from `forge inspect BazaarPair
     // storage-layout`: +0 is what the period has paid out, +2 the period's OI snapshot term.
-    uint256 constant SLOT_INSURANCE_RATE_LIMIT = 57;
+    uint256 constant SLOT_INSURANCE_RATE_LIMIT = 62;
 
     address lpA = makeAddr("lpA");
     address lpB = makeAddr("lpB");
@@ -31,7 +31,7 @@ contract InsuranceBudgetHeldOiTest is IntegrationBase {
     // ---------------------------- fixture ----------------------------
 
     function _trailingOi() internal view returns (uint256 t) {
-        (,,,,,,,,,,,,,,,, t) = pair.pairVault();
+        (,,,,,,,,, t,,) = pair.pairVault();
     }
 
     function _spentSlot() internal view returns (uint256) {

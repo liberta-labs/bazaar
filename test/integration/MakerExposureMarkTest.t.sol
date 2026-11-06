@@ -7,6 +7,8 @@ import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 import {FundingLib} from "../../src/libraries/FundingLib.sol";
 import {OrderView} from "../OrderView.sol";
 
+import {VaultStore} from "../VaultStore.sol";
+
 /// @title MakerExposureMarkTest
 /// @notice The mark price is built from fills against standing offers on the far side of the
 ///         oracle — a bid above it or an ask below it — weighted by how long the offer stood
@@ -50,9 +52,10 @@ contract MakerExposureMarkTest is IntegrationBase {
     /// @dev The open interest the mark's volume floor is scaled by: the larger side, counting the
     ///      vault's inherited inventory on its side (RiskParamsLib.openInterestSize).
     function _oiSize() internal view returns (uint256) {
-        (uint256 l, uint256 s,,,,, uint256 pend,,,, bool pendLong,,,,,,) = pair.pairVault();
-        if (pendLong) l += pend;
-        else s += pend;
+        (uint256 l, uint256 s,,,,,,,,, BazaarTypes.Inventory memory li, BazaarTypes.Inventory memory si) =
+            pair.pairVault();
+        l += li.size;
+        s += si.size;
         return l > s ? l : s;
     }
 
@@ -66,11 +69,12 @@ contract MakerExposureMarkTest is IntegrationBase {
         returns (FundingLib.MarkState memory)
     {
         assertEq(before.ts, 0, "fixture: predicted from an unformed mark");
-        (uint256 l, uint256 s,,,,, uint256 pend,,,, bool pendLong,,,,,,) = pair.pairVault();
+        (uint256 l, uint256 s,,,,,,,,, BazaarTypes.Inventory memory li, BazaarTypes.Inventory memory si) =
+            pair.pairVault();
         vaultMirror.totalLongOI = l;
         vaultMirror.totalShortOI = s;
-        vaultMirror.pendingLiqSize = pend;
-        vaultMirror.pendingLiqIsLong = pendLong;
+        vaultMirror.longInv.size = li.size;
+        vaultMirror.shortInv.size = si.size;
         uint256 notional = size * price / BAZAAR_SCALE;
         return FundingLib.updateMarkPrice(
             FundingLib.MarkState({premiumNotional: 0, lastMarkUpdateTs: 0, rollingVolume: before.vol}),
@@ -127,11 +131,10 @@ contract MakerExposureMarkTest is IntegrationBase {
     /// @dev Stage `size` of long inventory in the vault at a $50k entry and a $48k bankruptcy
     ///      price (Vault depths as _stageHeldInventory documents them).
     function _stageLongInventory(uint256 size) internal {
-        _stdstore.target(address(pair)).sig("pairVault()").depth(6).checked_write(size);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(7).checked_write(size * 50_000);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(8).checked_write(size * 48_000);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(10).checked_write(true);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(13).checked_write(size * 2_000);
+        VaultStore.setSize(_stdstore, address(pair), true, size);
+        VaultStore.setEntryNotional(_stdstore, address(pair), true, size * 50_000);
+        VaultStore.setBankruptcyNotional(_stdstore, address(pair), true, size * 48_000);
+        VaultStore.setSeized(_stdstore, address(pair), true, size * 2_000);
     }
 
     /// @dev Every test starts from BASE of open interest opened by a print exactly at the oracle,

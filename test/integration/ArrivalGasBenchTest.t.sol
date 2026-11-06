@@ -5,6 +5,8 @@ import {IntegrationBase} from "./IntegrationBase.sol";
 import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 import {StdStorage, stdStorage} from "forge-std/Test.sol";
 
+import {VaultStore} from "../VaultStore.sol";
+
 /// @title ArrivalGasBenchTest
 /// @notice Gas envelope of the arrival-matching hot paths, measured against Arbitrum's block gas
 ///         limit (32M). The numbers that matter: a resting insert (the common case), a deep
@@ -199,11 +201,10 @@ contract ArrivalGasBenchTest is IntegrationBase {
     function test_gas_unloadVault_singleFill() public {
         _deposit(carol, 60_000 * BAZAAR_SCALE);
         _placeLimit(carol, true, BTC / 10, 49_900 * BAZAAR_SCALE);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(6).checked_write(BTC / 10);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(7).checked_write((BTC / 10) * 50_000);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(8).checked_write((BTC / 10) * 48_000);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(10).checked_write(true);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(13).checked_write((BTC / 10) * 2_000); // seized
+        VaultStore.setSize(_stdstore, address(pair), true, BTC / 10);
+        VaultStore.setEntryNotional(_stdstore, address(pair), true, (BTC / 10) * 50_000);
+        VaultStore.setBankruptcyNotional(_stdstore, address(pair), true, (BTC / 10) * 48_000);
+        VaultStore.setSeized(_stdstore, address(pair), true, (BTC / 10) * 2_000); // seized
 
         bytes[] memory pu = _freshPrice();
         vm.prank(seq);

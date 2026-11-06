@@ -1,43 +1,65 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity 0.8.34;
 
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IntegrationBase} from "./IntegrationBase.sol";
-import {StdStorage, stdStorage} from "forge-std/Test.sol";
 import {AdlLib} from "../../src/libraries/AdlLib.sol";
 import {BazaarPair} from "../../src/BazaarPair.sol";
 import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 import {RiskParamsLib} from "../../src/libraries/RiskParamsLib.sol";
 import {BucketStore} from "../BucketStore.sol";
+import {VaultStore} from "../VaultStore.sol";
 
 /// @title AdlStaleTriggerTest
-/// @notice Opening an ADL window requires a fresh price. Everything an auction is judged by is
-///         frozen when it opens — the deleveraged side, the ranking snapshot and the 24h clock —
+/// @notice Opening an ADL window requires a fresh price. What an auction is judged by is fixed
+///         when it opens — the 24h termination clock and the epoch its deposit tags are keyed to —
 ///         so a window opened against a stale mark would deleverage profitable counterparties in
 ///         response to exposure that may no longer exist.
 ///
-///         Both tests hand the vault an identical deep-underwater inheritance on the
+///         A seizure on the stale fallback still commits, into the vault's bucket on the estate's
+///         own side. Both of a batch's legs rank their cohort at the price the batch resolves, so
+///         a bucket seeded on the side opposite the inventory while a window is open changes
+///         nothing about that window: no epoch bump, no decay restart, no clock moved.
+///
+///         The tests hand the vault an identical deep-underwater inheritance on the
 ///         non-continuously-traded AAPL pair (the only kind that can resolve a stale price at all).
-///         The single difference is whether the liquidator supplies a fresh price or rides the
-///         stale fallback, which isolates the suppression to the price's freshness rather than to
-///         the size of the exposure.
+///         Where a test pairs a stale call with a fresh one, the single difference is the price's
+///         freshness, which isolates the suppression from the size of the exposure.
 contract AdlStaleTriggerTest is IntegrationBase {
-    using stdStorage for StdStorage;
-
     uint256 constant MARK = 150; // recorded AAPL mark, whole dollars
     uint256 constant POS_SIZE = 100 * BAZAAR_SCALE;
     uint256 constant POS_COLLATERAL = 10 * BAZAAR_SCALE;
     uint256 constant ADL_TERMINATION_GRACE = BazaarTypes.ADL_TERMINATION_GRACE;
 
     function _aaplInsurance() internal view returns (uint256 b) {
-        (,,,,, b,,,,,,,,,,,) = aaplPair.pairVault();
+        (,,,,, b,,,,,,) = aaplPair.pairVault();
     }
 
-    function _aaplPendingLiqSize() internal view returns (uint256 s) {
-        (,,,,,, s,,,,,,,,,,) = aaplPair.pairVault();
+    function _aaplInventorySize() internal view returns (uint256 s) {
+        s = VaultStore.inventorySize(address(aaplPair));
     }
 
-    function _pendingLiqIsLong() internal view returns (bool b) {
-        (,,,,,,,,,, b,,,,,,) = aaplPair.pairVault();
+    /// @dev The AAPL vault's two buckets.
+    function _aaplBuckets() internal view returns (BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) {
+        (,,,,,,,,,, l, s) = aaplPair.pairVault();
+    }
+
+    /// @dev What netting the two buckets' overlap would cost the fund beyond the two netted
+    ///      slices' seizure (RiskParamsLib.overlap): the gap between the sides' entry bases on the
+    ///      overlap plus the offset of their entry clocks, less the seizure pro rata. 0 when the
+    ///      netting is a gain or either bucket is empty.
+    function _overlapUncovered() internal view returns (uint256) {
+        (BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) = _aaplBuckets();
+        uint256 o = l.size < s.size ? l.size : s.size;
+        if (o == 0) return 0;
+        int256 pnl = int256(Math.mulDiv(s.entryNotional, o, s.size)) - int256(Math.mulDiv(l.entryNotional, o, l.size))
+            + (l.entryFundingIndex - s.entryFundingIndex) * int256(o) / int256(BAZAAR_SCALE);
+        int256 net = pnl + int256(Math.mulDiv(l.seized, o, l.size) + Math.mulDiv(s.seized, o, s.size));
+        return net < 0 ? uint256(-net) : 0;
+    }
+
+    function _aaplCollateral(address user) internal view returns (uint256 c) {
+        (,,, c,,,) = aaplPair.positionBuckets(user);
     }
 
     /// @dev Warm the AAPL Pyth cache AND lastPairPrice to `priceUsd`, stamped now.
@@ -70,23 +92,52 @@ contract AdlStaleTriggerTest is IntegrationBase {
         expectedLoss = entryValue - POS_COLLATERAL - markNotional;
     }
 
+    /// @dev A short whose loss beyond its collateral is twice the fund. Netting it against a long
+    ///      the vault holds cannot fit: the overlap's loss is the gap between the two entry bases,
+    ///      and free capital above the reserve plus the two slices' seizure is less than the fund,
+    ///      let alone twice it. Its seizure therefore seeds the short bucket.
+    function _writeDeepUnderwaterShort(address user) internal {
+        _depositAapl(user, POS_COLLATERAL);
+        uint256 markNotional = POS_SIZE * MARK;
+        uint256 past = POS_COLLATERAL + 2 * _aaplInsurance();
+        assertLt(past, markNotional, "fixture: the short's entry stays positive");
+
+        BucketStore.setIsLong(address(aaplPair), user, false);
+        BucketStore.setSize(address(aaplPair), user, POS_SIZE);
+        BucketStore.setEntryValue(address(aaplPair), user, markNotional - past);
+    }
+
+    /// @dev Liquidate `user` as bob, carrying a fresh AAPL update at MARK.
+    function _liquidateFresh(address user) internal returns (uint256 count) {
+        bytes[] memory freshPu = _priceUpdateFor(AAPL_USD_FEED_ID, MARK, uint64(vm.getBlockTimestamp()));
+        vm.deal(bob, 1 ether);
+        vm.prank(bob);
+        count = aaplPair.liquidate{value: 0.01 ether}(_arr1(user), freshPu);
+    }
+
+    /// @dev Liquidate `user` as bob on the stale fallback: empty calldata against a cache the
+    ///      caller has aged past MAX_PRICE_STALENESS.
+    function _liquidateStale(address user) internal returns (uint256 count) {
+        vm.prank(bob);
+        count = aaplPair.liquidate(_arr1(user), new bytes[](0));
+    }
+
     /// The stale fallback must not open a window, even though the inherited exposure is far past
     /// the trigger. The liquidation itself still commits — only the ADL latch is withheld.
     function test_staleMark_doesNotOpenAdlWindow() public {
         _warmAapl(MARK);
         uint256 expectedLoss = _writeDeepUnderwaterLong(dave);
 
-        // Precondition: the exposure genuinely clears the 80%-of-insurance trigger, so a suppressed
-        // latch can only be the freshness gate and not an undersized fixture.
+        // Precondition: the exposure genuinely clears the trigger, so a suppressed latch can only
+        // be the freshness gate and not an undersized fixture.
         assertGt(expectedLoss, _aaplInsurance(), "fixture clears the whole fund, let alone the fund above its reserve");
 
         // Age the cache past MAX_PRICE_STALENESS so empty calldata resolves the stale fallback.
         vm.warp(vm.getBlockTimestamp() + 30);
 
-        vm.prank(bob);
-        assertEq(aaplPair.liquidate(_arr1(dave), new bytes[](0)), 1, "liquidation commits on the stale mark");
+        assertEq(_liquidateStale(dave), 1, "liquidation commits on the stale mark");
 
-        assertGt(_aaplPendingLiqSize(), 0, "vault inherited the position");
+        assertGt(_aaplInventorySize(), 0, "vault inherited the position");
         assertFalse(aaplPair.isAdlPending(), "stale mark must not open an ADL window");
     }
 
@@ -99,58 +150,46 @@ contract AdlStaleTriggerTest is IntegrationBase {
 
         vm.warp(vm.getBlockTimestamp() + 30);
 
-        bytes[] memory freshPu = _priceUpdateFor(AAPL_USD_FEED_ID, MARK, uint64(vm.getBlockTimestamp()));
-        vm.deal(bob, 1 ether);
-        vm.prank(bob);
-        assertEq(
-            aaplPair.liquidate{value: 0.01 ether}(_arr1(dave), freshPu), 1, "liquidation commits on the fresh mark"
-        );
+        assertEq(_liquidateFresh(dave), 1, "liquidation commits on the fresh mark");
 
-        assertGt(_aaplPendingLiqSize(), 0, "vault inherited the position");
+        assertGt(_aaplInventorySize(), 0, "vault inherited the position");
         assertTrue(aaplPair.isAdlPending(), "fresh mark opens the ADL window");
     }
 
-    /// @dev A short whose loss beyond its collateral is twice the fund. Netting it against a long
-    ///      the vault holds at the mark cannot fit: the fund above its reserve plus the two slices'
-    ///      seizure is less than the fund, let alone twice it.
-    function _writeDeepUnderwaterShort(address user) internal {
-        _depositAapl(user, POS_COLLATERAL);
-        uint256 markNotional = POS_SIZE * MARK;
-        uint256 past = POS_COLLATERAL + 2 * _aaplInsurance();
-        assertLt(past, markNotional, "fixture: the short's entry stays positive");
-
-        BucketStore.setIsLong(address(aaplPair), user, false);
-        BucketStore.setSize(address(aaplPair), user, POS_SIZE);
-        BucketStore.setEntryValue(address(aaplPair), user, markNotional - past);
-    }
-
-    /// A deferral on the stale fallback keeps its list entry although no window is stored. The
-    /// vault holds a long at the mark, covered by the fund, so nothing opens a window until alice's
-    /// loss beyond collateral is listed opposite it; the stale mark withholds that window, and the
-    /// entry has to outlive the verdict for the fresh one that opens it. The inline unload fills
-    /// nothing on the stale mark, so the long she was deferred against is still there to need her.
-    function test_staleMark_deferral_keepsTheEntry_freshMarkOpensItsWindow() public {
+    /// A seizure on the stale fallback commits into the estate's own bucket although no window is
+    /// stored. The vault holds a long at the mark, covered by the fund, so nothing opens a window
+    /// until alice's loss beyond her collateral is held opposite it; netting her against the long
+    /// would cost the fund more than it may spend, so she is seized into the short bucket, and the
+    /// stale mark withholds the window her loss calls for. The inline unload fills nothing on the
+    /// stale mark, so the long she sits opposite is still there. The fresh mark opens the window
+    /// over both buckets.
+    function test_staleMark_seizureSeedsTheOppositeBucket_freshMarkOpensItsWindow() public {
         _warmAapl(MARK);
         uint256 seized = 1_000 * BAZAAR_SCALE;
         assertGt(_aaplInsurance(), seized, "fixture: the fund holds the seizure it earmarks");
-        _stageHeldInventory(aaplPair, POS_SIZE, POS_SIZE * MARK, seized);
+        _stageHeldInventory(aaplPair, true, POS_SIZE, POS_SIZE * MARK, seized);
         _writeDeepUnderwaterShort(alice);
 
         vm.warp(vm.getBlockTimestamp() + 30);
-        vm.prank(bob);
-        assertEq(aaplPair.liquidate(_arr1(alice), new bytes[](0)), 0, "alice deferred, not seized");
+        assertEq(_liquidateStale(alice), 1, "alice seized on the stale mark");
 
-        assertEq(_aaplPendingLiqSize(), POS_SIZE, "the long is still held");
-        assertEq(aaplPair.auxState().deferredCount, 1, "alice is listed");
-        assertEq(aaplPair.deferredLiquidations(0), alice, "by name");
-        assertFalse(aaplPair.isAdlPending(), "stale mark must not open the window she needs");
+        (BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) = _aaplBuckets();
+        assertEq(l.size, POS_SIZE, "the long is still held");
+        assertEq(s.size, POS_SIZE, "alice's short seeds the opposite bucket");
+        assertGt(
+            _overlapUncovered(),
+            _aaplInsurance() - l.seized - s.seized,
+            "netting the overlap costs more than the fund's free capital, so both buckets stand"
+        );
+        assertFalse(aaplPair.isAdlPending(), "stale mark must not open the window the exposure calls for");
 
         vm.warp(vm.getBlockTimestamp() + 30);
         _warmAapl(MARK);
 
         assertTrue(aaplPair.isAdlPending(), "the fresh mark opens it");
-        assertEq(aaplPair.auxState().deferredCount, 1, "with alice still listed for its auction");
-        assertEq(aaplPair.deferredLiquidations(0), alice, "by name");
+        (l, s) = _aaplBuckets();
+        assertEq(l.size, POS_SIZE, "with the long bucket standing for its auction");
+        assertEq(s.size, POS_SIZE, "and the short bucket alongside");
     }
 
     /// @dev Opens a window against a fresh mark, then ages past ADL_TIMEOUT_DURATION so the
@@ -160,10 +199,7 @@ contract AdlStaleTriggerTest is IntegrationBase {
         _writeDeepUnderwaterLong(dave);
         vm.warp(vm.getBlockTimestamp() + 30);
 
-        bytes[] memory freshPu = _priceUpdateFor(AAPL_USD_FEED_ID, MARK, uint64(vm.getBlockTimestamp()));
-        vm.deal(bob, 1 ether);
-        vm.prank(bob);
-        aaplPair.liquidate{value: 0.01 ether}(_arr1(dave), freshPu);
+        _liquidateFresh(dave);
         assertTrue(aaplPair.isAdlPending(), "window open before the clock is aged");
 
         vm.warp(vm.getBlockTimestamp() + 25 hours);
@@ -264,10 +300,7 @@ contract AdlStaleTriggerTest is IntegrationBase {
         _writeDeepUnderwaterLong(dave);
         vm.warp(vm.getBlockTimestamp() + 30);
 
-        bytes[] memory freshPu = _priceUpdateFor(AAPL_USD_FEED_ID, MARK, uint64(vm.getBlockTimestamp()));
-        vm.deal(bob, 1 ether);
-        vm.prank(bob);
-        aaplPair.liquidate{value: 0.01 ether}(_arr1(dave), freshPu);
+        _liquidateFresh(dave);
         assertTrue(aaplPair.isAdlPending(), "window open");
         return vm.getBlockTimestamp();
     }
@@ -328,7 +361,7 @@ contract AdlStaleTriggerTest is IntegrationBase {
     }
 
     /// Control: once the runway elapses the same expired clock terminates on the next fresh mark, so
-    /// the grace defers termination rather than withdrawing it. executeAdl now returns without
+    /// the grace defers termination rather than withdrawing it. executeAdl returns without
     /// reverting — reason 2 skips executeAdlCore, so the empty winner set is never inspected.
     function test_expiredClock_afterRunway_terminates() public {
         _openWindowThenExpireClock();
@@ -395,10 +428,7 @@ contract AdlStaleTriggerTest is IntegrationBase {
 
         // Drain the inherited inventory so nothing is left to finish inside the band; the next
         // health check then releases the latch, which is the transition the clear hangs off.
-        _stdstore.target(address(aaplPair)).sig("pairVault()").depth(6).checked_write(uint256(0));
-        _stdstore.target(address(aaplPair)).sig("pairVault()").depth(7).checked_write(uint256(0));
-        _stdstore.target(address(aaplPair)).sig("pairVault()").depth(8).checked_write(uint256(0));
-        _stdstore.target(address(aaplPair)).sig("pairVault()").depth(13).checked_write(uint256(0));
+        VaultStore.clear(_stdstore, address(aaplPair), true);
 
         vm.warp(vm.getBlockTimestamp() + 30);
         _warmAapl(MARK);
@@ -409,10 +439,7 @@ contract AdlStaleTriggerTest is IntegrationBase {
         // Open a second window on the same pair and confirm it starts unarmed.
         _writeDeepUnderwaterLong(alice);
         vm.warp(vm.getBlockTimestamp() + 30);
-        bytes[] memory freshPu = _priceUpdateFor(AAPL_USD_FEED_ID, MARK, uint64(vm.getBlockTimestamp()));
-        vm.deal(bob, 1 ether);
-        vm.prank(bob);
-        aaplPair.liquidate{value: 0.01 ether}(_arr1(alice), freshPu);
+        _liquidateFresh(alice);
 
         assertTrue(aaplPair.isAdlPending(), "second window open");
         assertEq(lens.adlTerminationTs(address(aaplPair)), 0, "second window unarmed until its own clock expires");
@@ -420,180 +447,32 @@ contract AdlStaleTriggerTest is IntegrationBase {
     }
 
     // ---------------------------------------------------------------------------------------
-    //                          mid-auction side flip re-snapshot
+    //                    a bucket seeded on the other side mid-window
     // ---------------------------------------------------------------------------------------
 
-    /// @dev A small short, underwater at MARK but backed well enough that seizing it realizes no
-    ///      bad debt. Liquidating it is the vehicle for reaching isVaultHealthy without reverting.
-    function _writeSmallUnderwaterShort(address user) internal {
-        _depositAapl(user, POS_COLLATERAL);
-        // Entry below the mark: a short loses as price rises.
-        uint256 size = 1 * BAZAAR_SCALE;
-        uint256 entryValue = size * (MARK * 2 / 3);
-
-        BucketStore.setIsLong(address(aaplPair), user, false);
-        BucketStore.setSize(address(aaplPair), user, size);
-        BucketStore.setEntryValue(address(aaplPair), user, entryValue);
+    /// @dev Seizes alice into the short bucket while a window is open on dave's long, on a fresh
+    ///      mark or on the stale fallback (the caller ages the cache), and checks both buckets
+    ///      stand under the one window. Her netting against the long cannot fit: the overlap's
+    ///      loss is the gap between the two entry bases, about four times the fund, against free
+    ///      capital above the reserve plus the two slices' seizure.
+    function _seizeAliceIntoTheShortBucket(bool freshMark) internal {
+        if (freshMark) {
+            assertEq(_liquidateFresh(alice), 1, "alice seized on the fresh mark");
+        } else {
+            assertEq(_liquidateStale(alice), 1, "alice seized on the stale mark");
+        }
+        (BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) = _aaplBuckets();
+        assertEq(l.size, POS_SIZE, "dave's long is still held");
+        assertEq(s.size, POS_SIZE, "alice's short seeds the opposite bucket");
+        assertGt(_overlapUncovered(), _aaplInsurance(), "fixture: the overlap's loss is beyond the whole fund");
+        assertTrue(aaplPair.isAdlPending(), "the window stays open over both buckets");
     }
 
-    /// @dev Opens a window (vault inherits dave's long, so adlLongs targets shorts), then puts the
-    ///      vault on the short side so the auction's frozen target matches the side it now holds —
-    ///      the condition a real netting-driven flip produces. The aggregate is written directly
-    ///      rather than netted into place because netting an estate this far underwater realizes
-    ///      bad debt, and a non-zero deficit makes isVaultHealthy terminate at Check 0 before the
-    ///      re-target is ever evaluated. The bankruptcy notional is lowered alongside the side so
-    ///      the now-short estate still shows a loss and the auction stays open.
-    ///
-    ///      carol is staged SHORT, matching the rewritten aggregate, so her liquidation adds to it
-    ///      rather than netting against it — again keeping deficit at zero.
-    function _openWindowAndStageFlip() internal {
-        _warmAapl(MARK);
-        _writeDeepUnderwaterLong(dave);
-        vm.warp(vm.getBlockTimestamp() + 30);
-
-        bytes[] memory freshPu = _priceUpdateFor(AAPL_USD_FEED_ID, MARK, uint64(vm.getBlockTimestamp()));
-        vm.deal(bob, 1 ether);
-        vm.prank(bob);
-        aaplPair.liquidate{value: 0.01 ether}(_arr1(dave), freshPu);
-        assertTrue(aaplPair.isAdlPending(), "window open against a fresh mark");
-
-        // Flip the aggregate to the short side. The entry basis has to move with it: the vault's
-        // exposure is measured from there, and leaving a long's entry on a short-labelled
-        // aggregate reads as a large profit rather than the exposure this fixture is staging.
-        // A short's bankruptcy sits above its entry, so entry goes below the notional written here.
-        _stdstore.target(address(aaplPair)).sig("pairVault()").depth(10).checked_write(false);
-        _stdstore.target(address(aaplPair)).sig("pairVault()").depth(8).checked_write(100 * BAZAAR_SCALE);
-        _stdstore.target(address(aaplPair)).sig("pairVault()").depth(7).checked_write(50 * BAZAAR_SCALE);
-        _stdstore.target(address(aaplPair)).sig("pairVault()").depth(13).checked_write(50 * BAZAAR_SCALE); // seized
-
-        _writeSmallUnderwaterShort(carol);
-        vm.warp(vm.getBlockTimestamp() + 30);
-    }
-
-    /// The re-snapshot on a side flip must not run off a stale mark. The snapshot gates eligibility
-    /// — AdlLib skips any account whose PnL at it is non-positive — so a chosen mark could make an
-    /// account underwater at the live market look like a winner and be closed as one.
-    function test_sideFlip_staleMark_doesNotResnapshot() public {
-        _openWindowAndStageFlip();
-
-        uint256 snapshotBefore = aaplPair.auxState().adlSnapshotPrice;
-        bool longsBefore = aaplPair.auxState().adlLongs;
-
-        // Liquidating the opposing side flips the aggregate AND lands in isVaultHealthy in the same
-        // transaction — the atomic path the guard has to cover.
-        vm.prank(bob);
-        aaplPair.liquidate(_arr1(carol), new bytes[](0));
-
-        assertEq(aaplPair.auxState().adlSnapshotPrice, snapshotBefore, "stale mark must not move the snapshot");
-        assertEq(aaplPair.auxState().adlLongs, longsBefore, "stale mark must not re-target the auction");
-    }
-
-    /// An expired clock must not suppress the re-target. The timeout verdict and the re-point are
-    /// independent: reporting expiry alone would leave the auction aimed at the side the vault
-    /// itself holds, which executeAdl refuses — so the runway granted before termination would be
-    /// spent reverting rather than deleveraging, on exactly the pairs that most need it.
-    function test_sideFlip_expiredClock_stillRetargets() public {
-        _openWindowAndStageFlip();
-
-        vm.prank(bob);
-        aaplPair.liquidate(_arr1(carol), new bytes[](0));
-        assertEq(aaplPair.auxState().adlLongs, false, "re-target withheld on the stale mark");
-
-        vm.warp(vm.getBlockTimestamp() + 25 hours);
-
-        // A fresh mark past the timeout re-targets and arms the runway in one call, leaving the
-        // auction aimed correctly and executable for the whole of it.
-        _warmAapl(MARK);
-
-        assertTrue(aaplPair.auxState().adlLongs, "expired clock still re-targets on a fresh mark");
-        assertTrue(aaplPair.auxState().adlLongs != _pendingLiqIsLong(), "aimed away from the vault's own side");
-        assertGt(lens.adlTerminationTs(address(aaplPair)), 0, "runway armed alongside the re-target");
-        assertEq(aaplPair.settlementPriceFixedTs(), 0, "re-targeting must not terminate");
-
-        // Reason 1, not 2: the auction is the callable path throughout the runway.
-        bytes[] memory freshPu = _priceUpdateFor(AAPL_USD_FEED_ID, MARK, uint64(vm.getBlockTimestamp()));
-        vm.deal(bob, 1 ether);
-        vm.prank(bob);
-        vm.expectRevert(AdlLib.AdlLib__EmptySubmission.selector);
-        aaplPair.executeAdl{value: 0.01 ether}(new address[](0), new address[](0), freshPu);
-    }
-
-    /// A flip re-points the auction and re-freezes its ranking basis, and moves neither TERMINATION
-    /// clock: the 24h timeout stays monotone and the runway armed off it is never re-armed. Without
-    /// that, a pair that keeps flipping could defer termination indefinitely — the flip is
-    /// caller-induced, since liquidating the opposing side both causes it and lands in the health
-    /// check. The decay clock is the one that does move, which is why the two are separate values.
-    function test_sideFlip_afterArming_restartsDecayNotTerminationClocks() public {
-        _openWindowThenExpireClock();
-        _warmAapl(MARK);
-
-        uint256 deadlineBefore = lens.adlTerminationTs(address(aaplPair));
-        uint256 pendingSinceBefore = aaplPair.adlPendingSince();
-        assertGt(deadlineBefore, 0, "runway armed before the flip");
-        assertFalse(aaplPair.auxState().adlLongs, "auction targets shorts against the vault's longs");
-
-        // Flip the aggregate to the short side, entry basis moving with it so the now-short estate
-        // still shows a loss and the auction stays open (a short's bankruptcy sits above its entry).
-        _stdstore.target(address(aaplPair)).sig("pairVault()").depth(10).checked_write(false);
-        _stdstore.target(address(aaplPair)).sig("pairVault()").depth(8).checked_write(100 * BAZAAR_SCALE);
-        _stdstore.target(address(aaplPair)).sig("pairVault()").depth(7).checked_write(50 * BAZAAR_SCALE);
-        _stdstore.target(address(aaplPair)).sig("pairVault()").depth(13).checked_write(50 * BAZAAR_SCALE); // seized
-
-        vm.warp(vm.getBlockTimestamp() + 5 minutes);
-        _warmAapl(MARK);
-
-        assertTrue(aaplPair.isAdlPending(), "auction still open across the flip");
-        assertTrue(aaplPair.auxState().adlLongs, "flip re-targeted the auction");
-        assertEq(lens.adlTerminationTs(address(aaplPair)), deadlineBefore, "flip must not re-arm the runway");
-        assertEq(aaplPair.adlPendingSince(), pendingSinceBefore, "flip must not rewind the 24h clock");
-        assertEq(aaplPair.adlAuctionStartTs(), vm.getBlockTimestamp(), "flip restarts the decay clock");
-    }
-
-    /// A stale-priced call on another entry point still withholds the re-target, leaving the
-    /// auction aimed at the side the vault holds. executeAdl cannot be reached in that state — it
-    /// refuses the same stale mark — so the withholding is observable only through the snapshot.
-    function test_sideFlip_staleMark_leavesAuctionUnretargeted() public {
-        _openWindowAndStageFlip();
-
-        vm.prank(bob);
-        aaplPair.liquidate(_arr1(carol), new bytes[](0));
-
-        assertEq(aaplPair.auxState().adlLongs, false, "re-target withheld on the stale mark");
-        assertEq(aaplPair.auxState().adlLongs, _pendingLiqIsLong(), "auction aimed at the vault's own side");
-
-        vm.prank(bob);
-        vm.expectRevert(BazaarPair.BazaarPair__AdlPriceStale.selector);
-        aaplPair.executeAdl(_arr1(alice), new address[](0), new bytes[](0));
-    }
-
-    /// Control: the identical flip DOES re-target and re-snapshot on a fresh mark, so the guard
-    /// blocks the stale case specifically rather than disabling side-flip handling outright.
-    function test_sideFlip_freshMark_resnapshots() public {
-        _openWindowAndStageFlip();
-
-        bool longsBefore = aaplPair.auxState().adlLongs;
-
-        bytes[] memory freshPu = _priceUpdateFor(AAPL_USD_FEED_ID, MARK, uint64(vm.getBlockTimestamp()));
-        vm.deal(bob, 1 ether);
-        vm.prank(bob);
-        aaplPair.liquidate{value: 0.01 ether}(_arr1(carol), freshPu);
-
-        assertTrue(aaplPair.isAdlPending(), "auction still open");
-        assertTrue(aaplPair.auxState().adlLongs != longsBefore, "fresh mark re-targets the auction");
-    }
-
-    // ---------------------------------------------------------------------------------------
-    //                 a re-target re-bases what the new cohort is judged by
-    // ---------------------------------------------------------------------------------------
-
-    function _aaplCollateral(address user) internal view returns (uint256 c) {
-        (,,, c,,,) = aaplPair.positionBuckets(user);
-    }
-
-    /// @dev Stage `user` as a long — the side a flip re-targets to — whose entire collateral was
-    ///      deposited DURING the open window, so the deposit carries a live epoch tag. A trader in
-    ///      this shape is the worst case for the tag: with it subtracted the ranking denominator
-    ///      floors to 1 wei, which ranks a pure-profit claim at the very front of the queue.
+    /// @dev Stage `user` as a long — the cohort the short bucket is closed against — whose entire
+    ///      collateral was deposited DURING the open window, so the deposit carries a live epoch
+    ///      tag. A trader in this shape is the worst case for the tag: with it subtracted the
+    ///      ranking denominator floors to 1 wei, which ranks a pure-profit claim at the very front
+    ///      of the queue.
     function _stageTaggedLong(address user, uint256 amount) internal {
         assertTrue(aaplPair.isAdlPending(), "tag only lands while a window is open");
         _depositAapl(user, amount);
@@ -603,96 +482,123 @@ contract AdlStaleTriggerTest is IntegrationBase {
         assertEq(aaplPair.adlScoreDeposit(user), amount, "deposit tagged to the live ranking epoch");
     }
 
-    /// A flip hands the newly targeted side an auction of its own. The gate descends only as an
-    /// auction fails to turn up eligible accounts, and the side that just came into range was not
-    /// submittable while it descended — so inheriting the decay would expose every profitable
-    /// account on that side at once, with no ranking protection at all.
-    function test_sideFlip_freshMark_restartsRankingGate() public {
-        _openWindowAndStageFlip();
-
-        // Run the gate to its floor, where every positive-PnL account on the targeted side passes.
-        // Short of REOPEN_GAP_MIN_STALENESS, so the price store's own discontinuity restart cannot
-        // be what moves the clock below.
-        vm.warp(vm.getBlockTimestamp() + BazaarTypes.ADL_AUCTION_DURATION + 1);
-        assertEq(lens.getAdlScoreThreshold(address(aaplPair)), 1, "gate fully decayed before the flip");
-
-        _warmAapl(MARK); // a fresh mark re-targets inside this call's health check
-
-        assertTrue(aaplPair.auxState().adlLongs, "flip re-targeted the auction");
-        assertEq(aaplPair.adlAuctionStartTs(), vm.getBlockTimestamp(), "flip restarted the decay clock");
-        assertEq(
-            lens.getAdlScoreThreshold(address(aaplPair)),
-            1 + BazaarTypes.ADL_MAX_SCORE,
-            "gate back at max for the cohort that just came into range"
-        );
-    }
-
-    /// The live tags belong to the side that was NOT in range: their deposits defended against
-    /// liquidation, not against a ranking they were never subject to. Charging the re-targeted
-    /// cohort for them ranks it as though it held no collateral, so a re-target voids them.
-    function test_sideFlip_freshMark_releasesWindowDepositTags() public {
-        _openWindowAndStageFlip();
+    /// The epoch keys the window's deposit tags, and it moves only when a window opens. A bucket
+    /// seeded on the other side opens nothing — the window is already open — so the live tags
+    /// stand, and they apply to the cohort the new bucket brings in range exactly as to the one
+    /// already ranked: one tag rule for both legs.
+    function test_oppositeBucketSeededMidWindow_bumpsNoEpoch_keepsTags() public {
+        _openWindow();
+        _writeDeepUnderwaterShort(alice);
         uint256 topUp = 20 * BAZAAR_SCALE;
-        _stageTaggedLong(alice, topUp);
+        _stageTaggedLong(carol, topUp);
         assertEq(lens.adlEpoch(address(aaplPair)), 1, "window opened at epoch 1");
+        (uint256 scoreBefore,) = lens.getAdlScore(address(aaplPair), carol);
+        assertEq(scoreBefore, 0, "a long is no candidate while the short bucket is empty");
 
-        _warmAapl(MARK);
+        vm.warp(vm.getBlockTimestamp() + 30);
+        _seizeAliceIntoTheShortBucket(true);
 
-        assertTrue(aaplPair.auxState().adlLongs, "alice's side is the one now being deleveraged");
-        assertEq(lens.adlEpoch(address(aaplPair)), 2, "re-target advanced the ranking epoch exactly once");
-        assertEq(aaplPair.adlScoreDeposit(alice), 0, "her tag no longer subtracts from her ranking");
-
-        // What the release is worth, in the denominator ADL actually ranks on: the tag would have
-        // taken her whole collateral out and floored it at 1 wei.
-        uint256 coll = _aaplCollateral(alice);
-        assertGt(coll, 0, "collateral present to rank against");
-        assertEq(AdlLib._scoreCollateral(coll, topUp), 1, "tag live: denominator floors to 1 wei");
+        assertEq(lens.adlEpoch(address(aaplPair)), 1, "a bucket seeded on the other side bumps no epoch");
+        assertEq(aaplPair.adlScoreDeposit(carol), topUp, "the live tags stand");
+        (uint256 score,) = lens.getAdlScore(address(aaplPair), carol);
+        assertGt(score, 0, "the short bucket puts carol, a long, in range as its cohort");
+        BazaarTypes.BucketState memory st = lens.checkBucketSolvency(address(aaplPair), carol, MARK * BAZAAR_SCALE);
         assertEq(
-            AdlLib._scoreCollateral(coll, aaplPair.adlScoreDeposit(alice)),
-            coll,
-            "tag released: denominator is her real collateral"
+            score,
+            Math.mulDiv(uint256(st.totalPnl), BAZAAR_SCALE, AdlLib._scoreCollateral(_aaplCollateral(carol), topUp)),
+            "ranked on her collateral less the tag, like any cohort"
         );
     }
 
-    /// A re-target withheld for staleness leaves the cohort exactly as it was, so it must spend
-    /// neither protection: voiding honest tags and re-arming the gate would cost the standing
-    /// cohort its queue position and its decay for a target that never moved.
-    function test_sideFlip_staleMark_leavesEpochAndGateAlone() public {
-        _openWindowAndStageFlip();
+    /// The Dutch decay descends only as an auction fails to turn up eligible accounts, and it
+    /// restarts only when a window opens or a stored price ends a market discontinuity. A bucket
+    /// seeded on the other side is neither: the gate keeps the decay it earned, and the cohort the
+    /// new bucket brings in range is judged by that same gate.
+    function test_oppositeBucketSeededMidWindow_restartsNoDecay() public {
+        uint256 openedAt = _openWindow();
+        _writeDeepUnderwaterShort(alice);
+
+        // Run the gate to its floor, short of REOPEN_GAP_MIN_STALENESS so the price store's own
+        // discontinuity restart cannot be what moves the clock below.
+        vm.warp(vm.getBlockTimestamp() + BazaarTypes.ADL_AUCTION_DURATION + 1);
+        assertEq(lens.getAdlScoreThreshold(address(aaplPair)), 1, "gate fully decayed before the seizure");
+
+        _seizeAliceIntoTheShortBucket(true);
+
+        assertEq(aaplPair.adlAuctionStartTs(), openedAt, "a bucket seeded on the other side restarts no decay");
+        assertEq(lens.getAdlScoreThreshold(address(aaplPair)), 1, "the gate keeps the decay it earned");
+
+        // The cohort the short bucket brings in range meets the gate as it stands.
+        _stageTaggedLong(carol, 20 * BAZAAR_SCALE);
+        (uint256 score, bool eligible) = lens.getAdlScore(address(aaplPair), carol);
+        assertGt(score, 0, "carol is a candidate against the short bucket");
+        assertTrue(eligible, "and passes the decayed gate at once");
+    }
+
+    /// Neither termination clock moves: the 24h timeout stays monotone and the runway armed off
+    /// it is never re-armed. A seizure is caller-induced, so a clock it moved could be pushed back
+    /// indefinitely by liquidating opposite-side accounts one at a time. The auction stays the
+    /// callable path throughout, with either bucket's cohort submittable.
+    function test_oppositeBucketSeededMidWindow_movesNoClock() public {
+        _openWindowThenExpireClock();
+        _warmAapl(MARK); // arms the runway; a stored price ending a 25h gap also restarts the decay
+        _writeDeepUnderwaterShort(alice);
+
+        uint256 deadline = lens.adlTerminationTs(address(aaplPair));
+        uint256 pendingSince = aaplPair.adlPendingSince();
+        uint256 decayStart = aaplPair.adlAuctionStartTs();
+        assertGt(deadline, 0, "runway armed before the seizure");
+
+        vm.warp(vm.getBlockTimestamp() + 30);
+        _seizeAliceIntoTheShortBucket(true);
+
+        assertEq(lens.adlTerminationTs(address(aaplPair)), deadline, "the seizure must not re-arm the runway");
+        assertEq(aaplPair.adlPendingSince(), pendingSince, "nor rewind the 24h clock");
+        assertEq(aaplPair.adlAuctionStartTs(), decayStart, "nor move the decay clock");
+        assertEq(aaplPair.settlementPriceFixedTs(), 0, "and must not terminate inside the runway");
+
+        // Reason 1, not 2: execution is attempted and fails on the empty submission rather than
+        // being skipped for termination.
+        bytes[] memory freshPu = _priceUpdateFor(AAPL_USD_FEED_ID, MARK, uint64(vm.getBlockTimestamp()));
+        vm.deal(bob, 1 ether);
+        vm.prank(bob);
+        vm.expectRevert(AdlLib.AdlLib__EmptySubmission.selector);
+        aaplPair.executeAdl{value: 0.01 ether}(new address[](0), new address[](0), freshPu);
+    }
+
+    /// The same seizure on the stale fallback: it commits, seeds the bucket, and moves nothing
+    /// about the window either. executeAdl cannot be reached on that mark — it refuses the stale
+    /// price whichever cohort is submitted — so the batch waits for a fresh print.
+    function test_oppositeBucketSeededMidWindow_staleMark_seedsItAndMovesNothing() public {
+        _openWindow();
+        _writeDeepUnderwaterShort(alice);
         uint256 topUp = 20 * BAZAAR_SCALE;
-        _stageTaggedLong(alice, topUp);
+        _stageTaggedLong(carol, topUp);
 
         // Part-way down the decay, and short of MAX_LIQUIDATION_PRICE_AGE so the stale fallback can
-        // still carry a seizure — the atomic route to a withheld re-target.
+        // still carry a seizure.
         vm.warp(vm.getBlockTimestamp() + 8 minutes);
         uint256 clockBefore = aaplPair.adlAuctionStartTs();
         uint256 gateBefore = lens.getAdlScoreThreshold(address(aaplPair));
         assertLt(gateBefore, 1 + BazaarTypes.ADL_MAX_SCORE, "gate has descended from max");
         assertGt(gateBefore, 1, "and has not yet bottomed out");
 
-        vm.prank(bob);
-        aaplPair.liquidate(_arr1(carol), new bytes[](0));
+        _seizeAliceIntoTheShortBucket(false);
 
-        assertFalse(aaplPair.auxState().adlLongs, "re-target withheld on the stale mark");
-        assertEq(lens.adlEpoch(address(aaplPair)), 1, "withheld re-target must not advance the epoch");
-        assertEq(aaplPair.adlScoreDeposit(alice), topUp, "withheld re-target must not void live tags");
-        assertEq(aaplPair.adlAuctionStartTs(), clockBefore, "withheld re-target must not restart the decay");
+        assertEq(lens.adlEpoch(address(aaplPair)), 1, "no epoch advance");
+        assertEq(aaplPair.adlScoreDeposit(carol), topUp, "the live tags stand");
+        assertEq(aaplPair.adlAuctionStartTs(), clockBefore, "no decay restart");
         assertEq(lens.getAdlScoreThreshold(address(aaplPair)), gateBefore, "gate keeps the decay it earned");
+
+        vm.prank(bob);
+        vm.expectRevert(BazaarPair.BazaarPair__AdlPriceStale.selector);
+        aaplPair.executeAdl(new address[](0), _arr1(carol), new bytes[](0));
     }
 
-    /// An ordinary re-evaluation of an open window is not a re-target: the auction is still aimed
-    /// away from the side the vault holds, so nothing about the cohort changed and neither the
-    /// epoch nor the gate may move.
-    function test_pendingNoFlip_leavesEpochAndGateAlone() public {
-        _warmAapl(MARK);
-        _writeDeepUnderwaterLong(dave);
-        vm.warp(vm.getBlockTimestamp() + 30);
-
-        bytes[] memory freshPu = _priceUpdateFor(AAPL_USD_FEED_ID, MARK, uint64(vm.getBlockTimestamp()));
-        vm.deal(bob, 1 ether);
-        vm.prank(bob);
-        aaplPair.liquidate{value: 0.01 ether}(_arr1(dave), freshPu);
-        assertTrue(aaplPair.isAdlPending(), "window open");
+    /// An ordinary re-evaluation of an open window moves neither the epoch nor the gate: nothing
+    /// about the cohort changed.
+    function test_pendingReevaluation_leavesEpochAndGateAlone() public {
+        _openWindow();
 
         uint64 epochBefore = lens.adlEpoch(address(aaplPair));
         uint256 clockBefore = aaplPair.adlAuctionStartTs();
@@ -701,8 +607,8 @@ contract AdlStaleTriggerTest is IntegrationBase {
         _warmAapl(MARK);
 
         assertTrue(aaplPair.isAdlPending(), "window still open across the re-evaluation");
-        assertEq(lens.adlEpoch(address(aaplPair)), epochBefore, "no re-target, no epoch advance");
-        assertEq(aaplPair.adlAuctionStartTs(), clockBefore, "no re-target, no decay restart");
+        assertEq(lens.adlEpoch(address(aaplPair)), epochBefore, "no epoch advance");
+        assertEq(aaplPair.adlAuctionStartTs(), clockBefore, "no decay restart");
         assertLt(lens.getAdlScoreThreshold(address(aaplPair)), 1 + BazaarTypes.ADL_MAX_SCORE, "gate kept decaying");
     }
 }

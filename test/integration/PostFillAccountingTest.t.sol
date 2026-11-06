@@ -7,6 +7,8 @@ import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 import {RiskParamsLib} from "../../src/libraries/RiskParamsLib.sol";
 import {BucketStore} from "../BucketStore.sol";
 
+import {VaultStore} from "../VaultStore.sol";
+
 /// @title PostFillAccountingTest
 /// @notice Everything that happens AFTER an arrival fill settles: position state transitions
 ///         beyond open/full-close (partial close, flip), the TP/SL oversize fence, vault OI
@@ -21,12 +23,15 @@ contract PostFillAccountingTest is IntegrationBase {
     function _setVaultPendingLiq(uint256 size, uint256 entryPrice, uint256 bankruptcyPrice, bool isLong) internal {
         uint256 entryNotional = size * entryPrice / BAZAAR_SCALE;
         uint256 bankruptcyNotional = size * bankruptcyPrice / BAZAAR_SCALE;
-        _stdstore.target(address(pair)).sig("pairVault()").depth(6).checked_write(size);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(7).checked_write(entryNotional);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(8).checked_write(bankruptcyNotional);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(13)
-            .checked_write(isLong ? entryNotional - bankruptcyNotional : bankruptcyNotional - entryNotional);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(10).checked_write(isLong);
+        VaultStore.setSize(_stdstore, address(pair), isLong, size);
+        VaultStore.setEntryNotional(_stdstore, address(pair), isLong, entryNotional);
+        VaultStore.setBankruptcyNotional(_stdstore, address(pair), isLong, bankruptcyNotional);
+        VaultStore.setSeized(
+            _stdstore,
+            address(pair),
+            isLong,
+            isLong ? entryNotional - bankruptcyNotional : bankruptcyNotional - entryNotional
+        );
     }
 
     function _placeLimitWithIntegrator(address user, bool isLong, uint256 size, uint256 limitPrice, address integrator)
@@ -176,7 +181,7 @@ contract PostFillAccountingTest is IntegrationBase {
     /// @notice OI and weighted entry sums track real fills: symmetric on open, zero after close.
     function test_oiAggregates_openThenCloseRoundTrip() public {
         _openAt50k(BAZAAR_SCALE / 10);
-        (uint256 longOI, uint256 shortOI, uint256 longSum, uint256 shortSum,,,,,,,,,,,,,) = pair.pairVault();
+        (uint256 longOI, uint256 shortOI, uint256 longSum, uint256 shortSum,,,,,,,,) = pair.pairVault();
         assertEq(longOI, BAZAAR_SCALE / 10, "long OI == size");
         assertEq(shortOI, BAZAAR_SCALE / 10, "short OI == size");
         assertEq(longSum, 5_000 * BAZAAR_SCALE, "long weighted entry == fill notional");
@@ -188,7 +193,7 @@ contract PostFillAccountingTest is IntegrationBase {
         _placeLimit(bob, true, BAZAAR_SCALE / 10, 51_000 * BAZAAR_SCALE);
         assertEq(_posSize(alice), 0, "closed");
 
-        (longOI, shortOI, longSum, shortSum,,,,,,,,,,,,,) = pair.pairVault();
+        (longOI, shortOI, longSum, shortSum,,,,,,,,) = pair.pairVault();
         assertEq(longOI, 0, "long OI zeroed");
         assertEq(shortOI, 0, "short OI zeroed");
         assertEq(longSum, 0, "long sum zeroed");
@@ -387,7 +392,7 @@ contract PostFillAccountingTest is IntegrationBase {
         assertEq(unloaded, 0, "no fill against an under-margined maker");
         assertEq(_filledSize(longId), 0, "order unfilled");
         assertGt(_canceledBlock(longId), 0, "failing maker auto-canceled");
-        (,,,,,, uint256 pendSize,,,,,,,,,,) = pair.pairVault();
+        uint256 pendSize = VaultStore.inventorySize(address(pair));
         assertEq(pendSize, liqSize, "vault inventory untouched");
     }
 

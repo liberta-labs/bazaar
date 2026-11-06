@@ -330,6 +330,47 @@ library BazaarTypes {
         bool newIsLong;
     }
 
+    /// @notice One side's inventory of liquidated positions the vault holds: the aggregate of
+    ///         every estate seized on that side and not yet unloaded, closed by the auction or
+    ///         netted against the other side. The vault carries one per side (Vault.longInv,
+    ///         Vault.shortInv); the field an inventory sits in is its side.
+    /// @dev Every exit decrements the aggregate pro rata (an unload fill, an ADL close, a netting
+    ///      against the other bucket), which leaves the remainder's average bankruptcy price and
+    ///      size-weighted entry index unchanged. An estate that joins adds its notionals and its
+    ///      seizure and blends its funding index and seizure time by size
+    ///      (LiquidationLib.absorb).
+    /// @param size The inventory's size
+    /// @param entryNotional Σ entry price × size of the estates in it: the basis their PnL is
+    ///        measured from
+    /// @param bankruptcyNotional Σ of the estates' zero-equity notionals
+    ///        (LiquidationLib.bankruptcyNotionalOf): the ADL settlement basis, and the hold on the
+    ///        unload walk's fund-neutral price
+    /// @param seized The collateral the fund actually received alongside the inventory, in
+    ///        BAZAAR_SCALE precision. Tracked rather than recovered from the two notionals: the
+    ///        bankruptcy price folds in the funding the estate had accrued before liquidation, and
+    ///        the vault's funding leg realizes that same stretch again from the estate's entry, so
+    ///        a recovery from entry − bankruptcy would count it twice and misplace the price at
+    ///        which the inventory is whole. Cash only: what the deposits ledger could not hand over
+    ///        sits in Vault.ledgerArrears instead.
+    /// @param entryFundingIndex The size-weighted average of the estates' ENTRY funding indices.
+    ///        Settlement realizes funding over entry → close as one signed term, so the estates'
+    ///        pre-liquidation balances and the vault's holding window reach insurance together.
+    /// @param seizedTs When the inventory was seized, as a size-weighted mean over the estates in
+    ///        it. The unload walk opens its floor from the band edge toward the fund-neutral price
+    ///        over UNLOAD_FLOOR_DECAY measured from here, so the estates' residual equity is offered
+    ///        to the whole market before the walk parts with it at bankruptcy. Set when the
+    ///        inventory is seeded, blended by size when an estate joins it, and untouched when
+    ///        inventory leaves, so a remainder keeps its age. Zero only for inventory staged
+    ///        outside LiquidationLib.absorb, which the walk treats as fully aged.
+    struct Inventory {
+        uint256 size;
+        uint256 entryNotional;
+        uint256 bankruptcyNotional;
+        uint256 seized;
+        int256 entryFundingIndex;
+        uint64 seizedTs;
+    }
+
     struct Vault {
         uint256 totalLongOI;
         uint256 totalShortOI;
@@ -337,12 +378,6 @@ library BazaarTypes {
         uint256 shortWeightedEntrySum;
         uint256 totalCollateralDeposited;
         uint256 insuranceFundBalance;
-        // Aggregate pending liquidation tracking (single-direction)
-        uint256 pendingLiqSize; // total size of pending liquidations
-        uint256 pendingLiqEntryNotional; // sum(entryPrice_i × size_i) — for PnL at match
-        uint256 pendingLiqBankruptcyNotional; // sum of the estates' zero-equity notionals (LiquidationLib.bankruptcyNotionalOf) — for ADL settlement
-        int256 pendingLiqEntryFundingIndex; // size-weighted avg of the liquidatees' ENTRY funding indices — settlement realizes funding over entry → close (estates' pre-liquidation balances + vault holding window together)
-        bool pendingLiqIsLong; // original position direction (true = vault holds longs)
         // Realized bad debt: cumulative loss that exceeded the insurance fund and was dropped
         // (insurance floored at 0). A non-zero value is a definitive insolvency signal — the
         // vault cannot honor all claims — and triggers termination via isVaultHealthy. Folded
@@ -356,13 +391,6 @@ library BazaarTypes {
         // ADL gate and the unload walk size the fund's reserve from it and reach the vault
         // through libraries that do not carry the EMAs it is derived from.
         uint256 targetInsuranceRatioBp;
-        // Collateral the fund actually received alongside the inventory it still holds, in
-        // BAZAAR_SCALE precision. Tracked rather than recovered from the two notionals: the
-        // bankruptcy price folds in the funding the estate had accrued before liquidation, and
-        // the vault's funding leg realizes that same stretch again from the estate's entry, so
-        // a recovery from entry − bankruptcy would count it twice and misplace the price at
-        // which the inventory is whole. Decremented proportionally with every unit that leaves.
-        uint256 pendingLiqSeized;
         // What the deposits ledger owes the insurance fund, in BAZAAR_SCALE precision: the part
         // of every collection into the fund (a liquidation seizure, a vault gain) that the ledger
         // could not pay because winners had already realized against the position and withdrawn
@@ -373,14 +401,6 @@ library BazaarTypes {
         // ledger unclaimed, and finalize would reserve that cash as principal for a bucket that
         // does not exist.
         uint256 ledgerArrears;
-        // When the inventory the vault holds was seized, as a size-weighted mean over the estates
-        // in it. The unload walk opens its floor from the band edge toward the fund-neutral
-        // price over UNLOAD_FLOOR_DECAY measured from here, so the estates' residual equity is
-        // offered to the whole market before the walk will part with it at bankruptcy. Set when
-        // the aggregate is seeded or taken over by the opposite side, blended by size when an
-        // estate joins it, and untouched when inventory leaves, so a remainder keeps its age.
-        // Zero only for inventory staged outside absorb, which the walk treats as fully aged.
-        uint64 pendingLiqSeizedTs;
         // The lowest per-side open interest the sample ring has seen over the trailing
         // MMR_GRACE_PERIOD, as of the last margin-curve refresh. The reserve is sized on the
         // lower of this and live open interest (RiskParamsLib.reserveOiSizeOf), so open interest
@@ -392,6 +412,14 @@ library BazaarTypes {
         // interval is that old, in which case live open interest sizes the reserve alone; a
         // window in which open interest touched zero stores 1, the smallest size.
         uint128 trailingOiSize;
+        // The inventory of liquidated longs the vault holds, and of liquidated shorts. Both can be
+        // non-empty at once: an estate joins its own side's bucket, and the overlap of the two is
+        // netted only when its realization is a gain or a loss the fund can afford above its
+        // reserve (RiskParamsLib.tryNetBuckets). An overlap that survives is a hedged pair whose
+        // loss is fixed whatever the price does, and the auction closes each of its legs against
+        // that leg's own counterparties.
+        Inventory longInv;
+        Inventory shortInv;
     }
 
     /// @notice Pull-payment escrow for every USDC the pair owes a third party: integrator fees,
@@ -556,16 +584,12 @@ library BazaarTypes {
         uint256 rollingVolume; // the line's volume at that anchor, so at least what it reads now
         uint256 pairCreatedTs;
         uint256 priceUpdateCount;
-        uint256 adlSnapshotPrice;
-        int256 adlSnapshotFundingIndex; // funding index frozen at trigger; keepers score winners against this
-        bool adlLongs;
         uint256 settlementPrice; // fixed terminal price (0 while the pair is live)
         uint256 terminalPrincipalRatio; // derived at finalize, and again after a late bankrupt settlement: cash paid per unit of bucket collateral (BAZAAR_SCALE = 100%)
         uint256 terminalProfitRatio; // derived at finalize, and again after a late bankrupt settlement: cash paid per unit of registered profit claim (BAZAAR_SCALE = 100%)
         uint256 terminalProfitClaims; // Σ registered winner profit not yet paid out (settlement-window tally, less post-finalize payouts)
         uint256 terminalBadDebt; // Σ settled losses beyond collateral (settlement-window tally)
         address bugBountyAddress;
-        uint256 deferredCount; // opposite-side liquidations left open for the auction to close; BazaarPair.deferredLiquidations(i) lists them
     }
 
     // -------------------- Constants --------------------
@@ -604,11 +628,11 @@ library BazaarTypes {
     uint256 internal constant MAKER_INTEGRATOR_FEE_EBP = 25;
     uint256 internal constant TAKER_INTEGRATOR_FEE_EBP = 25;
 
-    // Keeper rate in EBP of notional (2 bps): paid on the inventory a liquidation's nettings
-    // retire, on what its inline unload or an unloadVault call sells into the book, on what an
-    // ADL batch retires with each deferred account it seizes (LiquidationLib.seizureReward), and
-    // on the inventory an ADL batch closes for the inventory's own exposure, valued at the mark,
-    // where that is more than the share of the bad debt the close averts (AdlLib._closeReward).
+    // Keeper rate in EBP of notional (2 bps): paid on the inventory a netting of the two buckets
+    // retires, whoever's call runs it (a liquidation, an unload walk's tail, an ADL batch), on what
+    // an inline unload or an unloadVault call sells into the book, and on the inventory an ADL
+    // batch closes, valued at the mark, where that is more than the share of the bad debt the
+    // close averts (AdlLib._closeReward).
     uint256 internal constant LIQUIDATION_FEE_EBP = 200;
 
     // Insurance fees in EBP
@@ -640,9 +664,9 @@ library BazaarTypes {
 
     /// @notice Share of the insurance target the unload walk may never spend, in bp of the
     ///         target ratio. Free capital above this reserve is what the vault may lose selling
-    ///         inventory, what the ADL gate measures expected loss against, and what an opposing
-    ///         liquidation's netting has to fit inside to run at all — one that does not is
-    ///         deferred to the auction, which closes it against its own counterparties instead.
+    ///         inventory, what the ADL gate measures expected loss against, and what a netting of
+    ///         the two buckets' overlap has to fit inside to run at all — one that does not waits,
+    ///         and the auction closes each bucket against its own counterparties instead.
     ///         The reserve itself stays for the realizations no bound can refuse: the
     ///         holding-window funding a deleveraged slice carries, and the keeper rewards the
     ///         fund pays. Sized from the target rather than the fund so it is a fixed dollar
@@ -794,13 +818,12 @@ library BazaarTypes {
     uint64 internal constant NEVER_EXPIRE_BLOCK = type(uint64).max;
 
     // Flat liquidation reward (shared between BazaarPair and LiquidationLib): due for every
-    // position a liquidate() call seizes and every account it newly records as deferred. A
-    // netting account earns LIQUIDATION_FEE_EBP of what it retires instead when that is larger,
+    // position a liquidate() call seizes. An account whose seizure nets against the opposite
+    // bucket earns LIQUIDATION_FEE_EBP of what the netting retires instead when that is larger,
     // and the call's inline unload adds whatever the rate on what it sells exceeds the remaining
     // flat rewards. It covers the keeper's gas when the call takes little or no exposure off
-    // the fund. Also the floor of the per-seizure reward an ADL batch pays. An
-    // account whose position is worth less than MIN_ORDER_AMOUNT earns at most its own equity
-    // instead (LiquidationLib.flatReward).
+    // the fund. An account whose position is worth less than MIN_ORDER_AMOUNT earns at most its
+    // own equity instead (LiquidationLib.flatReward).
     uint256 internal constant MIN_LIQUIDATOR_REWARD = BAZAAR_SCALE / 20; // 0.05 USDC
 
     // ADL constants (shared between BazaarPair, AdlLib, BazaarPairLens)
@@ -823,23 +846,12 @@ library BazaarTypes {
     uint256 internal constant ADL_MAX_SCORE = 25 * BAZAAR_SCALE;
 
     /// @notice Share of the bad debt an ADL close averts that the executor is paid, from
-    ///         insurance: on top of the seizure reward for a close against a deferred account, and
-    ///         in place of LIQUIDATION_FEE_EBP of the closed notional at the mark for a close of
-    ///         the inventory's own exposure where it is the larger.
+    ///         insurance, in place of LIQUIDATION_FEE_EBP of the closed notional at the mark where
+    ///         it is the larger (AdlLib._closeReward).
     /// @dev Shared with AdlLib: the payout is a fund debit proportional to the size closed, so
     ///      the size that restores health has to account for it or every batch lands just the
     ///      reward's worth short of the release level.
     uint256 internal constant ADL_EXECUTOR_REWARD_BP = 10; // 0.1%
-    /// @notice The most opposite-side liquidations the vault may leave open as deferred at
-    ///         once. The bound is a gas ceiling, and the auction sets it rather than the gate:
-    ///         the gate costs a bucket read per entry, but a batch may scan the whole submitted
-    ///         cohort for each listed account, so the auction's worst case grows as the product
-    ///         of the two and is the first to reach a block. It is the size of a working set,
-    ///         not a queue of everything outstanding — when full, a newcomer replaces the entry
-    ///         with the smallest loss beyond its collateral, so what stays untracked is what
-    ///         matters least, and a later liquidate() picks it up once room frees or the
-    ///         inventory it would have netted against is gone.
-    uint256 internal constant MAX_DEFERRED_LIQUIDATIONS = 16;
 
     // Risk model constants (shared between BazaarPair and InsuranceVaultLib)
     uint256 internal constant VARIANCE_LOW = 2_000_000; // ~14% annualized vol
@@ -1079,8 +1091,7 @@ library BazaarTypes {
 
     struct LiquidateResult {
         uint256 liquidatedCount;
-        uint256 unloadPrepaid; // the credit the inline unload's rate must exceed before it pays more: what processLiquidations paid (per account its flat reward, or for a netting LIQUIDATION_FEE_EBP of the overlap when larger; capped at the fund's free capital) less the nettings' rate, floored at zero
-        uint256 deferredCount; // opposite-side positions left open because netting them would take the fund below its reserve
+        uint256 unloadPrepaid; // the credit the inline unload's rate must exceed before it pays more: what processLiquidations paid (per account its flat reward, or LIQUIDATION_FEE_EBP of what its netting retired when larger; capped at the fund's free capital) less the nettings' rate, floored at zero
     }
 
     // -------------------- MatchingEngineLib Structs --------------------
@@ -1135,6 +1146,10 @@ library BazaarTypes {
         // The seizure earmarked against the vault inventory an unload walk released: it pays the
         // walk's loss ahead of the ledger's arrears (RiskParamsLib.fundLedgerFrom).
         uint256 vaultEarmarkReleased;
+        // The side of the bucket an unload walk sells or covers (RiskParamsLib.unloadBucketIsLong),
+        // read by every vault fill of the walk so the fill and its settlement release the same
+        // inventory.
+        bool unloadLong;
 
         // Deposits-ledger headroom remaining for fee attribution: seeded from
         // totalCollateralDeposited at walk start, drawn down by every charged fill. Fees
@@ -1272,31 +1287,41 @@ library BazaarTypes {
 
     // -------------------- AdlLib Structs --------------------
 
-    /// @notice Result of an ADL execution batch
-    struct AdlResult {
+    /// @notice One leg of an ADL batch: the cohort that closes one of the vault's two buckets.
+    /// @param eligibleSize The size the scan admitted, capped at the bucket's size
+    /// @param eligibleCount The winners the scan admitted
+    /// @param highestAdlScore The highest admitted score
+    /// @param lowestAdlScore The lowest admitted score
+    /// @param closedSize The size the leg closed
+    /// @param settlementPrice The leg's settlement price: the bucket's average bankruptcy price,
+    ///        or the mark when the mark sits on the fund's favorable side of it
+    struct AdlLegResult {
         uint256 eligibleSize;
         uint256 eligibleCount;
         uint256 highestAdlScore;
         uint256 lowestAdlScore;
-        uint256 totalLiqSize; // total size settled via ADL
-        // The inventory leg's settlement price: avg bankruptcy price, or a mark better for the fund.
-        // What the leg closes past its restoring figure settles at the mark.
+        uint256 closedSize;
         uint256 settlementPrice;
-        uint256 deferredClosedSize; // size of deferred accounts closed against their own counterparties
+    }
+
+    /// @notice Result of an ADL execution batch: one leg per bucket, and what the batch netted
+    ///         between the two buckets.
+    struct AdlResult {
+        AdlLegResult longBucket; // shorts closed against the long bucket
+        AdlLegResult shortBucket; // longs closed against the short bucket
+        uint256 netted; // overlap netted bucket against bucket in this batch (RiskParamsLib.tryNetBuckets)
     }
 
     /// @notice Parameters for AdlLib.executeAdlCore
     struct AdlParams {
-        bool adlLongs;
-        uint256 adlSnapshotPrice;
-        int256 adlSnapshotFundingIndex;
         // Start of the auction's CURRENT Dutch-decay run, which a market discontinuity restarts.
         // Distinct from the pair's adlPendingSince, which dates the window itself and stays
         // monotone so the termination clock cannot be pushed back.
         uint256 adlAuctionStartTs;
+        // The price the call resolved and stored: both legs rank their cohort at it, and it is
+        // the mark the settlement price is taken against.
         uint256 currentPrice;
-        // Live funding index at execution — used for SETTLEMENT valuation and bucket-update events,
-        // not for ranking.
+        // The live funding index: ranking and settlement both read it.
         int256 currentFundingIndex;
         MarginRequirements marginRequirements;
         bytes32 pairId;

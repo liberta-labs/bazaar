@@ -15,7 +15,7 @@ contract BazaarIntegrationTest is IntegrationBase {
         (, uint256 aliceSize,,,,,) = pair.positionBuckets(alice);
         assertEq(aliceSize, BAZAAR_SCALE / 10, "alice holds a 0.1 BTC long");
 
-        (,,,,, uint256 insBefore,,,,,,,,,,,) = pair.pairVault();
+        (,,,,, uint256 insBefore,,,,,,) = pair.pairVault();
 
         vm.prank(bob);
         assertEq(pair.liquidate(_arr1(alice), _freshPrice()), 1, "alice liquidated");
@@ -24,10 +24,11 @@ contract BazaarIntegrationTest is IntegrationBase {
         assertEq(aliceSizeAfter, 0, "position closed");
         assertEq(aliceColl, 0, "collateral fully seized");
 
-        (,,,,, uint256 insAfter, uint256 pendSize,,,, bool pendIsLong,,,,,,) = pair.pairVault();
+        (,,,,, uint256 insAfter,,,,, BazaarTypes.Inventory memory longInv, BazaarTypes.Inventory memory shortInv) =
+            pair.pairVault();
         assertGt(insAfter, insBefore, "insurance grew from the seizure");
-        assertEq(pendSize, BAZAAR_SCALE / 10, "vault inherited the 0.1 BTC");
-        assertTrue(pendIsLong, "vault holds the long side");
+        assertEq(longInv.size, BAZAAR_SCALE / 10, "the long bucket inherited the 0.1 BTC");
+        assertEq(shortInv.size, 0, "the short bucket is empty");
     }
 
     /// @notice PnL is peer-to-peer and zero-sum: a matched long/short valued at $55k via the Lens

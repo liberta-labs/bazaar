@@ -1042,8 +1042,8 @@ library CollateralLib {
     ///      inventory settles at a loss (RiskParamsLib.fundLedger). Until then the ledger sits
     ///      below the claims on it by the inventory's loss at the mark, and a winner who realized
     ///      against the estate can be refused the tail of a balance the fund holds in full,
-    ///      earmarked as `pendingLiqSeized`. Any exit pays it back — an unload, an opposing
-    ///      netting, an ADL close — and a winner still holding the position is itself a
+    ///      earmarked as the bucket's `Inventory.seized`. Any exit pays it back — an unload, a
+    ///      netting of the two buckets, an ADL close — and a winner still holding the position is itself a
     ///      counterparty the permissionless `unloadVault` can fill. A ledger short by more than
     ///      that loss means the open book no longer backs the claims against it: a solvent
     ///      trader's collateral covers the unrealized loss it contributes, so only bad debt opens

@@ -9,6 +9,8 @@ import {BazaarPair} from "../../src/BazaarPair.sol";
 import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 import {PythSeed} from "../PythSeed.sol";
 
+import {VaultStore} from "../VaultStore.sol";
+
 /// @title IndexerEventsTest
 /// @notice The events an indexer rebuilds a pair from: one Trade per fill carrying both sides, an
 ///         OrderUpdated at every order lifecycle step with the reason for each cancellation (an
@@ -151,11 +153,10 @@ contract IndexerEventsTest is IntegrationBase {
         uint256 bid = _placeLimit(carol, true, BTC / 10, 49_900 * BAZAAR_SCALE);
 
         // The vault holds a 0.1 BTC long at a $50k basis, $200 of it seized collateral.
-        _stdstore.target(address(pair)).sig("pairVault()").depth(6).checked_write(BTC / 10);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(7).checked_write(5_000 * BAZAAR_SCALE);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(8).checked_write(4_800 * BAZAAR_SCALE);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(10).checked_write(true);
-        _stdstore.target(address(pair)).sig("pairVault()").depth(13).checked_write(200 * BAZAAR_SCALE);
+        VaultStore.setSize(_stdstore, address(pair), true, BTC / 10);
+        VaultStore.setEntryNotional(_stdstore, address(pair), true, 5_000 * BAZAAR_SCALE);
+        VaultStore.setBankruptcyNotional(_stdstore, address(pair), true, 4_800 * BAZAAR_SCALE);
+        VaultStore.setSeized(_stdstore, address(pair), true, 200 * BAZAAR_SCALE);
 
         bytes[] memory pu = _freshPrice();
         vm.recordLogs();
@@ -417,7 +418,7 @@ contract IndexerEventsTest is IntegrationBase {
     /// @notice A recorded deficit makes the next health check fix the settlement price, and the
     ///         pair announces it itself, since no governed path is involved.
     function test_insolvencySettlementFixed_deficit() public {
-        _stdstore.target(address(pair)).sig("pairVault()").depth(11).checked_write(100 * BAZAAR_SCALE);
+        _stdstore.target(address(pair)).sig("pairVault()").depth(6).checked_write(100 * BAZAAR_SCALE);
         bytes32 pid = pair.pairId();
         bytes[] memory pu = _freshPrice();
 

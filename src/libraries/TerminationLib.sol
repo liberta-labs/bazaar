@@ -102,14 +102,11 @@ library TerminationLib {
         // loss, already out of their buckets. Valued from the liquidatees' entry, price and
         // funding legs together, exactly as the coverage ratio and the ADL gate read it.
         int256 estateValue = RiskParamsLib.vaultPnl(pairVault, params.settlementPrice, params.currentFundingIndex);
-        pairVault.pendingLiqSize = 0;
-        pairVault.pendingLiqEntryNotional = 0;
-        pairVault.pendingLiqBankruptcyNotional = 0;
-        pairVault.pendingLiqEntryFundingIndex = 0;
-        // The seizure earmarked against the retired inventory is released with it. The residual
-        // written below is what the insurers own outright; an earmark that survived would keep
-        // that much of it out of every redemption's basis for good.
-        pairVault.pendingLiqSeized = 0;
+        // Both buckets go, their seizure with them: the residual written below is what the
+        // insurers own outright, and an earmark that survived would keep that much of it out of
+        // every redemption's basis for good.
+        RiskParamsLib.clearBucket(pairVault.longInv);
+        RiskParamsLib.clearBucket(pairVault.shortInv);
 
         // === Total owed to traders ===
         // Σ collateral + Σ registered claims, from the ledger identity. The deficit is bad debt

@@ -39,24 +39,24 @@ contract AdlIntegrationTest is IntegrationBase {
 
         // The same liquidate call re-evaluated vault health → ADL pending, vault holds dave's long.
         assertTrue(pair.isAdlPending(), "ADL triggered by the deep-underwater inheritance");
-        (,,,,,, uint256 pendSize,,,, bool pendIsLong,,,,,,) = pair.pairVault();
-        assertEq(pendSize, size, "vault inherited the 5 BTC");
-        assertTrue(pendIsLong, "vault holds the long side");
+        (BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) = _vaultBuckets();
+        assertEq(l.size, size, "the long bucket inherited the 5 BTC");
+        assertEq(s.size, 0, "the short bucket is empty");
 
-        // The trigger announced the frozen ranking basis. The event must carry exactly what the
-        // auxState() getter now reports — the two channels a keeper reads must agree, or the bot
-        // would score against a different basis than the contract ranks with.
+        // The trigger carries the epoch its deposit tags are keyed to and the price and funding
+        // index the window opened at: the ones the liquidation stored, which the pair still
+        // reports. Both cohorts are ranked at the price each batch resolves, so a keeper reads
+        // these as the window's opening basis, not as what it will be ranked against.
         (bool foundEv, uint64 evEpoch, uint256 evPrice, int256 evFunding) = _findAdlTriggered();
         assertTrue(foundEv, "AdlTriggered emitted on the false->true trigger");
-        BazaarTypes.AuxState memory aux = pair.auxState();
         assertEq(evEpoch, uint64(1), "first window -> epoch 1");
-        assertFalse(aux.adlLongs, "deleverage the shorts (vault holds the long)");
-        assertEq(evPrice, aux.adlSnapshotPrice, "event snapshot price matches auxState");
-        assertEq(evFunding, aux.adlSnapshotFundingIndex, "event frozen funding matches auxState");
+        (uint256 spot,,,,) = pair.lastPairPrice();
+        assertEq(evPrice, spot, "event price is the mark the window opened at");
+        assertEq(evFunding, pair.currentFundingIndex(), "event funding index is the live one at the open");
 
         // Wait out the 10-minute auction (ADL_AUCTION_DURATION) so the score threshold collapses,
-        // then deleverage bob — the short side (opposite the vault's inherited long), in profit at
-        // the snapshot price.
+        // then deleverage bob — a short, the cohort the long bucket is closed against, in profit at
+        // the mark.
         vm.warp(vm.getBlockTimestamp() + 15 minutes + 1);
         uint256 insBefore = _insuranceBal();
         uint256 bobCollBefore = _posCollateral(bob);
@@ -70,7 +70,7 @@ contract AdlIntegrationTest is IntegrationBase {
         _assertBooks("adl: after winner deleverage");
 
         assertFalse(pair.isAdlPending(), "ADL resolved");
-        (,,,,,, uint256 pendAfter,,,,,,,,,,) = pair.pairVault();
+        uint256 pendAfter = _inventorySize();
         // Bob alone covers the whole 5 BTC the vault inherited, but the batch is capped at the
         // size that restores the fund: it closes the part the exposure required and leaves the
         // rest with him. Closing all 5 would settle the remainder at the estates' bankruptcy
@@ -136,10 +136,7 @@ contract AdlIntegrationTest is IntegrationBase {
         vm.prank(carol);
         assertEq(pair.liquidate(_arr1(dave), _freshPrice()), 1, "dave liquidated");
         assertTrue(pair.isAdlPending(), "ADL triggered");
-        {
-            (,,,,,, uint256 pend,,,,,,,,,,) = pair.pairVault();
-            assertEq(pend, 5 * BAZAAR_SCALE, "vault inherited exactly 5 BTC");
-        }
+        assertEq(_inventorySize(), 5 * BAZAAR_SCALE, "vault inherited exactly 5 BTC");
         assertEq(_canceledBlock(tp), 0, "TP untouched by the liquidation");
 
         vm.warp(vm.getBlockTimestamp() + 15 minutes + 1);
