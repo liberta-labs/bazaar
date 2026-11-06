@@ -1,0 +1,990 @@
+# Bazaar subgraph schema.
+#
+# Units. Prices, sizes, notionals, collateral, fees, bounties, insurance amounts and insurance
+# shares are fixed-point integers with 18 decimals, the contracts' BAZAAR precision: a price of
+# 1e18 is 1 USD, a size of 1e18 is one unit of the base asset, and a notional of 1e18 is 1 USD.
+# Seed refunds are the one exception and are USDC with 6 decimals; their fields end in "Usdc".
+# Block numbers are Arbitrum L2 block numbers, the numbers the contracts store in order expiry
+# and terminal stamps. Timestamps are Unix seconds.
+#
+# Live values the contracts deliberately do not emit (the mark price, the insurance share price and
+# the vault's two buckets of liquidated positions) are not indexed here: read them from
+# BazaarPairLens, the buckets through getPendingLiquidationExposure.
+
+enum OrderType {
+  Market
+  Limit
+  StopLimit
+  TakeProfit
+  StopLoss
+}
+
+enum TimeInForce {
+  GTC
+  IOC
+  FOK
+}
+
+enum OrderStatus {
+  "A StopLimit, TakeProfit or StopLoss whose trigger has not fired."
+  Waiting
+  "A Market or immediate-or-cancel order taking liquidity. It ends filled or canceled inside its creation transaction, so it is never seen at rest."
+  Pending
+  "A limit order in the book. An order whose expiry block has passed stays here until a transaction removes it; compare expiryBlock with the current block."
+  Resting
+  "A trigger order that fired and still holds size outside the book; the next execution continues it."
+  Fired
+  Filled
+  Canceled
+}
+
+enum CancelReason {
+  None
+  Owner
+  Expired
+  Unfilled
+  BelowMinimum
+  PostOnly
+  SelfMatch
+  StepLimit
+  Margin
+  PriceBand
+  PositionClosed
+  Liquidated
+  Deleveraged
+}
+
+enum AmendSkipReason {
+  Inactive
+  Expired
+  SizeFilled
+  BelowMinimum
+  WouldCross
+}
+
+enum OrderEventAction {
+  Created
+  Triggered
+  Canceled
+  Amended
+  AmendSkipped
+}
+
+enum PairStatus {
+  "Trading normally."
+  Active
+  "A termination cutoff is scheduled; scheduledTerminationTs holds it."
+  Scheduled
+  "The settlement price is fixed and trading has stopped; positions are being settled."
+  SettlementFixed
+  "finalizeTermination ran; termination holds the final figures."
+  Terminated
+}
+
+enum SettlementSource {
+  "A scheduled cutoff settled through the terminator."
+  Cutoff
+  "The oracle stopped publishing and the terminator settled at the last stored price."
+  Stale
+  "The pair fixed its own settlement price after an insolvency verdict."
+  Insolvency
+}
+
+enum InsuranceEventKind {
+  Deposit
+  WithdrawalRequested
+  WithdrawalLocked
+  WithdrawalExecuted
+  LevyCharged
+  LevyReceived
+}
+
+enum ListingStatus {
+  Pending
+  Disputed
+  Deployed
+  Rejected
+  Expired
+}
+
+enum IdentifierUpgradeStatus {
+  Pending
+  Disputed
+  Queued
+  Upgraded
+  Canceled
+  Expired
+  "A dispute UMA upheld. The factory emits nothing for this outcome, so the status is inferred when the next proposal takes the factory's single proposal slot; until then the proposal reads Disputed."
+  Rejected
+}
+
+enum TerminationProposalStatus {
+  Pending
+  Disputed
+  Accepted
+  ScheduleRefused
+  Superseded
+  Rejected
+}
+
+enum InsurerProposalStatus {
+  Open
+  Scheduled
+  Failed
+  Preempted
+  Voided
+  Rejected
+}
+
+# ---------------------------------------------------------------------------------------------
+# Protocol-wide
+# ---------------------------------------------------------------------------------------------
+
+"Protocol-wide state and totals. A single entity with id \"bazaar\"."
+type Protocol @entity(immutable: false) {
+  id: ID!
+  factory: Bytes
+  "The identifier UMA voters adjudicate listings and terminations under."
+  umaIdentifier: Bytes
+  pendingIdentifierUpgrade: IdentifierUpgradeProposal
+  queuedIdentifierUpgrade: IdentifierUpgradeProposal
+  pairCount: Int!
+  accountCount: Int!
+  tradeCount: BigInt!
+  volumeNotional: BigInt!
+  makerFees: BigInt!
+  takerFees: BigInt!
+  liquidationCount: BigInt!
+}
+
+type Account @entity(immutable: false) {
+  id: Bytes!
+  firstSeenTimestamp: BigInt!
+  "Fills on either side of a trade."
+  tradeCount: BigInt!
+  makerVolumeNotional: BigInt!
+  takerVolumeNotional: BigInt!
+  "Trading fees, as PositionModified reports them."
+  feesPaid: BigInt!
+  "Price PnL realized by fills, plus ADL credits. Funding settled when size closes goes to collateral and is not counted here."
+  realizedPnl: BigInt!
+  "Positions of this account that were liquidated."
+  liquidationCount: Int!
+  "Liquidations this account submitted."
+  liquidationsExecuted: Int!
+  "Trigger bounties assigned to this account for orders it did not own."
+  triggerBountiesEarned: BigInt!
+  "Trigger executions that paid this account part of another owner's bounty."
+  triggerExecutions: Int!
+  adlBatchesExecuted: Int!
+  "Every credit to a claimable balance on any pair: integrator fees, keeper rewards and bounties, relayer fees, refunded bounties."
+  feesAccrued: BigInt!
+  feesClaimed: BigInt!
+  "Escrowed listing seed credited back after a failed listing and not yet claimed (USDC, 6 decimals)."
+  seedRefundOwedUsdc: BigInt!
+  positions: [Position!]! @derivedFrom(field: "account")
+  orders: [Order!]! @derivedFrom(field: "owner")
+  insuranceStakes: [InsuranceProvider!]! @derivedFrom(field: "account")
+  feeBalances: [FeeBalance!]! @derivedFrom(field: "recipient")
+}
+
+type IntegratorStats @entity(immutable: false) {
+  "The integrator address orders carry."
+  id: Bytes!
+  orderCount: BigInt!
+  "Fill sides that carried this integrator: a fill with the integrator on both sides counts twice."
+  fillCount: BigInt!
+  makerVolumeNotional: BigInt!
+  takerVolumeNotional: BigInt!
+  firstOrderTimestamp: BigInt!
+  lastFillTimestamp: BigInt
+}
+
+type CompositeFeed @entity(immutable: true) {
+  "The composite feed ID a pair can price from."
+  id: Bytes!
+  baseId: Bytes!
+  quoteId: Bytes!
+  invertQuote: Boolean!
+  registeredAtTimestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+# ---------------------------------------------------------------------------------------------
+# Pairs
+# ---------------------------------------------------------------------------------------------
+
+type Pair @entity(immutable: false) {
+  "The pair contract address."
+  id: Bytes!
+  "The bytes32 pair ID every pair event carries."
+  pairId: Bytes!
+  factory: Bytes!
+  deployer: Account!
+  "The Pyth feed or registered composite the pair prices from."
+  baseFeedId: Bytes!
+  description: String!
+  isContinuouslyTraded: Boolean!
+  seedAmount: BigInt!
+  listing: ListingProposal
+  createdAtBlock: BigInt!
+  createdAtTimestamp: BigInt!
+  createdTx: Bytes!
+  status: PairStatus!
+
+  "Last stored oracle spot price."
+  lastPrice: BigInt
+  "The oracle publish time of lastPrice."
+  lastPricePublishTs: BigInt
+  lastPriceUpdate: PriceUpdate
+  "Cumulative funding index after the last stored price. The index moves only when a price is stored."
+  fundingIndex: BigInt!
+  priceUpdateCount: BigInt!
+
+  lastTradePrice: BigInt
+  lastTradeTimestamp: BigInt
+  tradeCount: BigInt!
+  volumeSize: BigInt!
+  volumeNotional: BigInt!
+  makerFees: BigInt!
+  takerFees: BigInt!
+  "Fills in which the vault sold or bought back liquidated inventory against a resting order."
+  vaultFillCount: BigInt!
+  vaultFillSize: BigInt!
+  vaultFillNotional: BigInt!
+
+  "Sum of open account positions on each side. Inventory the vault holds after liquidations is not an account position and is not counted."
+  openInterestLong: BigInt!
+  openInterestShort: BigInt!
+  openPositionCount: Int!
+  "Margin rates in basis points, as the most recent position event that reported them carried them."
+  imrBp: BigInt
+  mmrBp: BigInt
+
+  orderCount: BigInt!
+  restingBidCount: Int!
+  restingAskCount: Int!
+
+  totalInsuranceShares: BigInt!
+  "Share generation. A dead-pool reset starts a new one and every earlier balance reads 0."
+  insuranceShareEpoch: BigInt!
+  insuranceDeposited: BigInt!
+  insuranceWithdrawn: BigInt!
+  "USDC the terminator booked into the fund, such as forfeited insurer-termination bonds."
+  insuranceCredited: BigInt!
+  insuranceProviderCount: Int!
+  "Head of the provider list a share-generation reset walks. Internal bookkeeping."
+  lastInsuranceProvider: InsuranceProvider
+
+  liquidationCount: BigInt!
+  liquidatedSize: BigInt!
+  "Liquidated size valued at the price each liquidation ran at."
+  liquidatedNotional: BigInt!
+  collateralSeized: BigInt!
+
+  isAdlPending: Boolean!
+  adlEpoch: BigInt!
+  currentAdlWindow: AdlWindow
+  "When a timed-out ADL window may terminate the pair; null while none is armed."
+  adlTerminationTs: BigInt
+  adlBatchCount: BigInt!
+
+  "The scheduled cutoff, read from the pair whenever a schedule event fires."
+  scheduledTerminationTs: BigInt
+  settlementPrice: BigInt
+  settlementFixedAt: BigInt
+  settlementSource: SettlementSource
+  "The isVaultHealthy verdict (2, 3 or 4) behind an insolvency settlement."
+  insolvencyReason: Int
+  "For a stale-oracle termination, the publish time of the price it settled at."
+  staleOracleLastUpdateTs: BigInt
+  terminatedAt: BigInt
+  termination: PairTermination
+  "Payout ratios (1e18 = 100%) from finalize, or from the latest re-derivation after it."
+  terminalPrincipalRatio: BigInt
+  terminalProfitRatio: BigInt
+
+  orders: [Order!]! @derivedFrom(field: "pair")
+  positions: [Position!]! @derivedFrom(field: "pair")
+  trades: [Trade!]! @derivedFrom(field: "pair")
+  bookLevels: [BookLevel!]! @derivedFrom(field: "pair")
+  candles: [Candle!]! @derivedFrom(field: "pair")
+  priceUpdates: [PriceUpdate!]! @derivedFrom(field: "pair")
+  insuranceProviders: [InsuranceProvider!]! @derivedFrom(field: "pair")
+  liquidations: [Liquidation!]! @derivedFrom(field: "pair")
+  adlWindows: [AdlWindow!]! @derivedFrom(field: "pair")
+  terminationProposals: [TerminationProposal!]! @derivedFrom(field: "pair")
+  insurerProposals: [InsurerProposal!]! @derivedFrom(field: "pair")
+  dayData: [PairDayData!]! @derivedFrom(field: "pair")
+}
+
+type PriceUpdate @entity(immutable: true) {
+  id: Bytes!
+  pair: Pair!
+  price: BigInt!
+  publishTs: BigInt!
+  fundingIndex: BigInt!
+  "Change in the funding index since the previous stored price."
+  fundingIndexDelta: BigInt!
+  "Publish-time gap since the previous stored price; 0 for the first."
+  secondsSincePrevious: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+# ---------------------------------------------------------------------------------------------
+# Orders and the book
+# ---------------------------------------------------------------------------------------------
+
+type Order @entity(immutable: false) {
+  "\"<pair address>-<order ID>\""
+  id: ID!
+  pair: Pair!
+  orderId: BigInt!
+  owner: Account!
+  orderType: OrderType!
+  isLong: Boolean!
+  isPostOnly: Boolean!
+  timeInForce: TimeInForce!
+  "Zero address when the order carries no integrator."
+  integrator: Bytes!
+  "The size the latest order event reported. Created reports a TakeProfit or StopLoss at the size its owner set; each Triggered reports it capped at the position it closes."
+  size: BigInt!
+  filledSize: BigInt!
+  "Size still open; 0 once the order is filled or canceled."
+  remaining: BigInt!
+  triggerPrice: BigInt!
+  limitPrice: BigInt!
+  maxSlippageBp: BigInt!
+  expiryBlock: BigInt!
+  "Queue position within the price level: the ID at creation, a later counter value after an amendment that requeues it or the arming of a StopLimit."
+  prioritySeq: BigInt!
+  status: OrderStatus!
+  inBook: Boolean!
+  cancelReason: CancelReason!
+  createdBlock: BigInt!
+  createdTimestamp: BigInt!
+  createdTx: Bytes!
+  triggerCount: Int!
+  lastTriggeredTimestamp: BigInt
+  canceledBlock: BigInt
+  canceledTimestamp: BigInt
+  filledBlock: BigInt
+  filledTimestamp: BigInt
+  updatedTimestamp: BigInt!
+  amendCount: Int!
+  fillCount: Int!
+  "Keeper bounty escrowed from the owner at creation."
+  bountyEscrowed: BigInt!
+  "Bounty still held against the order."
+  bountyHeld: BigInt!
+  bountyPaidToKeepers: BigInt!
+  bountyRefunded: BigInt!
+  makerTrades: [Trade!]! @derivedFrom(field: "makerOrder")
+  takerTrades: [Trade!]! @derivedFrom(field: "takerOrder")
+  events: [OrderEvent!]! @derivedFrom(field: "order")
+}
+
+"One order lifecycle event: an OrderUpdated, OrderAmended or OrderAmendSkipped log."
+type OrderEvent @entity(immutable: true) {
+  id: Bytes!
+  order: Order!
+  pair: Pair!
+  owner: Account!
+  action: OrderEventAction!
+  cancelReason: CancelReason!
+  amendSkipReason: AmendSkipReason
+  size: BigInt!
+  filledSize: BigInt!
+  limitPrice: BigInt!
+  triggerPrice: BigInt!
+  prioritySeq: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+  logIndex: BigInt!
+}
+
+"Resting size at one price on one side of the book. Removed when its last order leaves. Counts resting orders whose expiry block has passed until a transaction removes them."
+type BookLevel @entity(immutable: false) {
+  "\"<pair>-bid-<price>\" or \"<pair>-ask-<price>\""
+  id: ID!
+  pair: Pair!
+  isBid: Boolean!
+  price: BigInt!
+  size: BigInt!
+  orderCount: Int!
+}
+
+type TriggerBountyRelease @entity(immutable: true) {
+  id: Bytes!
+  order: Order!
+  pair: Pair!
+  recipient: Account!
+  amount: BigInt!
+  "True when the bounty went to an executor rather than back to the order's owner."
+  toKeeper: Boolean!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+# ---------------------------------------------------------------------------------------------
+# Trades and market data
+# ---------------------------------------------------------------------------------------------
+
+"One fill. A vault fill names the pair itself as taker and has no taker order."
+type Trade @entity(immutable: true) {
+  id: Bytes!
+  pair: Pair!
+  maker: Account!
+  "The taker address: the pair's own address for a vault fill."
+  taker: Bytes!
+  takerAccount: Account
+  makerOrder: Order!
+  takerOrder: Order
+  isVaultFill: Boolean!
+  takerIsLong: Boolean!
+  size: BigInt!
+  "The maker's limit price."
+  price: BigInt!
+  notional: BigInt!
+  "Fee charged to the maker for this fill, integrator and insurance legs together."
+  makerFee: BigInt!
+  takerFee: BigInt!
+  makerRemaining: BigInt!
+  takerRemaining: BigInt!
+  makerIntegrator: Bytes!
+  takerIntegrator: Bytes!
+  "The transaction sender, which for a vault fill is the keeper that ran the unload."
+  txFrom: Bytes!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+  logIndex: BigInt!
+}
+
+"OHLCV over fills. Periods without fills have no candle; carry the previous close forward."
+type Candle @entity(immutable: false) {
+  "\"<pair>-<interval seconds>-<period start>\""
+  id: ID!
+  pair: Pair!
+  "Interval length in seconds: 60, 300, 900, 3600, 14400 or 86400."
+  interval: Int!
+  periodStart: BigInt!
+  open: BigInt!
+  high: BigInt!
+  low: BigInt!
+  close: BigInt!
+  volumeSize: BigInt!
+  volumeNotional: BigInt!
+  tradeCount: Int!
+}
+
+type PairDayData @entity(immutable: false) {
+  "\"<pair>-<day index>\""
+  id: ID!
+  pair: Pair!
+  "Start of the UTC day."
+  date: BigInt!
+  volumeSize: BigInt!
+  volumeNotional: BigInt!
+  tradeCount: Int!
+  makerFees: BigInt!
+  takerFees: BigInt!
+  open: BigInt
+  high: BigInt
+  low: BigInt
+  close: BigInt
+  liquidationCount: Int!
+  liquidatedNotional: BigInt!
+  "Open interest and funding index as of the day's last update."
+  openInterestLong: BigInt!
+  openInterestShort: BigInt!
+  fundingIndex: BigInt!
+  insuranceDeposited: BigInt!
+  insuranceWithdrawn: BigInt!
+}
+
+type ProtocolDayData @entity(immutable: false) {
+  "\"<day index>\""
+  id: ID!
+  date: BigInt!
+  volumeNotional: BigInt!
+  tradeCount: Int!
+  makerFees: BigInt!
+  takerFees: BigInt!
+  liquidationCount: Int!
+  "Accounts that traded on either side during the day."
+  uniqueTraders: Int!
+}
+
+type AccountDayData @entity(immutable: false) {
+  "\"<account>-<day index>\""
+  id: ID!
+  account: Account!
+  date: BigInt!
+  makerVolumeNotional: BigInt!
+  takerVolumeNotional: BigInt!
+  tradeCount: Int!
+  feesPaid: BigInt!
+  realizedPnl: BigInt!
+}
+
+# ---------------------------------------------------------------------------------------------
+# Positions and collateral
+# ---------------------------------------------------------------------------------------------
+
+type Position @entity(immutable: false) {
+  "\"<pair>-<account>\""
+  id: ID!
+  pair: Pair!
+  account: Account!
+  isLong: Boolean!
+  size: BigInt!
+  "Entry basis of the open size."
+  entryValue: BigInt!
+  "entryValue / size; 0 when flat."
+  entryPrice: BigInt!
+  collateral: BigInt!
+  entryFundingIndex: BigInt!
+  "The pair funding index the latest position event carried."
+  fundingIndexAtUpdate: BigInt!
+  "Margin rates the latest position event reported, kept when a terminal settlement reports none."
+  imrBp: BigInt!
+  mmrBp: BigInt!
+  isOpen: Boolean!
+  takeProfitOrder: Order
+  stopLossOrder: Order
+  "Price PnL realized by fills, plus ADL credits."
+  realizedPnl: BigInt!
+  feesPaid: BigInt!
+  "Fills on either side, and the size and notional they traded."
+  tradeCount: Int!
+  volumeSize: BigInt!
+  volumeNotional: BigInt!
+  collateralDeposited: BigInt!
+  collateralWithdrawn: BigInt!
+  liquidationCount: Int!
+  adlCount: Int!
+  "When the position last went from flat to open."
+  openedAtTimestamp: BigInt
+  "When the position last went flat."
+  closedAtTimestamp: BigInt
+  updatedAtBlock: BigInt!
+  updatedAtTimestamp: BigInt!
+  snapshots: [PositionSnapshot!]! @derivedFrom(field: "position")
+  changes: [PositionChange!]! @derivedFrom(field: "position")
+}
+
+"The full position state a PositionBucketUpdated log reported."
+type PositionSnapshot @entity(immutable: true) {
+  id: Bytes!
+  position: Position!
+  pair: Pair!
+  account: Account!
+  isLong: Boolean!
+  size: BigInt!
+  entryValue: BigInt!
+  collateral: BigInt!
+  entryFundingIndex: BigInt!
+  globalFundingIndex: BigInt!
+  "0 when the event reported no margin rates (terminal settlement)."
+  imrBp: BigInt!
+  mmrBp: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+  logIndex: BigInt!
+}
+
+"A trade's effect on one position: the maker's per fill, the taker's once per order walk at the walk's volume-weighted price."
+type PositionChange @entity(immutable: true) {
+  id: Bytes!
+  position: Position!
+  pair: Pair!
+  account: Account!
+  "The position's side after the change."
+  isLong: Boolean!
+  "The new size less the old, both unsigned. A fill that flips the side therefore reports less than the size it traded; Trade carries the traded size."
+  sizeDelta: BigInt!
+  newSize: BigInt!
+  newEntryValue: BigInt!
+  newCollateral: BigInt!
+  executionPrice: BigInt!
+  fee: BigInt!
+  "Price PnL of the size closed."
+  realizedPnl: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+  logIndex: BigInt!
+}
+
+type CollateralTransfer @entity(immutable: true) {
+  id: Bytes!
+  pair: Pair!
+  account: Account!
+  isDeposit: Boolean!
+  amount: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+# ---------------------------------------------------------------------------------------------
+# Fees, bounties and relaying
+# ---------------------------------------------------------------------------------------------
+
+"A recipient's claimable balance on one pair."
+type FeeBalance @entity(immutable: false) {
+  "\"<pair>-<recipient>\""
+  id: ID!
+  pair: Pair!
+  recipient: Account!
+  accrued: BigInt!
+  claimed: BigInt!
+  claimable: BigInt!
+}
+
+type FeeAccrual @entity(immutable: true) {
+  id: Bytes!
+  pair: Pair!
+  recipient: Account!
+  amount: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type FeeClaim @entity(immutable: true) {
+  id: Bytes!
+  pair: Pair!
+  recipient: Account!
+  amount: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type MetaTransaction @entity(immutable: true) {
+  id: Bytes!
+  pair: Pair!
+  user: Account!
+  relayer: Account!
+  "The EIP-712 typehash of the relayed action."
+  functionId: Bytes!
+  nonce: BigInt!
+  relayerFee: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+"An ERC-2612 permit the pair tried and could not execute; the call went on with the existing allowance."
+type PermitFailure @entity(immutable: true) {
+  id: Bytes!
+  pair: Pair!
+  owner: Bytes!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+# ---------------------------------------------------------------------------------------------
+# Liquidation and ADL
+# ---------------------------------------------------------------------------------------------
+
+type Liquidation @entity(immutable: true) {
+  id: Bytes!
+  pair: Pair!
+  account: Account!
+  liquidator: Account!
+  size: BigInt!
+  isLong: Boolean!
+  bankruptcyPrice: BigInt!
+  "The price the liquidation ran at."
+  price: BigInt!
+  notional: BigInt!
+  collateralSeized: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+"One ADL window, from the AdlTriggered that opened it to AdlResolved or the pair's termination. The pair's ADL epoch advances only when a window opens, so the epoch names the window."
+type AdlWindow @entity(immutable: false) {
+  "\"<pair>-<epoch>\""
+  id: ID!
+  pair: Pair!
+  epoch: BigInt!
+  openedAt: BigInt!
+  "Price and funding index the window opened at. Informational only: each batch ranks its winners at the price it resolves."
+  openedPrice: BigInt!
+  openedFundingIndex: BigInt!
+  terminationTs: BigInt
+  resolvedAt: BigInt
+  "True when the pair terminated with the window still pending."
+  endedByTermination: Boolean!
+  batchCount: Int!
+  batches: [AdlBatch!]! @derivedFrom(field: "window")
+}
+
+"One executeAdl call. A leg can run on each bucket: the long bucket closes against short winners and the short bucket against long winners. Each batch then ends with a netting step, bucket against bucket."
+type AdlBatch @entity(immutable: true) {
+  id: Bytes!
+  pair: Pair!
+  window: AdlWindow
+  adlId: BigInt!
+  submitter: Account!
+  "Size closed off the long bucket, against short winners."
+  longBucketClosed: BigInt!
+  "The long leg's settlement price; 0 when that leg did not run."
+  longBucketSettlementPrice: BigInt!
+  "Size closed off the short bucket, against long winners."
+  shortBucketClosed: BigInt!
+  "The short leg's settlement price; 0 when that leg did not run."
+  shortBucketSettlementPrice: BigInt!
+  "Overlap netted bucket against bucket at the end of the batch."
+  netted: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  "Join AdlFill on transactionHash for the winners this batch closed."
+  transactionHash: Bytes!
+}
+
+"One winner an ADL batch closed, fully or in part."
+type AdlFill @entity(immutable: true) {
+  id: Bytes!
+  pair: Pair!
+  account: Account!
+  isLong: Boolean!
+  closedSize: BigInt!
+  "Amount credited to the winner's collateral: PnL at the settlement price less withheldFunding."
+  credit: BigInt!
+  remainingCollateral: BigInt!
+  adlScore: BigInt!
+  settlementPrice: BigInt!
+  withheldFunding: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+# ---------------------------------------------------------------------------------------------
+# Insurance
+# ---------------------------------------------------------------------------------------------
+
+type InsuranceProvider @entity(immutable: false) {
+  "\"<pair>-<account>\""
+  id: ID!
+  pair: Pair!
+  account: Account!
+  "Live share balance; a dead-pool reset sets every balance to 0."
+  shares: BigInt!
+  deposited: BigInt!
+  withdrawn: BigInt!
+  depositCount: Int!
+  "Shares named by the request in force; 0 when none."
+  requestedShares: BigInt!
+  requestedAt: BigInt
+  "The first execute call's recorded value of the requested shares, and when the paying call opens."
+  lockedAmount: BigInt
+  claimOpensTs: BigInt
+  levyChargedShares: BigInt!
+  levyReceivedShares: BigInt!
+  createdTimestamp: BigInt!
+  "The provider added before this one. Internal bookkeeping for share-generation resets."
+  previous: InsuranceProvider
+  events: [InsuranceEvent!]! @derivedFrom(field: "provider")
+}
+
+type InsuranceEvent @entity(immutable: true) {
+  id: Bytes!
+  pair: Pair!
+  provider: InsuranceProvider!
+  account: Account!
+  kind: InsuranceEventKind!
+  "USD amount: deposited, locked or paid. 0 for requests and levies."
+  amount: BigInt!
+  shares: BigInt!
+  claimOpensTs: BigInt
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type InsuranceEpochReset @entity(immutable: true) {
+  id: Bytes!
+  pair: Pair!
+  newEpoch: BigInt!
+  providersReset: Int!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type InsuranceCredit @entity(immutable: true) {
+  id: Bytes!
+  pair: Pair!
+  from: Bytes!
+  amount: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+# ---------------------------------------------------------------------------------------------
+# Termination
+# ---------------------------------------------------------------------------------------------
+
+type PairTermination @entity(immutable: true) {
+  id: Bytes!
+  pair: Pair!
+  settlementPrice: BigInt!
+  owedToTraders: BigInt!
+  registeredClaims: BigInt!
+  badDebt: BigInt!
+  estateValue: BigInt!
+  pot: BigInt!
+  principalRatio: BigInt!
+  profitRatio: BigInt!
+  insuranceFundBalanceAfter: BigInt!
+  "False when finalize ran through the escape hatch with positions still open."
+  sweepComplete: Boolean!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+"A post-finalize settlement re-derived the payout ratios on the entitlements still unpaid."
+type TerminalRatioUpdate @entity(immutable: true) {
+  id: Bytes!
+  pair: Pair!
+  unfunded: BigInt!
+  principalRatio: BigInt!
+  profitRatio: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+"A UMA termination claim. Every claim also opens an insurer vote under the same ID."
+type TerminationProposal @entity(immutable: false) {
+  "The UMA assertion ID."
+  id: Bytes!
+  pair: Pair!
+  proposer: Account!
+  category: Int!
+  "The cutoff the claim proposed."
+  lastTradingTs: BigInt!
+  reason: String!
+  status: TerminationProposalStatus!
+  disputed: Boolean!
+  "The cutoff UMA verified, from TerminationProposalAccepted."
+  acceptedCutoffTs: BigInt
+  submittedAt: BigInt!
+  "When the assertion's liveness ends, from which an undisputed claim can be settled."
+  livenessEndsAt: BigInt!
+  resolvedAt: BigInt
+  transactionHash: Bytes!
+}
+
+type InsurerProposal @entity(immutable: false) {
+  "The proposal ID: the UMA assertion ID for a claim-backed vote."
+  id: Bytes!
+  pair: Pair!
+  proposer: Account!
+  cutoffTs: BigInt!
+  windowOpenTs: BigInt!
+  claimBacked: Boolean!
+  snapshotTotalShares: BigInt
+  snapshotShareEpoch: BigInt
+  yesShares: BigInt!
+  status: InsurerProposalStatus!
+  "From InsurerTerminationFailed: whether the vote reached its threshold anyway."
+  thresholdMet: Boolean
+  "1 TRUE, 2 FALSE, 3 UNJUDGED, from InsurerTerminationOutcome."
+  outcome: Int
+  costed: Boolean
+  levyBp: Int
+  bondRefundFailed: Boolean!
+  createdAt: BigInt!
+  resolvedAt: BigInt
+  transactionHash: Bytes!
+  votes: [InsurerVote!]! @derivedFrom(field: "proposal")
+  levies: [InsurerLevy!]! @derivedFrom(field: "proposal")
+}
+
+type InsurerVote @entity(immutable: true) {
+  id: Bytes!
+  proposal: InsurerProposal!
+  pair: Pair!
+  voter: Account!
+  amount: BigInt!
+  totalYesShares: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type InsurerLevy @entity(immutable: true) {
+  id: Bytes!
+  proposal: InsurerProposal!
+  pair: Pair!
+  voter: Account!
+  votedShares: BigInt!
+  levyShares: BigInt!
+  "Zero address when the shares stay locked in the fund."
+  recipient: Bytes!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+# ---------------------------------------------------------------------------------------------
+# Listings and governance
+# ---------------------------------------------------------------------------------------------
+
+type ListingProposal @entity(immutable: false) {
+  "The UMA assertion ID."
+  id: Bytes!
+  pairId: Bytes!
+  deployer: Account!
+  baseFeedId: Bytes!
+  description: String!
+  seedAmount: BigInt!
+  status: ListingStatus!
+  disputed: Boolean!
+  proposedAt: BigInt!
+  livenessEndsAt: BigInt!
+  resolvedAt: BigInt
+  pair: Pair
+  "Seed credited back to the deployer (USDC, 6 decimals)."
+  seedRefundUsdc: BigInt
+  transactionHash: Bytes!
+}
+
+"Maps a pair ID to the listing proposal that holds it. Internal bookkeeping."
+type ListingLookup @entity(immutable: false) {
+  "The bytes32 pair ID."
+  id: Bytes!
+  listing: ListingProposal!
+}
+
+type IdentifierUpgradeProposal @entity(immutable: false) {
+  "The UMA assertion ID."
+  id: Bytes!
+  proposer: Account!
+  newIdentifier: Bytes!
+  status: IdentifierUpgradeStatus!
+  disputed: Boolean!
+  proposedAt: BigInt!
+  livenessEndsAt: BigInt!
+  "When a queued upgrade may activate."
+  effectiveTs: BigInt
+  oldIdentifier: Bytes
+  resolvedAt: BigInt
+  transactionHash: Bytes!
+}

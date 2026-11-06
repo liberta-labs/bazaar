@@ -1,0 +1,260 @@
+specVersion: 1.3.0
+description: Bazaar perpetual futures order books, positions, liquidations,
+  insurance and termination
+repository: https://github.com/liberta-labs/bazaar
+schema:
+  file: ./schema.graphql
+dataSources:
+  - kind: ethereum/contract
+    name: BazaarFactory
+    network: arbitrum-sepolia
+    source:
+      abi: BazaarFactory
+      address: "0x0000000000000000000000000000000000000000"
+      startBlock: 0
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - Protocol
+        - Pair
+        - Account
+        - ListingProposal
+        - ListingLookup
+        - IdentifierUpgradeProposal
+        - InsuranceProvider
+      abis:
+        - name: BazaarFactory
+          file: ../abi/BazaarFactory.json
+      eventHandlers:
+        - event: PairDeployed(indexed bytes32,indexed address,indexed
+            address,bytes32,bool,uint256,string)
+          handler: handlePairDeployed
+        - event: PairDeploymentProposalDisputed(indexed bytes32)
+          handler: handlePairDeploymentProposalDisputed
+        - event: PairDeploymentProposalExpired(indexed bytes32,indexed address)
+          handler: handlePairDeploymentProposalExpired
+        - event: PairDeploymentProposalResolved(indexed bytes32,bool,bool)
+          handler: handlePairDeploymentProposalResolved
+        - event: PairDeploymentProposed(indexed bytes32,indexed bytes32,indexed
+            address,bytes32,string,uint256)
+          handler: handlePairDeploymentProposed
+        - event: SeedRefundClaimed(indexed address,uint256)
+          handler: handleSeedRefundClaimed
+        - event: SeedRefundCredited(indexed bytes32,indexed address,uint256)
+          handler: handleSeedRefundCredited
+        - event: UmaIdentifierUpgradeCanceled(indexed bytes32,bytes32)
+          handler: handleUmaIdentifierUpgradeCanceled
+        - event: UmaIdentifierUpgraded(indexed bytes32,bytes32,bytes32)
+          handler: handleUmaIdentifierUpgraded
+        - event: UmaIdentifierUpgradeDisputed(indexed bytes32)
+          handler: handleUmaIdentifierUpgradeDisputed
+        - event: UmaIdentifierUpgradeExpired(indexed bytes32,indexed address)
+          handler: handleUmaIdentifierUpgradeExpired
+        - event: UmaIdentifierUpgradeProposed(indexed bytes32,indexed address,bytes32)
+          handler: handleUmaIdentifierUpgradeProposed
+        - event: UmaIdentifierUpgradeQueued(indexed bytes32,bytes32,uint256)
+          handler: handleUmaIdentifierUpgradeQueued
+      file: ./src/factory.ts
+  - kind: ethereum/contract
+    name: BazaarPairTerminator
+    network: arbitrum-sepolia
+    source:
+      abi: BazaarPairTerminator
+      address: "0x0000000000000000000000000000000000000000"
+      startBlock: 0
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - Pair
+        - TerminationProposal
+        - InsurerProposal
+        - InsurerVote
+        - InsurerLevy
+        - InsuranceProvider
+        - InsuranceEvent
+      abis:
+        - name: BazaarPairTerminator
+          file: ../abi/BazaarPairTerminator.json
+        - name: BazaarPair
+          file: ../abi/BazaarPair.json
+      eventHandlers:
+        - event: InsurerLevyCharged(indexed address,indexed bytes32,indexed
+            address,uint256,uint256,address)
+          handler: handleInsurerLevyCharged
+        - event: InsurerTerminationBondRefundFailed(indexed address,indexed
+            bytes32,address,uint256)
+          handler: handleInsurerTerminationBondRefundFailed
+        - event: InsurerTerminationFailed(indexed address,indexed
+            bytes32,uint256,uint256,uint256,bool)
+          handler: handleInsurerTerminationFailed
+        - event: InsurerTerminationOutcome(indexed address,indexed
+            bytes32,uint8,bool,uint16)
+          handler: handleInsurerTerminationOutcome
+        - event: InsurerTerminationPreempted(indexed address,indexed bytes32)
+          handler: handleInsurerTerminationPreempted
+        - event: InsurerTerminationProposed(indexed address,indexed bytes32,indexed
+            address,uint256,uint256,bool)
+          handler: handleInsurerTerminationProposed
+        - event: InsurerTerminationRejected(indexed address,indexed bytes32)
+          handler: handleInsurerTerminationRejected
+        - event: InsurerTerminationScheduled(indexed address,indexed
+            bytes32,uint256,uint256,uint256)
+          handler: handleInsurerTerminationScheduled
+        - event: InsurerTerminationSnapshot(indexed address,indexed
+            bytes32,uint256,uint64)
+          handler: handleInsurerTerminationSnapshot
+        - event: InsurerTerminationVoided(indexed address,indexed bytes32)
+          handler: handleInsurerTerminationVoided
+        - event: InsurerTerminationVoted(indexed address,indexed bytes32,indexed
+            address,uint256,uint256)
+          handler: handleInsurerTerminationVoted
+        - event: SettlementPriceFixed(indexed address,uint256)
+          handler: handleSettlementPriceFixed
+        - event: StalePairTerminated(indexed address,uint256,uint256)
+          handler: handleStalePairTerminated
+        - event: TerminationProposalAccepted(indexed address,indexed bytes32,uint256)
+          handler: handleTerminationProposalAccepted
+        - event: TerminationProposalDisputed(indexed bytes32)
+          handler: handleTerminationProposalDisputed
+        - event: TerminationProposalRejected(indexed address,indexed bytes32)
+          handler: handleTerminationProposalRejected
+        - event: TerminationProposalSubmitted(indexed address,indexed bytes32,indexed
+            address,uint8,uint256,string)
+          handler: handleTerminationProposalSubmitted
+        - event: TerminationProposalSuperseded(indexed address,indexed bytes32)
+          handler: handleTerminationProposalSuperseded
+        - event: TerminationScheduleRefused(indexed address,indexed bytes32)
+          handler: handleTerminationScheduleRefused
+      file: ./src/terminator.ts
+  - kind: ethereum/contract
+    name: BazaarOracle
+    network: arbitrum-sepolia
+    source:
+      abi: BazaarOracle
+      address: "0x0000000000000000000000000000000000000000"
+      startBlock: 0
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - CompositeFeed
+      abis:
+        - name: BazaarOracle
+          file: ../abi/BazaarOracle.json
+      eventHandlers:
+        - event: CompositeFeedRegistered(indexed bytes32,indexed bytes32,indexed
+            bytes32,bool)
+          handler: handleCompositeFeedRegistered
+      file: ./src/oracle.ts
+templates:
+  - kind: ethereum/contract
+    name: BazaarPair
+    network: arbitrum-sepolia
+    source:
+      abi: BazaarPair
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - Pair
+        - Order
+        - OrderEvent
+        - BookLevel
+        - Trade
+        - Candle
+        - Position
+        - PositionSnapshot
+        - PositionChange
+        - Liquidation
+        - AdlWindow
+        - AdlBatch
+        - AdlFill
+        - InsuranceProvider
+        - InsuranceEvent
+        - FeeBalance
+        - PriceUpdate
+        - PairTermination
+      abis:
+        - name: BazaarPair
+          file: ../abi/BazaarPair.json
+      eventHandlers:
+        - event: AdlExecuted(indexed bytes32,indexed uint256,indexed
+            address,uint256,uint256,uint256,uint256,uint256,uint256)
+          handler: handleAdlExecuted
+        - event: AdlResolved(indexed bytes32,indexed uint64)
+          handler: handleAdlResolved
+        - event: AdlTerminationArmed(indexed bytes32,uint256)
+          handler: handleAdlTerminationArmed
+        - event: AdlTriggered(indexed bytes32,indexed uint64,uint256,int256)
+          handler: handleAdlTriggered
+        - event: CollateralDeposited(indexed bytes32,indexed address,uint256)
+          handler: handleCollateralDeposited
+        - event: CollateralWithdrawn(indexed bytes32,indexed address,uint256)
+          handler: handleCollateralWithdrawn
+        - event: FeeAccrued(indexed bytes32,indexed address,uint256)
+          handler: handleFeeAccrued
+        - event: FeesClaimed(indexed bytes32,indexed address,uint256)
+          handler: handleFeesClaimed
+        - event: InsolvencySettlementFixed(indexed bytes32,uint256,uint8)
+          handler: handleInsolvencySettlementFixed
+        - event: InsuranceCredited(indexed bytes32,indexed address,uint256)
+          handler: handleInsuranceCredited
+        - event: InsuranceDeposited(indexed bytes32,indexed address,uint256,uint256)
+          handler: handleInsuranceDeposited
+        - event: InsuranceShareEpochBumped(uint256)
+          handler: handleInsuranceShareEpochBumped
+        - event: InsuranceWithdrawalExecuted(indexed bytes32,indexed
+            address,uint256,uint256)
+          handler: handleInsuranceWithdrawalExecuted
+        - event: InsuranceWithdrawalLocked(indexed bytes32,indexed
+            address,uint256,uint256,uint256)
+          handler: handleInsuranceWithdrawalLocked
+        - event: InsuranceWithdrawalRequested(indexed bytes32,indexed address,uint256)
+          handler: handleInsuranceWithdrawalRequested
+        - event: MetaTransactionExecuted(indexed bytes32,indexed address,indexed
+            address,bytes32,uint256,uint256)
+          handler: handleMetaTransactionExecuted
+        - event: NewPriceUpdateAdded(indexed bytes32,indexed uint256,uint256,int32,int256)
+          handler: handleNewPriceUpdateAdded
+        - event: OrderAmended(indexed bytes32,indexed uint256,indexed
+            address,uint256,uint256,uint256)
+          handler: handleOrderAmended
+        - event: OrderAmendSkipped(indexed bytes32,indexed uint256,indexed address,uint8)
+          handler: handleOrderAmendSkipped
+        - event: OrderUpdated(indexed bytes32,indexed uint256,indexed
+            address,(uint8,uint8,bool,bool,uint256,uint256,uint256,uint256,uint256,uint64,uint64,uint64,uint64,uint8,address,uint8))
+          handler: handleOrderUpdated
+        - event: PairTerminated(indexed
+            bytes32,uint256,uint256,uint256,uint256,int256,uint256,uint256,uint256,uint256,bool,uint256)
+          handler: handlePairTerminated
+        - event: PermitExecutionFailed(indexed address)
+          handler: handlePermitExecutionFailed
+        - event: PositionBucketUpdated(indexed bytes32,indexed
+            address,bool,uint256,uint256,uint256,int256,int256,uint256,uint256)
+          handler: handlePositionBucketUpdated
+        - event: PositionLiquidated(indexed bytes32,indexed address,indexed
+            address,uint256,bool,uint256,uint256,uint256,uint256)
+          handler: handlePositionLiquidated
+        - event: PositionModified(indexed bytes32,indexed
+            address,bool,int256,uint256,uint256,uint256,uint256,uint256,int256)
+          handler: handlePositionModified
+        - event: TerminalRatiosRefrozen(indexed bytes32,uint256,uint256,uint256)
+          handler: handleTerminalRatiosRefrozen
+        - event: Trade(indexed bytes32,indexed address,indexed
+            address,uint256,uint256,bool,uint256,uint256,uint256,uint256,uint256,uint256)
+          handler: handleTrade
+        - event: TriggerBountyEscrowed(indexed bytes32,indexed uint256,uint256)
+          handler: handleTriggerBountyEscrowed
+        - event: TriggerBountyReleased(indexed bytes32,indexed uint256,indexed
+            address,uint256)
+          handler: handleTriggerBountyReleased
+        - event: UserAdld(indexed bytes32,indexed
+            address,bool,uint256,int256,uint256,uint256,uint256,uint256)
+          handler: handleUserAdld
+      file: ./src/pair.ts

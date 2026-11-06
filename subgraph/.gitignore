@@ -1,0 +1,5 @@
+generated/
+build/
+node_modules/
+tests/.bin/
+tests/.latest.json

@@ -1,0 +1,23 @@
+{
+  "name": "bazaar-subgraph",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "description": "Subgraph indexing Bazaar's factory, terminator, oracle and every pair for front ends, keepers and analytics",
+  "scripts": {
+    "codegen": "graph codegen",
+    "build": "graph build",
+    "build:local": "graph build --network anvil",
+    "build:sepolia": "graph build --network arbitrum-sepolia",
+    "build:arbitrum": "graph build --network arbitrum-one",
+    "test": "graph test",
+    "deploy:local": "graph create --node http://localhost:8020/ bazaar && graph deploy --node http://localhost:8020/ --ipfs http://localhost:5001 --network anvil bazaar",
+    "deploy:sepolia": "graph deploy bazaar-sepolia --network arbitrum-sepolia",
+    "deploy:arbitrum": "graph deploy bazaar --network arbitrum-one"
+  },
+  "devDependencies": {
+    "@graphprotocol/graph-cli": "0.98.1",
+    "@graphprotocol/graph-ts": "0.38.2",
+    "matchstick-as": "0.6.0"
+  }
+}

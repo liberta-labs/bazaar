@@ -1,0 +1,17 @@
+{
+  "anvil": {
+    "BazaarFactory": { "address": "0x0000000000000000000000000000000000000000", "startBlock": 0 },
+    "BazaarPairTerminator": { "address": "0x0000000000000000000000000000000000000000", "startBlock": 0 },
+    "BazaarOracle": { "address": "0x0000000000000000000000000000000000000000", "startBlock": 0 }
+  },
+  "arbitrum-sepolia": {
+    "BazaarFactory": { "address": "0x0000000000000000000000000000000000000000", "startBlock": 0 },
+    "BazaarPairTerminator": { "address": "0x0000000000000000000000000000000000000000", "startBlock": 0 },
+    "BazaarOracle": { "address": "0x0000000000000000000000000000000000000000", "startBlock": 0 }
+  },
+  "arbitrum-one": {
+    "BazaarFactory": { "address": "0x0000000000000000000000000000000000000000", "startBlock": 0 },
+    "BazaarPairTerminator": { "address": "0x0000000000000000000000000000000000000000", "startBlock": 0 },
+    "BazaarOracle": { "address": "0x0000000000000000000000000000000000000000", "startBlock": 0 }
+  }
+}
