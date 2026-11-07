@@ -38,8 +38,8 @@ the disagreement as a finding.
 | Item | Value |
 |---|---|
 | Repository | https://github.com/liberta-labs/bazaar |
-| Tag | `v1.0.0-rc4` |
-| Commit | `60cbbde2654f966a1531720f61cecb874a849d1d` |
+| Tag | `v1.0.0-rc5` |
+| Commit | `158668cc3ace114b31fb4f5b409be56225ac8d6a` |
 | Target chain | Arbitrum One (chain id 42161) |
 | Compiler | solc 0.8.34 |
 | Optimizer | on, `optimizer_runs = 150` for every contract |
@@ -184,7 +184,7 @@ git clone --recursive https://github.com/liberta-labs/bazaar.git bazaar
 ```
 
 ```bash
-git checkout v1.0.0-rc4
+git checkout v1.0.0-rc5
 ```
 
 ```bash
@@ -268,7 +268,7 @@ UMA's oracle (listed at the end).
 | ADL executor | `executeAdl(longBucketWinners, shortBucketWinners, priceUpdate)` (up to `MAX_ADL_WINNERS_PER_BATCH`, 25, per list; any order, ranked and sorted on-chain) | For every unit a leg closes, max(2 bp of its notional at the mark, `ADL_EXECUTOR_REWARD_BP` (0.1%) of the bad debt the close averts); 2 bp at the mark of the overlap the batch's closing netting retires | Capped at free capital; refuses the stale fallback |
 | Expiry janitor | `sweepExpired` | Nothing | |
 | Terminal settler | `liquidate` once the settlement price is fixed (settlement mode, through `CollateralLib.settleTerminalPositions`), then `finalizeTermination` | `TERMINAL_SETTLEMENT_TIP` ($0.05) per position settled for someone else, from that position's collateral, topped up from insurance for positions of at least $5 | `finalizeTermination` runs once open interest is zero, or after `TERMINAL_SETTLEMENT_ESCAPE` (14 days) |
-| Insurance LP | `depositToInsurance`, `requestInsuranceWithdrawal`, `executeInsuranceWithdrawal` | Taker insurance fees, forfeited bonds, inventory gains | `INSURANCE_WITHDRAWAL_COOLDOWN` (13 days), `INSURANCE_WITHDRAWAL_WINDOW_CONTINUOUS` / `INSURANCE_WITHDRAWAL_WINDOW_SESSION` (2 / 4 days, by the pair's trading calendar), forward-priced claim (`INSURANCE_WITHDRAWAL_CLAIM_DELAY`, `INSURANCE_WITHDRAWAL_REOPEN_CLAIM_DELAY`), per-period rate limits, headroom while inventory is held; junior to every trader at termination |
+| Insurance LP | `depositToInsurance`, `requestInsuranceWithdrawal`, `executeInsuranceWithdrawal` | Maker and taker insurance fees, forfeited bonds, inventory gains | `INSURANCE_WITHDRAWAL_COOLDOWN` (13 days), `INSURANCE_WITHDRAWAL_WINDOW_CONTINUOUS` / `INSURANCE_WITHDRAWAL_WINDOW_SESSION` (2 / 4 days, by the pair's trading calendar), forward-priced claim (`INSURANCE_WITHDRAWAL_CLAIM_DELAY`, `INSURANCE_WITHDRAWAL_REOPEN_CLAIM_DELAY`), per-period rate limits, headroom while inventory is held; junior to every trader at termination |
 | Insurer voter | `BazaarPairTerminator.proposeInsurerTermination` (bond `TERMINATION_PROPOSAL_BOND`, $1,000; shares older than `INSURER_SHARE_MATURITY_PERIOD`, 4 days), `voteForInsurerTermination`, `executeInsurerTermination` (anyone) | Nothing | Passes at `INSURER_TERMINATION_THRESHOLD_BP` (60%) of the snapshot; cutoff between `INSURER_TERMINATION_MIN_LEAD` (2 hours) and `INSURER_TERMINATION_MAX_LEAD` (14 days) out; at most `INSURER_MAX_LIVE_VOTES` (8) live votes per voter; a costed outcome locks yes-voters' shares for `INSURER_POST_FIX_LOCK` (13 days) and levies part of them (`INSURER_LEVY_BP`, `INSURER_LEVY_FLOOR_BP`) to the bug-bounty address |
 | Lister | `BazaarFactory.proposePairDeployment`, `settleDeploymentProposal`, `expireStuckDeploymentProposal`, `claimSeedRefund`; `BazaarOracle.registerComposite` (write-once) | Bond returned on approval | At least `MIN_DEPLOYMENT_AMOUNT` ($4,000): a bond of at least `DEPLOYMENT_BOND_USDC` ($1,000) and a seed of at least `MIN_INSURANCE_SEED` ($3,000); `DEPLOYMENT_LIVENESS` (48 hours); one pair and one pending proposal per raw base feed |
 | UMA termination proposer | `BazaarPairTerminator.proposeTermination`, `settleTerminationProposal` | 0.1% of the fund, capped at $100 and at free capital, once per pair, to the first acceptance that schedules it | Bond of at least `TERMINATION_PROPOSAL_BOND` ($1,000); `TERMINATION_PROPOSAL_LIVENESS` (12 hours); `MAX_REASON_LENGTH` |
@@ -912,7 +912,10 @@ Every finding from those rounds is fixed or listed in section 9. The best-effort
 round. The refresh bounty's two floors (section 9, item 37) came after them too and have had no
 separate review. The two-bucket liquidation vault (section 8, item 1) came after them as well and
 has had one focused internal review: what it found is fixed or listed in section 9 (items 16, 19,
-20 and 21). The test suite holds 1,805 test
+20 and 21). The insurance fee rates moved toward takers after them as well: makers pay a flat
+0.25 bp and takers a 0.75–4.25 bp base, the same total per fill at the base rate as before. The fee
+mechanism is unchanged, and the review reports quote the earlier rates (a 0.5 bp maker rate and a
+0.5–4 bp taker base). The test suite holds 1,805 test
 functions in 113 files under `test/unit` and `test/integration` at the time of writing, including
 fuzz tests, fixed zero-sum scenarios and the handler-based invariant suite. **The protocol has not
 had a professional audit.** The internal review reports can be shared with the selected auditor on
