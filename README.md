@@ -1,4 +1,24 @@
-![Bazaar](docs/src/images/bazaar-banner.png)
+<div align="center">
+  <img src="docs/src/images/bazaar-banner.png" alt="Bazaar" width="440">
+
+  <p>
+    <a href="https://docs.bazaar.finance/"><strong>Explore the docs »</strong></a>
+  </p>
+
+  <p>
+    <a href="https://bazaar.finance/">Website</a>
+    ·
+    <a href="https://docs.bazaar.finance/guide/quick-start.html">Quick Start</a>
+    ·
+    <a href="https://docs.bazaar.finance/reference/contracts.html">Contracts</a>
+    ·
+    <a href="https://github.com/liberta-labs/bazaar/issues/new?labels=bug">Report Bug</a>
+    ·
+    <a href="https://github.com/liberta-labs/bazaar/issues/new?labels=enhancement">Request Feature</a>
+    ·
+    <a href="https://github.com/liberta-labs/bazaar/security/advisories/new">Report Vulnerability</a>
+  </p>
+</div>
 
 # Bazaar
 
