@@ -14,7 +14,6 @@
   "author": "",
   "license": "AGPL-3.0-only",
   "dependencies": {
-    "@pythnetwork/pyth-sdk-solidity": "^4.2.0",
-    "solc": "^0.8.30"
+    "@pythnetwork/pyth-sdk-solidity": "^4.2.0"
   }
 }
