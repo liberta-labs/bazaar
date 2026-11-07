@@ -211,8 +211,8 @@ library RiskParamsLib {
 
     // -------------------- Taker insurance fee constants --------------------
     // EBP convention: 100 EBP = 1 bp (EBP_SCALE = 1e6), matching MAKER_INSURANCE_FEE_EBP et al.
-    uint256 internal constant TAKER_INSURANCE_FEE_MIN_EBP = 50; // 0.5 bps at INSURANCE_TARGET_BASE (2%)
-    uint256 internal constant TAKER_INSURANCE_FEE_MAX_EBP = 400; // 4 bps at INSURANCE_TARGET_MAX (10%)
+    uint256 internal constant TAKER_INSURANCE_FEE_MIN_EBP = 75; // 0.75 bps at INSURANCE_TARGET_BASE (2%)
+    uint256 internal constant TAKER_INSURANCE_FEE_MAX_EBP = 425; // 4.25 bps at INSURANCE_TARGET_MAX (10%)
     uint256 internal constant TAKER_INSURANCE_FEE_MULTIPLIER = 49; // f_base × (1 + MULTIPLIER × δ²)
     uint256 internal constant TAKER_INSURANCE_FEE_CAP_EBP = 5_000; // 50 bps hard cap
 

@@ -4,10 +4,11 @@ All trading fees are charged per fill, on notional, deducted from each side's co
 
 | Stream | Maker | Taker |
 |---|---|---|
-| Insurance | 0.5 bp | dynamic — steers the fund to target; see below |
+| Insurance | 0.25 bp | dynamic — steers the fund to target; see below |
 | Integrator | 0.25 bp | 0.25 bp |
 
-- **Dynamic taker insurance fee**: the base rate scales with the fund's [target ratio](insurance.md) — **0.5 bp** at the 2% minimum target, linear to **4 bp** at the 10% maximum. Below target it multiplies up sharply — base × (1 + 49 × shortfall²), hard-capped at **50 bp**. The base rate is a floor: at or above target the fee stays there and never discounts, however overfull the fund is. Risk-reducing size pays the base rate, so closing is never more expensive than opening. Exact curve: `RiskParamsLib.getInsuranceFeeRates`.
+- **Flat maker insurance fee**: resting orders are the depth that liquidated inventory is unloaded into, so the maker rate sits below even the taker's lowest base rate and never moves with the fund. The cost of insuring the book falls on the flow that crosses it.
+- **Dynamic taker insurance fee**: the base rate scales with the fund's [target ratio](insurance.md) — **0.75 bp** at the 2% minimum target, linear to **4.25 bp** at the 10% maximum. Below target it multiplies up sharply — base × (1 + 49 × shortfall²), hard-capped at **50 bp**. The base rate is a floor: at or above target the fee stays there and never discounts, however overfull the fund is. Risk-reducing size pays the base rate, so closing is never more expensive than opening. Exact curve: `RiskParamsLib.getInsuranceFeeRates`.
 - **Integrator fee**: each order carries an optional `integrator` address (frontend/aggregator) that earns its cut on every fill of that order. Referral revenue is protocol-native — see the [integrator guide](../guide/integrators.md).
 - **Bug-bounty tax**: **1% of the insurance and integrator fee streams** is skimmed into the claimable balance of a bug-bounty address fixed at factory deployment — a white-hat budget that accrues automatically from the first fill. The same address receives the insurance shares an [insurer-vote termination](termination.md) levy forfeits, redeemable like any holder's once the pair has settled.
 

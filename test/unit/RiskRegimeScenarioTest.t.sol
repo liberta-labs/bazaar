@@ -103,18 +103,18 @@ contract RiskRegimeScenarioTest is Test {
         (uint256 imr, uint256 target, uint256 fee) = _scenario(BazaarTypes.VARIANCE_EXTREME, 0, 0, 500, true);
         assertEq(target, 450, "target = the 4.5% stress move");
         assertEq(imr, 900, "IMR = 2 x M, no fund-health uplift at 5% coverage");
-        assertEq(fee, 159, "1.59 bp base rate: above target, so no deficit surcharge");
+        assertEq(fee, 184, "1.84 bp base rate: above target, so no deficit surcharge");
     }
 
     /// @notice The same pair genuinely underfunded at 2% coverage still prices the shortfall
-    ///         hard: the deficit surcharge is quadratic, so the rate is 25.63 bp and margin
+    ///         hard: the deficit surcharge is quadratic, so the rate is 29.66 bp and margin
     ///         carries a fund-health uplift. The base rate is only reached once coverage
     ///         actually meets the target.
     function test_scenario_highVolUnderfunded() public {
         (uint256 imr, uint256 target, uint256 fee) = _scenario(BazaarTypes.VARIANCE_EXTREME, 0, 0, 200, true);
         assertEq(target, 450, "same target: it reads risk, not the fund");
         assertEq(imr, 1899, "2 x 450 x the 2.11x fund-health multiplier");
-        assertEq(fee, 2563, "25.63 bp while coverage is 56% short");
+        assertEq(fee, 2966, "29.66 bp while coverage is 56% short");
     }
 
     /// @notice A realized liquidation gap keeps raising margin past the 3% point where a
@@ -130,7 +130,7 @@ contract RiskRegimeScenarioTest is Test {
 
         assertEq(target3, 450, "3% gap: 150 + 300, still inside the 5% fund's coverage");
         assertEq(imr3, 900, "so no fund-health uplift: 2 x 450");
-        assertEq(fee3, 159, "and the taker rate rests on its base");
+        assertEq(fee3, 184, "and the taker rate rests on its base");
 
         assertEq(target5, 650, "5% gap: the target outruns the 5% fund");
         assertEq(imr5, 1899, "2 x 650 x the 1.46x uplift the shortfall now creates");

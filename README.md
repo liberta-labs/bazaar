@@ -14,9 +14,9 @@
     ·
     <a href="https://github.com/liberta-labs/bazaar/issues/new?labels=bug">Report Bug</a>
     ·
-    <a href="https://github.com/liberta-labs/bazaar/issues/new?labels=enhancement">Request Feature</a>
-    ·
     <a href="https://github.com/liberta-labs/bazaar/security/advisories/new">Report Vulnerability</a>
+    ·
+    <a href="https://github.com/liberta-labs/bazaar/issues/new?labels=enhancement">Request Feature</a>
   </p>
 </div>
 

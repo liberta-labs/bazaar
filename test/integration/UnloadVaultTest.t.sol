@@ -878,9 +878,9 @@ contract UnloadVaultTest is IntegrationBase {
     ///         $50,000 mark; the fund holds $1,610, which is the earmark, the $1,000 reserve, that
     ///         $100 and $10 more: healthy by $10, while the walk sets aside the $100 rate on the
     ///         whole inventory, so it takes only fills at or beyond the mark. A 2 BTC bid at the
-    ///         mark fills; the $4.95 of fee it pays the fund is all that moves the cover, to
-    ///         $14.95, and it earns the $20 rate. Paid in full, the reward would leave the 8 BTC's
-    ///         $80 loss $5.05 uncovered and open the auction; capped at $14.95, it takes exactly
+    ///         mark fills; the $2.475 of fee it pays the fund is all that moves the cover, to
+    ///         $12.475, and it earns the $20 rate. Paid in full, the reward would leave the 8 BTC's
+    ///         $80 loss $7.525 uncovered and open the auction; capped at $12.475, it takes exactly
     ///         the cover and the pair ends on the gate's healthy side.
     function test_unload_reward_cappedAtTheCoverLeft_opensNoWindow() public {
         _deposit(carol, 40_000 * BAZAAR_SCALE);
@@ -892,7 +892,7 @@ contract UnloadVaultTest is IntegrationBase {
         assertEq(_unloadVault(), 2 * BTC, "the bid at the mark filled");
 
         uint256 reward = _escrowOwed(seq);
-        assertApproxEqAbs(reward, 14.95e18, 1e16, "the $10 slack and the fill's $4.95 fee, not the $20 rate");
+        assertApproxEqAbs(reward, 12.475e18, 1e16, "the $10 slack and the fill's $2.475 fee, not the $20 rate");
         assertEq(_ledgerArrears(), 0, "nothing owed");
         uint256 lossLeft = 8 * 10 * BAZAAR_SCALE;
         assertEq(

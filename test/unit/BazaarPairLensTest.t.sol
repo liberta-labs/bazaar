@@ -961,9 +961,10 @@ contract BazaarPairLensTest is Test {
         pair.setMarginReqs(1_000, 500, 500); // IMR 10%
         pair.setMark(100 * SCALE); // the synthetic orders sit at the mark: no loss is booked
         pair.setOrderExposure(WINNER, 50 * SCALE, 200 * SCALE); // larger side: $200 short
+        uint256 makerFee = 250 * SCALE * BazaarTypes.MAKER_INSURANCE_FEE_EBP / BazaarTypes.EBP_SCALE;
         assertEq(
             lens.getMaxWithdrawable(address(pair), WINNER, 0),
-            80 * SCALE - 125 * SCALE / 10_000,
+            80 * SCALE - makerFee,
             "collateral less 10% of the larger resting side, less the maker fee on both sides"
         );
     }
@@ -1008,7 +1009,8 @@ contract BazaarPairLensTest is Test {
         pair.setOrderExposure(WINNER, 50 * SCALE, 0); // same-direction resting orders
         // Worst case = $100 position + $50 same-dir orders -> IMR $15 -> slack $5, less the
         // maker fee on the $50 order.
-        assertEq(lens.getMaxWithdrawable(address(pair), WINNER, 100 * SCALE), 5 * SCALE - 25 * SCALE / 10_000);
+        uint256 makerFee = 50 * SCALE * BazaarTypes.MAKER_INSURANCE_FEE_EBP / BazaarTypes.EBP_SCALE;
+        assertEq(lens.getMaxWithdrawable(address(pair), WINNER, 100 * SCALE), 5 * SCALE - makerFee);
     }
 
     function test_getMaxWithdrawable_frozenStates_zero() public {

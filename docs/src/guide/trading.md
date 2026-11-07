@@ -52,7 +52,7 @@ Honest list, in increasing order of severity:
 
 ## Fees you'll pay
 
-Roughly: **a fraction of a basis point per side in a calm, well-capitalized market**. Makers pay a flat 0.5 bp insurance fee; takers pay a dynamic insurance fee — a 0.5–4 bp base that climbs steeply while the market's backstop is thin: an empty fund costs 25 bp on a calm market, and is hard-capped at **50 bp** on the riskiest ones. It settles back to the base once the fund is topped up, and *closing* risk always pays that base rate however deep the shortfall. Orders placed through a frontend may add 0.25 bp per side for its [integrator](integrators.md). Exact table: [Fees](../protocol/fees.md).
+Roughly: **a basis point or less per side in a calm, well-capitalized market**. Makers pay a flat 0.25 bp insurance fee; takers pay a dynamic insurance fee — a 0.75–4.25 bp base that climbs steeply while the market's backstop is thin: an empty fund costs 37.5 bp on a calm market, and is hard-capped at **50 bp** on the riskiest ones. It settles back to the base once the fund is topped up, and *closing* risk always pays that base rate however deep the shortfall. Orders placed through a frontend may add 0.25 bp per side for its [integrator](integrators.md). Exact table: [Fees](../protocol/fees.md).
 
 ## Stocks & FX after hours
 

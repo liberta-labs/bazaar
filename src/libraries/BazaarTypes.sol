@@ -640,8 +640,11 @@ library BazaarTypes {
     // close averts (AdlLib._closeReward).
     uint256 internal constant LIQUIDATION_FEE_EBP = 200;
 
-    // Insurance fees in EBP
-    uint256 internal constant MAKER_INSURANCE_FEE_EBP = 50;
+    // Insurance fees in EBP. The maker's rate is flat and sits below the taker's base rate
+    // (RiskParamsLib.TAKER_INSURANCE_FEE_MIN_EBP): resting depth is what liquidation unloads
+    // sell into, so the insurance cost lands on the flow that crosses the book rather than on
+    // the liquidity the fund relies on to exit inventory.
+    uint256 internal constant MAKER_INSURANCE_FEE_EBP = 25;
 
     // Stale-fallback fill band. Fresh-oracle fills are unbanded: the fill-time margin gates
     // price fresh exposure at the live oracle and charge the fill-vs-mark gap up front, and

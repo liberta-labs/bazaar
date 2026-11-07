@@ -238,7 +238,7 @@ contract PostFillAccountingTest is IntegrationBase {
         uint256 makerFee = fillNotional * BazaarTypes.MAKER_INSURANCE_FEE_EBP / BazaarTypes.EBP_SCALE;
         uint256 carolDebit = cCollBefore - _posCollateral(carol);
         uint256 daveDebit = dCollBefore - _posCollateral(dave);
-        assertEq(carolDebit, makerFee, "maker pays exactly the flat 0.5bp insurance fee");
+        assertEq(carolDebit, makerFee, "maker pays exactly the flat maker insurance rate");
         // The taker's dynamic rate stays within the curve's bounds: at least the base rate
         // (deficit multiplier >= 1x), at most the hard cap.
         assertGe(
@@ -313,7 +313,7 @@ contract PostFillAccountingTest is IntegrationBase {
         assertEq(
             aCollBefore - _posCollateral(alice),
             100 * BAZAAR_SCALE + makerInsFee,
-            "maker debit = realized loss + 0.5bp insurance fee only"
+            "maker debit = realized loss + the maker insurance fee only"
         );
         // Bob (taker) realizes a $100 gain net of the closing-rate insurance fee: at least the
         // base curve's floor, and no more than its ceiling — the drained fund's deficit

@@ -1383,8 +1383,8 @@ contract BazaarPairTest is Test {
         // Deposit $15,000, no position, but place a limit buy order for 1 BTC at $50,000
         // Order notional = 1 * 50,000 = $50,000
         // IMR required = 20% of $50,000 = $10,000, plus the maker fee the fill takes ahead of
-        // its margin test: $50,000 x MAKER_INSURANCE_FEE_EBP / EBP_SCALE = $2.50
-        // Max withdraw = 15,000 - 10,002.50 = $4,997.50
+        // its margin test: $50,000 x MAKER_INSURANCE_FEE_EBP / EBP_SCALE = $1.25
+        // Max withdraw = 15,000 - 10,001.25 = $4,998.75
         _depositCollateral(btcPair, user1, 15_000 * BAZAAR_SCALE);
         _createLimitOrder(user1, USER1_PK, true, POSITION_SIZE, BTC_SPOT_PRICE);
         uint256 fee = 50_000 * BAZAAR_SCALE * BazaarTypes.MAKER_INSURANCE_FEE_EBP / BazaarTypes.EBP_SCALE;

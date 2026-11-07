@@ -46,47 +46,47 @@ contract RiskParamsLibTest is Test {
         h.setOI(1_000_000 * SCALE, 1_000_000 * SCALE); // matched book, $1M OI notional per side at PRICE
     }
 
-    /// @notice Base fee endpoints: 0.5 bp (50 EBP) at the 2% target, 4 bp (400 EBP) at the 10% target.
+    /// @notice Base fee endpoints: 0.75 bp (75 EBP) at the 2% target, 4.25 bp (425 EBP) at the 10% target.
     function test_TakerInsuranceFeeBase_Endpoints() public pure {
-        assertEq(RiskParamsLib.getTakerInsuranceFeeBase(200), 50, "0.5 bp at INSURANCE_TARGET_BASE");
-        assertEq(RiskParamsLib.getTakerInsuranceFeeBase(1_000), 400, "4 bp at INSURANCE_TARGET_MAX");
+        assertEq(RiskParamsLib.getTakerInsuranceFeeBase(200), 75, "0.75 bp at INSURANCE_TARGET_BASE");
+        assertEq(RiskParamsLib.getTakerInsuranceFeeBase(1_000), 425, "4.25 bp at INSURANCE_TARGET_MAX");
         // Linear interpolation midway up the target range
-        assertEq(RiskParamsLib.getTakerInsuranceFeeBase(600), 225, "interpolated base fee");
+        assertEq(RiskParamsLib.getTakerInsuranceFeeBase(600), 250, "interpolated base fee");
     }
 
-    /// @notice Fund exactly at target → base fee, no deficit multiplier: 50 EBP = 0.5 bp.
+    /// @notice Fund exactly at target → base fee, no deficit multiplier: 75 EBP = 0.75 bp.
     function test_TakerInsuranceFee_AtTarget() public {
         h.setInsurance(20_000 * SCALE); // 2% of $1M = the low-vol target
-        assertEq(h.takerFeeEbp(PRICE), 50, "0.5 bp when fund is at target");
+        assertEq(h.takerFeeEbp(PRICE), 75, "0.75 bp when fund is at target");
     }
 
     /// @notice Fund at 2x target → still the base fee. The base rate is a floor: however
     ///         overfull the fund is, new flow pays for the coverage it consumes.
     function test_TakerInsuranceFee_AboveTargetFloorsAtBase() public {
         h.setInsurance(40_000 * SCALE); // 4% vs 2% target
-        assertEq(h.takerFeeEbp(PRICE), 50, "no discount above target");
+        assertEq(h.takerFeeEbp(PRICE), 75, "no discount above target");
     }
 
-    /// @notice 75% deficit → fBase x (1 + 49 x 0.75^2) = 50 x 28.5625 → 1,428 EBP ≈ 14.3 bp.
+    /// @notice 75% deficit → fBase x (1 + 49 x 0.75^2) = 75 x 28.5625 → 2,142 EBP ≈ 21.4 bp.
     function test_TakerInsuranceFee_DeficitMultiplier() public {
         h.setInsurance(5_000 * SCALE); // 0.5% vs 2% target → deficit δ = 0.75
-        assertEq(h.takerFeeEbp(PRICE), 1_428, "quadratic deficit multiplier");
+        assertEq(h.takerFeeEbp(PRICE), 2_142, "quadratic deficit multiplier");
     }
 
     /// @notice Extreme vol on a deeply underfunded fund stays under the cap: a 4.5% target gives
-    ///         fBase = 159 EBP, and at 1% coverage (δ = 0.7777) 159 x (1 + 49 x 0.7777²) =
-    ///         4,871 EBP ≈ 48.7 bp is paid in full. An empty fund at this target reaches the cap
-    ///         (159 x 50 = 7,950 EBP).
+    ///         fBase = 184 EBP, and at 1.25% coverage (δ = 0.7222) 184 x (1 + 49 x 0.7222²) =
+    ///         4,886 EBP ≈ 48.9 bp is paid in full. An empty fund at this target reaches the cap
+    ///         (184 x 50 = 9,200 EBP).
     function test_TakerInsuranceFee_ExtremeVolStaysUnderCap() public {
-        h.setVariance(100_000_000); // VARIANCE_EXTREME → 4.5% target, fBase = 159 EBP
-        h.setInsurance(10_000 * SCALE); // 1% vs 4.5% target → deficit δ = 0.7777
-        assertEq(h.takerFeeEbp(PRICE), 4_871, "below the cap the curve is charged untrimmed");
+        h.setVariance(100_000_000); // VARIANCE_EXTREME → 4.5% target, fBase = 184 EBP
+        h.setInsurance(12_500 * SCALE); // 1.25% vs 4.5% target → deficit δ = 0.7222
+        assertEq(h.takerFeeEbp(PRICE), 4_886, "below the cap the curve is charged untrimmed");
     }
 
-    /// @notice Worst case — vol at the multiplier ceiling, empty fund → uncapped 356 x 50 =
-    ///         17,800 EBP, clipped to 5,000 EBP = 50 bp.
+    /// @notice Worst case — vol at the multiplier ceiling, empty fund → uncapped 381 x 50 =
+    ///         19,050 EBP, clipped to 5,000 EBP = 50 bp.
     function test_TakerInsuranceFee_CapsAt50Bp() public {
-        h.setVariance(247_000_000); // VOL_MULTIPLIER_MAX → 9% target, fBase = 356 EBP
+        h.setVariance(247_000_000); // VOL_MULTIPLIER_MAX → 9% target, fBase = 381 EBP
         h.setInsurance(0); // full deficit, δ = 1
         assertEq(h.takerFeeEbp(PRICE), 5_000, "hard cap is 50 bp, not 50%");
     }
@@ -95,6 +95,6 @@ contract RiskParamsLibTest is Test {
     function test_TakerInsuranceFee_ZeroOI() public {
         h.setOI(0, 0);
         h.setInsurance(1 * SCALE);
-        assertEq(h.takerFeeEbp(PRICE), 50, "infinite coverage still pays the base rate");
+        assertEq(h.takerFeeEbp(PRICE), 75, "infinite coverage still pays the base rate");
     }
 }
