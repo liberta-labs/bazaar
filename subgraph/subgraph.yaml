@@ -37,6 +37,8 @@ dataSources:
           handler: handlePairDeploymentProposalExpired
         - event: PairDeploymentProposalResolved(indexed bytes32,bool,bool)
           handler: handlePairDeploymentProposalResolved
+        - event: PairDeploymentProposalVoided(indexed bytes32,indexed address)
+          handler: handlePairDeploymentProposalVoided
         - event: PairDeploymentProposed(indexed bytes32,indexed bytes32,indexed
             address,bytes32,string,uint256)
           handler: handlePairDeploymentProposed

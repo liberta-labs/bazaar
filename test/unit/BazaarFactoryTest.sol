@@ -402,9 +402,8 @@ contract BazaarFactoryTest is Test {
         vm.stopPrank();
     }
 
-    /// @notice The full governance cycle: propose → 14d liveness → settle (queues) → 14d timelock
-    ///         → activate. The identifier swaps and the predecessor is recorded as the rollback
-    ///         target. The oracle address never moves — it is immutable.
+    /// @notice The full governance cycle: propose → liveness → settle (queues) → timelock →
+    ///         activate. The identifier swaps; the oracle address never moves — it is immutable.
     function testIdentifierUpgrade_EndToEnd() public {
         bytes32 oldIdentifier = factory.umaIdentifier();
         address ooBefore = address(factory.oo());
@@ -427,9 +426,9 @@ contract BazaarFactoryTest is Test {
         assertEq(address(factory.oo()), ooBefore, "oracle address immutable");
     }
 
-    /// @notice The timelock's exit window does not release insurance LPs: a withdrawal requested when
-    ///         an upgrade is approved ripens only after the upgrade can activate, so the fund stays
-    ///         through the notice period traders use to unwind.
+    /// @notice The timelock's exit window does not release insurance LPs who react to the approval:
+    ///         a withdrawal requested when an upgrade is approved ripens only after the upgrade can
+    ///         activate. A request filed before approval can still ripen inside the window.
     function testInsuranceWithdrawalCooldown_OutlastsIdentifierUpgradeTimelock() public view {
         assertGt(InsuranceVaultLib.INSURANCE_WITHDRAWAL_COOLDOWN, factory.IDENTIFIER_UPGRADE_TIMELOCK());
     }
@@ -712,8 +711,9 @@ contract BazaarFactoryTest is Test {
 
     // -------------------- degraded mode (identifier de-whitelisted) --------------------
 
-    /// @notice Fail closed: while the protocol's identifier is off UMA's live whitelist, a new
-    ///         listing would be undisputable (auto-TRUE after 48h), so submission reverts instead.
+    /// @notice Fail closed: while the protocol's identifier is off UMA's live whitelist, no dispute
+    ///         on a new listing could be resolved, so it would pass after its 48h liveness unless
+    ///         disputed at the cost of a bond that never returns. Submission reverts instead.
     function testProposePairDeployment_RevertsWhileIdentifierDewhitelisted() public {
         bytes32 current = factory.umaIdentifier();
         mockOOv3.setIdentifierSupported(current, false);
@@ -740,11 +740,12 @@ contract BazaarFactoryTest is Test {
         assertEq(mockOOv3.assertionIdentifier(aid), current, "asserted under the incumbent");
     }
 
-    /// @notice When the incumbent has been de-whitelisted, an assertion under it would be
-    ///         undisputable — first-proposer-wins governance. The upgrade proposal routes its
-    ///         assertion under the PROPOSED (validated-live) identifier instead, so the recovery
-    ///         proposal itself stays disputable. This is the one UMA submission that must never
-    ///         gate on the incumbent being live: it is the repair path.
+    /// @notice When the incumbent has been de-whitelisted, no dispute under it could be resolved,
+    ///         so a proposal asserted under it would pass unless disputed, and a disputed one would
+    ///         hold the pending slot. The upgrade proposal routes its assertion under the PROPOSED
+    ///         (validated-live) identifier instead, so a dispute on the recovery proposal itself
+    ///         stays resolvable. This is the one UMA submission that must never gate on the
+    ///         incumbent being live: it is the repair path.
     function testIdentifierUpgrade_RoutesAssertionUnderProposedWhenIncumbentDead() public {
         bytes32 current = factory.umaIdentifier();
         mockOOv3.setIdentifierSupported(current, false);

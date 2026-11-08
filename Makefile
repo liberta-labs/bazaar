@@ -18,7 +18,7 @@ help:
 	@echo "  make create-order-anvil       - Create limit order (PAIR=0x... LIMIT_PRICE=2000 SIZE=0.01 IS_LONG=true)"
 	@echo "  make warp-anvil SECONDS=N     - Warp Anvil forward N seconds"
 	@echo "  make build                    - Build the project"
-	@echo "  make abis                     - Build, then export indexer/frontend ABIs to abi/"
+	@echo "  make abis                     - Build, export the ABIs to abi/, check src/interfaces/ against them"
 	@echo "  make test                     - Run tests"
 	@echo "  make balance-usdc             - Check USDC balance (ADDR=0x... optional)"
 	@echo "  make clean                    - Clean build artifacts"
@@ -29,11 +29,14 @@ help:
 build:
 	forge build
 
-# ABIs for indexers and frontends. The exported BazaarPair.json adds the events and errors of the
-# libraries the pair links, which its compiled ABI omits (see script/export-abis.sh).
+# ABIs for indexers and frontends, committed under abi/. The exported BazaarPair.json adds the
+# events and errors of the libraries the pair links, which its compiled ABI omits (see
+# script/export-abis.sh). The check then fails unless each MIT interface in src/interfaces/
+# declares exactly what its contract exports. CI runs both, and fails if abi/ is stale.
 .PHONY: abis
 abis: build
 	bash script/export-abis.sh
+	bash script/check-interfaces.sh
 
 # Test
 .PHONY: test

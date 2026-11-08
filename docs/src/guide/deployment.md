@@ -51,7 +51,8 @@ The lens and the terminator are pre-deployed against the predicted address becau
 | `ARBITRUM_MAINNET_RPC_URL`, `ARBITRUM_SEPOLIA_RPC_URL` | `foundry.toml` RPC endpoints |
 | `ACCOUNT`, `SENDER` | keystore account for `forge script` |
 | `BUG_BOUNTY_ADDRESS` | bug-bounty fee recipient — **required on live chains** |
-| `ARBISCAN_API_KEY` | contract verification |
+| `ETHERSCAN_API_KEY` | contract verification on Arbiscan (an Etherscan key serves Arbitrum One and Arbitrum Sepolia alike) |
+| `SEPOLIA_OFFICIAL_USDC` | Arbitrum Sepolia only: `true` deploys against Circle's test USDC; unset or `false` deploys a mintable `TestnetUSDC` with a public faucet (see [Networks](../reference/networks.md)) |
 | `ANVIL_RPC_URL`, `ANVIL_PRIVATE_KEY`, `ANVIL_WALLET` | local Makefile targets |
 
 ## Network support

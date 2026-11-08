@@ -2317,7 +2317,7 @@ contract SeedMaturityTest is Test {
 /// @notice The UMA identifier-upgrade governance path must cost more than the pair-deployment
 ///         path. A protocol-wide change to the adjudicating identifier at deployment-grade
 ///         friction (1,000 USDC, no timelock) would be a cheap governance-compromise vector, so
-///         it runs at a 5,000 USDC bond and a 12-day activation timelock on top of its 2-day
+///         it runs at a 5,000 USDC bond and a 7-day activation timelock on top of its 2-day
 ///         liveness.
 contract Phase2OracleUpgradeTest is Test {
     BazaarFactory factory;
@@ -2336,11 +2336,13 @@ contract Phase2OracleUpgradeTest is Test {
     }
 
     /// @notice Governance-track constants: 2-day liveness / 5,000 USDC bond, plus the
-    ///         12-day post-approval activation timelock.
+    ///         7-day post-approval activation timelock, which shortens to a 4-day floor once
+    ///         the incumbent identifier is off UMA's live whitelist.
     function test_R2_3_OracleUpgradeConstants() public view {
         assertEq(factory.IDENTIFIER_UPGRADE_LIVENESS(), 2 days, "liveness = 2 days");
         assertEq(factory.IDENTIFIER_UPGRADE_BOND_USDC(), 5_000 * 1e6, "bond = 5,000 USDC");
-        assertEq(factory.IDENTIFIER_UPGRADE_TIMELOCK(), 12 days, "activation timelock = 12 days");
+        assertEq(factory.IDENTIFIER_UPGRADE_TIMELOCK(), 7 days, "activation timelock = 7 days");
+        assertEq(factory.IDENTIFIER_UPGRADE_MIN_NOTICE(), 4 days, "removed-incumbent notice = 4 days");
         // Pair-deployment params: 48h liveness, cheap pair deployments stay cheap.
         assertEq(factory.DEPLOYMENT_LIVENESS(), 48 hours, "deployment liveness = 48 hours");
         assertEq(factory.DEPLOYMENT_BOND_USDC(), 1_000 * 1e6, "deployment bond = 1,000 USDC");
@@ -2368,7 +2370,7 @@ contract Phase2OracleUpgradeTest is Test {
         assertEq(qAid, aid, "queued assertion recorded");
         assertEq(qId, bytes32("ASSERT_TRUTH5"), "queued identifier recorded");
         assertEq(
-            effectiveTs, block.timestamp + factory.IDENTIFIER_UPGRADE_TIMELOCK(), "activates 12 days after approval"
+            effectiveTs, block.timestamp + factory.IDENTIFIER_UPGRADE_TIMELOCK(), "activates a timelock after approval"
         );
     }
 

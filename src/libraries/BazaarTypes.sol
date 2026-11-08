@@ -1,8 +1,12 @@
-// SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity 0.8.34;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.16;
 
 /// @title BazaarTypes
 /// @notice Shared type definitions for BazaarPair and its libraries
+/// @dev MIT-licensed, unlike the AGPL contracts that use it, because the MIT interfaces in
+///      src/interfaces/ take their structs and enums from here: anything declared in this file is
+///      published under MIT with them. The pragma is a range for the same reason, so an integrator
+///      can compile those interfaces with their own compiler.
 library BazaarTypes {
     // -------------------- Enums --------------------
 

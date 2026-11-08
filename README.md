@@ -26,7 +26,7 @@
 
 Bazaar is the first-ever fully permissionless perpetual-derivatives protocol, USDC-margined and built for Arbitrum. Any asset with a [Pyth](https://pyth.network) price feed — crypto, equities, FX, indices — can be listed permissionlessly through an [UMA Optimistic Oracle](https://uma.xyz) assertion and traded on an on-chain central limit order book. The book is **fully on-chain and sorted**, and orders match **on arrival**, inside their own creation transaction — price-time priority and fill prices are enforced by the contract itself, with no trusted matcher anywhere in the fill path.
 
-The protocol is immutable: no owner, no pauser, no upgradeable proxies, no governance token. Every privileged action is either fully permissionless, economically bonded, or adjudicated by UMA's optimistic oracle. The single governed parameter — the UMA identifier those assertions are adjudicated under — moves only through a bonded assertion (at least $5,000), a 2-day public dispute window, and a 12-day activation timelock.
+The protocol is immutable: no owner, no pauser, no upgradeable proxies, no governance token. Every privileged action is either fully permissionless, economically bonded, or adjudicated by UMA's optimistic oracle. The single governed parameter — the UMA identifier those assertions are adjudicated under — moves only through a bonded assertion (at least $5,000), a 2-day public dispute window, and a 7-day activation timelock (4 days once UMA has removed the incumbent).
 
 > ⚠️ **Status: pre-audit, work in progress — not yet deployed.** There is no official deployment on any network; do not use with real funds.
 
@@ -47,7 +47,7 @@ forge build
 forge test
 ```
 
-CI pins Foundry to v1.4.3 and runs `forge fmt --check`, build, and the full test suite on every push; EIP-170 size limits are enforced as a test (`test/unit/ContractSizeTest.t.sol`) over production contracts.
+CI pins Foundry to v1.4.3 and runs `forge fmt --check`, build, a check that the committed ABIs and interfaces match the build, and the full test suite on every push; EIP-170 size limits are enforced as a test (`test/unit/ContractSizeTest.t.sol`) over production contracts.
 
 For the full local stack on Anvil — mocked Pyth/UMA/USDC, listing a pair, pushing prices, placing orders — see [Local Development](https://docs.bazaar.finance/guide/quick-start.html) in the book; `make help` lists every target. Deploying the protocol to a real network is covered in [Self-Deployment](https://docs.bazaar.finance/guide/deployment.html).
 
@@ -60,7 +60,7 @@ src/
 ├── BazaarOracle.sol            # Pyth adapter + composite feeds
 ├── BazaarPairTerminator.sol    # Wind-down paths
 ├── BazaarPairLens.sol          # Read-only views
-├── interfaces/
+├── interfaces/                 # One MIT interface per contract (IBazaar*), checked against its ABI
 └── libraries/                  # twelve DELEGATECALL externals, then inlined helpers
     ├── MatchingEngineLib.sol   # Arrival matching: the walk, insertion, unload
     ├── OrderManagementLib.sol  # Order creation/amend/cancel/cleanup
@@ -79,8 +79,11 @@ src/
     ├── MmrSampleLib.sol        # 24h-lagged MMR ring buffer
     ├── FeeEscrowLib.sol        # Claimable-balance escrow behind every payout
     ├── BazaarMathLib.sol       # Fixed-point + effective-price helpers
-    └── BazaarTypes.sol         # Structs, enums, protocol constants
+    └── BazaarTypes.sol         # Structs, enums, protocol constants (MIT)
 script/                         # DeployLibraries + DeployBazaar + network config
+abi/                            # Committed JSON ABIs (MIT)
+examples/                       # Contracts to adapt, e.g. a batching account (MIT)
+subgraph/                       # The Graph subgraph (MIT)
 test/
 ├── unit/                       # Per-library and per-mechanism suites
 ├── integration/                # End-to-end suites, incl. the zero-sum invariant
@@ -98,4 +101,6 @@ test/
 
 ## License
 
-[AGPL-3.0-only](LICENSE). If you fork this protocol and run it as a service, you must open-source your modifications under the same license — including the network-use provision of §13.
+The protocol is [AGPL-3.0-only](LICENSE). If you fork it and run it as a service, you must open-source your modifications under the same license — including the network-use provision of §13.
+
+What integrators compile against is [MIT](LICENSE-MIT): the five `IBazaar*` interfaces in `src/interfaces/`, `src/libraries/BazaarTypes.sol`, the ABIs in `abi/`, `examples/` and `subgraph/`. The documentation text is [CC BY 4.0](docs/LICENSE). Each Solidity file's SPDX header is authoritative, and [License](https://docs.bazaar.finance/license.html) in the book explains what integrating does and doesn't require.

@@ -2,6 +2,8 @@
 
 Access-control legend: **anyone** = permissionless · **bonded** = permissionless with economic stake · **wired** = callable only by a registered protocol contract.
 
+Each contract's full ABI is declared by an MIT-licensed interface in `src/interfaces/` (`IBazaarPair`, `IBazaarFactory`, `IBazaarPairLens`, `IBazaarPairTerminator`, `IBazaarOracle`) and committed as JSON in `abi/`; see [Interfaces and ABIs](../guide/integrators.md#interfaces-and-abis).
+
 ## BazaarPair — `src/BazaarPair.sol`
 
 One EIP-1167 clone per market. Initialized once by the factory.
@@ -29,8 +31,8 @@ Key views: `book` (list heads and counts), `positionBuckets`, `orders` (includin
 |---|---|
 | `proposePairDeployment` / `settleDeploymentProposal` | anyone (bonded) |
 | `proposeUmaIdentifierUpgrade` / `settleIdentifierUpgradeProposal` | anyone (bonded) |
-| `activateIdentifierUpgrade` | anyone, once the 12-day post-approval timelock elapses |
-| `expireStuckDeploymentProposal` / `expireStuckIdentifierUpgradeProposal` | anyone, once liveness has passed (plus the 14-day dispute grace if the proposal was disputed); settles if it can, otherwise approves an undisputed proposal and discards a disputed one |
+| `activateIdentifierUpgrade` | anyone, once the 7-day post-approval timelock elapses, or 4 days after approval once the incumbent identifier is off UMA's live whitelist |
+| `expireStuckDeploymentProposal` / `expireStuckIdentifierUpgradeProposal` | anyone, once liveness has passed (plus the 14-day dispute grace if the proposal was disputed, or at once for a dispute filed after UMA removed the assertion's identifier); settles if it can, otherwise approves an undisputed proposal and discards a disputed one. A listing approved undisputed after its identifier was removed is voided instead of deployed |
 | `claimSeedRefund` | anyone (pays only the caller's own credit) |
 | `assertionResolvedCallback` / `assertionDisputedCallback` | wired (the UMA OO recorded per assertion) |
 | `getPairAddress` / `isPair` / `getAllPairs` / `pairsCount` / proposal getters | view |

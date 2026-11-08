@@ -13,9 +13,9 @@ import {VaultHealthLib} from "./libraries/VaultHealthLib.sol";
 import {AdlLib} from "./libraries/AdlLib.sol";
 import {IArbSys} from "./interfaces/IArbSys.sol";
 
-/// @title IBazaarPairLens
+/// @title IBazaarPairView
 /// @notice Minimal interface for reading BazaarPair state
-interface IBazaarPairLens {
+interface IBazaarPairView {
     // Return types mirror BazaarTypes.PositionBucket's packed field widths — the auto-generated
     // getter reports each field at its declared width.
     function positionBuckets(address user)
@@ -163,7 +163,7 @@ contract BazaarPairLens {
             bucket.entryFundingIndex,
             bucket.takeProfitOrderId,
             bucket.stopLossOrderId
-        ) = IBazaarPairLens(pair).positionBuckets(user);
+        ) = IBazaarPairView(pair).positionBuckets(user);
     }
 
     /// @notice Calculates the current solvency state of a user's position
@@ -181,12 +181,12 @@ contract BazaarPairLens {
             bucket.entryFundingIndex,
             bucket.takeProfitOrderId,
             bucket.stopLossOrderId
-        ) = IBazaarPairLens(pair).positionBuckets(user);
+        ) = IBazaarPairView(pair).positionBuckets(user);
 
-        int256 fundingIdx = IBazaarPairLens(pair).currentFundingIndex();
+        int256 fundingIdx = IBazaarPairView(pair).currentFundingIndex();
 
         BazaarTypes.MarginRequirements memory marginReqs;
-        (marginReqs.imrBp, marginReqs.mmrBp, marginReqs.lastUpdateTs,) = IBazaarPairLens(pair).marginRequirements();
+        (marginReqs.imrBp, marginReqs.mmrBp, marginReqs.lastUpdateTs,) = IBazaarPairView(pair).marginRequirements();
         // Use the pair's own lagged MMR so this view applies the threshold liquidate() and the
         // matching walk apply on-chain; without it, every position would display against the
         // current rate alone. The pair measures the grace period back from its stored mark, so a
@@ -194,7 +194,7 @@ contract BazaarPairLens {
         // the threshold shifts to match once their own price update actually lands. liquidate()
         // can also judge below the stored current rate, at the curve its own price gives, so a
         // position shown here as seizable may still survive the call; simulating it tells.
-        marginReqs.laggedMmrBp = IBazaarPairLens(pair).getLaggedMmr();
+        marginReqs.laggedMmrBp = IBazaarPairView(pair).getLaggedMmr();
 
         result = BucketLib.calculateState(bucket, currentPrice, fundingIdx, marginReqs);
     }
@@ -216,7 +216,7 @@ contract BazaarPairLens {
         returns (uint256 free, uint256 fund, uint256 inventory, uint256 arrears)
     {
         (,,,,, uint256 balance,,, uint256 owed,, BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) =
-            IBazaarPairLens(pair).pairVault();
+            IBazaarPairView(pair).pairVault();
         uint256 seized = l.seized + s.seized;
         free = balance > seized ? balance - seized : 0;
         fund = balance;
@@ -238,8 +238,8 @@ contract BazaarPairLens {
             uint256 trailingOiSize,
             BazaarTypes.Inventory memory l,
             BazaarTypes.Inventory memory s
-        ) = IBazaarPairLens(pair).pairVault();
-        int256 fundingIndex = IBazaarPairLens(pair).currentFundingIndex();
+        ) = IBazaarPairView(pair).pairVault();
+        int256 fundingIndex = IBazaarPairView(pair).currentFundingIndex();
         net = int256(l.seized + s.seized + arrears)
             + RiskParamsLib.inventoryPnl(l.size, l.entryNotional, l.entryFundingIndex, true, price, fundingIndex)
             + RiskParamsLib.inventoryPnl(s.size, s.entryNotional, s.entryFundingIndex, false, price, fundingIndex);
@@ -264,19 +264,19 @@ contract BazaarPairLens {
     ///         precision: free capital less the inventory loss the fund itself bears at that mark,
     ///         over the supply. 1.0 while no shares exist.
     function getInsuranceSharePrice(address pair) external view returns (uint256) {
-        uint256 totalShares = IBazaarPairLens(pair).totalInsuranceShares();
+        uint256 totalShares = IBazaarPairView(pair).totalInsuranceShares();
         if (totalShares == 0) return BAZAAR_SCALE;
-        (uint256 spotPrice,,,,) = IBazaarPairLens(pair).lastPairPrice();
+        (uint256 spotPrice,,,,) = IBazaarPairView(pair).lastPairPrice();
         return Math.mulDiv(_redemptionBasis(pair, spotPrice), BAZAAR_SCALE, totalShares);
     }
 
     /// @notice What a depositor's insurance shares redeem for at the pair's stored mark, in
     ///         BAZAAR precision.
     function getInsuranceDepositValue(address pair, address user) external view returns (uint256 value) {
-        uint256 totalShares = IBazaarPairLens(pair).totalInsuranceShares();
+        uint256 totalShares = IBazaarPairView(pair).totalInsuranceShares();
         if (totalShares == 0) return 0;
-        uint256 userShares = IBazaarPairLens(pair).insuranceShares(user);
-        (uint256 spotPrice,,,,) = IBazaarPairLens(pair).lastPairPrice();
+        uint256 userShares = IBazaarPairView(pair).insuranceShares(user);
+        (uint256 spotPrice,,,,) = IBazaarPairView(pair).lastPairPrice();
         value = Math.mulDiv(userShares, _redemptionBasis(pair, spotPrice), totalShares);
     }
 
@@ -302,7 +302,7 @@ contract BazaarPairLens {
         }
         // The pair's dead-pool test reads what the fund holds outright: its balance plus the arrears.
         uint256 held = fund + arrears;
-        return InsuranceVaultLib.sharesForDeposit(amount, IBazaarPairLens(pair).totalInsuranceShares(), held, basis);
+        return InsuranceVaultLib.sharesForDeposit(amount, IBazaarPairView(pair).totalInsuranceShares(), held, basis);
     }
 
     /// @notice USDC (BAZAAR precision) a redemption of `shareAmount` would pay if the pair
@@ -321,7 +321,7 @@ contract BazaarPairLens {
         view
         returns (uint256)
     {
-        uint256 totalShares = IBazaarPairLens(pair).totalInsuranceShares();
+        uint256 totalShares = IBazaarPairView(pair).totalInsuranceShares();
         if (totalShares == 0) return 0;
         return Math.mulDiv(shareAmount, _redemptionBasis(pair, price), totalShares);
     }
@@ -330,8 +330,8 @@ contract BazaarPairLens {
     /// @dev Delegates the decay math to AdlLib._getAdlScoreThreshold (inlined internal library
     ///      function) so the lens can never drift from the on-chain auction curve.
     function getAdlScoreThreshold(address pair) external view returns (uint256) {
-        bool adlPending = IBazaarPairLens(pair).isAdlPending();
-        uint256 auctionStartTs = IBazaarPairLens(pair).adlAuctionStartTs();
+        bool adlPending = IBazaarPairView(pair).isAdlPending();
+        uint256 auctionStartTs = IBazaarPairView(pair).adlAuctionStartTs();
         if (!adlPending || auctionStartTs == 0) return type(uint256).max;
         return AdlLib._getAdlScoreThreshold(auctionStartTs);
     }
@@ -357,7 +357,7 @@ contract BazaarPairLens {
     /// @return eligible True when the user would pass the eligibility scan right now:
     ///         adlScore > 0 and at or above the current (decaying) auction threshold
     function getAdlScore(address pair, address user) external view returns (uint256 adlScore, bool eligible) {
-        if (!IBazaarPairLens(pair).isAdlPending()) return (0, false);
+        if (!IBazaarPairView(pair).isAdlPending()) return (0, false);
 
         BazaarTypes.PositionBucket memory bucket;
         (
@@ -368,29 +368,29 @@ contract BazaarPairLens {
             bucket.entryFundingIndex,
             bucket.takeProfitOrderId,
             bucket.stopLossOrderId
-        ) = IBazaarPairLens(pair).positionBuckets(user);
+        ) = IBazaarPairView(pair).positionBuckets(user);
         if (bucket.size == 0) return (0, false);
         {
             (,,,,,,,,,, BazaarTypes.Inventory memory l, BazaarTypes.Inventory memory s) =
-                IBazaarPairLens(pair).pairVault();
+                IBazaarPairView(pair).pairVault();
             if ((bucket.isLong ? s.size : l.size) == 0) return (0, false);
         }
 
         BazaarTypes.MarginRequirements memory marginReqs;
-        (marginReqs.imrBp, marginReqs.mmrBp, marginReqs.lastUpdateTs,) = IBazaarPairLens(pair).marginRequirements();
-        marginReqs.laggedMmrBp = IBazaarPairLens(pair).getLaggedMmr();
+        (marginReqs.imrBp, marginReqs.mmrBp, marginReqs.lastUpdateTs,) = IBazaarPairView(pair).marginRequirements();
+        marginReqs.laggedMmrBp = IBazaarPairView(pair).getLaggedMmr();
 
-        (uint256 rankPrice,,,,) = IBazaarPairLens(pair).lastPairPrice();
+        (uint256 rankPrice,,,,) = IBazaarPairView(pair).lastPairPrice();
         BazaarTypes.BucketState memory state =
-            BucketLib.calculateState(bucket, rankPrice, IBazaarPairLens(pair).currentFundingIndex(), marginReqs);
+            BucketLib.calculateState(bucket, rankPrice, IBazaarPairView(pair).currentFundingIndex(), marginReqs);
         if (state.totalPnl <= 0) return (0, false);
 
         adlScore = Math.mulDiv(
             uint256(state.totalPnl),
             BAZAAR_SCALE,
-            AdlLib._scoreCollateral(state.effectiveCollateral, IBazaarPairLens(pair).adlScoreDeposit(user))
+            AdlLib._scoreCollateral(state.effectiveCollateral, IBazaarPairView(pair).adlScoreDeposit(user))
         );
-        eligible = adlScore >= AdlLib._getAdlScoreThreshold(IBazaarPairLens(pair).adlAuctionStartTs());
+        eligible = adlScore >= AdlLib._getAdlScoreThreshold(IBazaarPairView(pair).adlAuctionStartTs());
     }
 
     /// @notice A user's terminal-settlement entitlement, decomposed: the cash their bucket
@@ -427,9 +427,9 @@ contract BazaarPairLens {
             uint256 payout
         )
     {
-        (,,, collateral,,,) = IBazaarPairLens(pair).positionBuckets(user);
-        registeredClaim = IBazaarPairLens(pair).terminalProfitClaim(user);
-        BazaarTypes.AuxState memory aux = IBazaarPairLens(pair).auxState();
+        (,,, collateral,,,) = IBazaarPairView(pair).positionBuckets(user);
+        registeredClaim = IBazaarPairView(pair).terminalProfitClaim(user);
+        BazaarTypes.AuxState memory aux = IBazaarPairView(pair).auxState();
         principalRatio = aux.terminalPrincipalRatio;
         profitRatio = aux.terminalProfitRatio;
         payout = Math.mulDiv(collateral, principalRatio, BazaarTypes.BAZAAR_SCALE)
@@ -480,10 +480,10 @@ contract BazaarPairLens {
         view
         returns (uint256 maxAmount)
     {
-        if (IBazaarPairLens(pair).isPairTerminated()) return _terminalMaxWithdrawable(pair, user);
-        if (IBazaarPairLens(pair).settlementPriceFixedTs() != 0) return 0;
+        if (IBazaarPairView(pair).isPairTerminated()) return _terminalMaxWithdrawable(pair, user);
+        if (IBazaarPairView(pair).settlementPriceFixedTs() != 0) return 0;
         // Limbo begins LIMBO_LEAD before the cutoff (the pair's _pastTradingCutoff rule).
-        uint256 cutoff = IBazaarPairLens(pair).scheduledTerminationTs();
+        uint256 cutoff = IBazaarPairView(pair).scheduledTerminationTs();
         if (cutoff != 0 && block.timestamp + BazaarTypes.LIMBO_LEAD >= cutoff) return 0;
 
         BazaarTypes.PositionBucket memory bucket;
@@ -495,7 +495,7 @@ contract BazaarPairLens {
             bucket.entryFundingIndex,
             bucket.takeProfitOrderId,
             bucket.stopLossOrderId
-        ) = IBazaarPairLens(pair).positionBuckets(user);
+        ) = IBazaarPairView(pair).positionBuckets(user);
 
         // Mirror the withdrawal gate's reservation of the resting set, which it tallies at the
         // spot of the price it resolves: the pair's stored spot stands in for it here, so the
@@ -504,8 +504,8 @@ contract BazaarPairLens {
         if (_verdictRefuses(pair, bucket.size != 0 || longExposure != 0 || shortExposure != 0)) return 0;
 
         BazaarTypes.MarginRequirements memory marginReqs;
-        (marginReqs.imrBp, marginReqs.mmrBp, marginReqs.lastUpdateTs,) = IBazaarPairLens(pair).marginRequirements();
-        marginReqs.laggedMmrBp = IBazaarPairLens(pair).getLaggedMmr();
+        (marginReqs.imrBp, marginReqs.mmrBp, marginReqs.lastUpdateTs,) = IBazaarPairView(pair).marginRequirements();
+        marginReqs.laggedMmrBp = IBazaarPairView(pair).getLaggedMmr();
 
         if (bucket.size == 0) {
             // Flat: collateral less the order-IMR reserve on the larger resting side (zero
@@ -515,10 +515,10 @@ contract BazaarPairLens {
             uint256 orderImrReq = Math.mulDiv(marginReqs.imrBp, worst, BazaarTypes.BP_SCALE) + fillDebit;
             maxAmount = bucket.collateral > orderImrReq ? bucket.collateral - orderImrReq : 0;
         } else {
-            if (IBazaarPairLens(pair).isAdlPending()) return 0; // position holders frozen during ADL
+            if (IBazaarPairView(pair).isAdlPending()) return 0; // position holders frozen during ADL
 
             BazaarTypes.BucketState memory state =
-                BucketLib.calculateState(bucket, currentPrice, IBazaarPairLens(pair).currentFundingIndex(), marginReqs);
+                BucketLib.calculateState(bucket, currentPrice, IBazaarPairView(pair).currentFundingIndex(), marginReqs);
             if (!state.isSolvent) return 0;
 
             // Ceiling 1: raw collateral.
@@ -527,7 +527,7 @@ contract BazaarPairLens {
             // Ceiling 2: the retained-collateral floor (margin held as cash — maintenance-level for
             // continuously traded pairs, initial-level for session-bound pairs, whose reopen jumps
             // liquidation cannot interpose against).
-            uint256 floorRateBp = IBazaarPairLens(pair).isContinuouslyTraded() ? marginReqs.mmrBp : marginReqs.imrBp;
+            uint256 floorRateBp = IBazaarPairView(pair).isContinuouslyTraded() ? marginReqs.mmrBp : marginReqs.imrBp;
             uint256 minRetained = Math.mulDiv(floorRateBp, state.currentNotional, BazaarTypes.BP_SCALE);
             uint256 aboveFloor = state.effectiveCollateral > minRetained ? state.effectiveCollateral - minRetained : 0;
             if (aboveFloor < maxAmount) maxAmount = aboveFloor;
@@ -541,7 +541,7 @@ contract BazaarPairLens {
         }
 
         // Ceiling 4: the deposits ledger.
-        (,,,, uint256 ledger,,,,,,,) = IBazaarPairLens(pair).pairVault();
+        (,,,, uint256 ledger,,,,,,,) = IBazaarPairView(pair).pairVault();
         if (ledger < maxAmount) maxAmount = ledger;
     }
 
@@ -558,10 +558,10 @@ contract BazaarPairLens {
     function _verdictRefuses(address pair, bool priced) internal view returns (bool refused) {
         if (_isBalanceShort(pair)) return true;
         if (!priced) return false;
-        (,,,,,, uint256 deficit,,,,,) = IBazaarPairLens(pair).pairVault();
+        (,,,,,, uint256 deficit,,,,,) = IBazaarPairView(pair).pairVault();
         if (deficit != 0) return true;
-        uint256 deadline = uint256(IBazaarPairLens(pair).extsload(bytes32(SLOT_ADL_TERMINATION_TS)));
-        return IBazaarPairLens(pair).isAdlPending() && deadline != 0 && block.timestamp >= deadline;
+        uint256 deadline = uint256(IBazaarPairView(pair).extsload(bytes32(SLOT_ADL_TERMINATION_TS)));
+        return IBazaarPairView(pair).isAdlPending() && deadline != 0 && block.timestamp >= deadline;
     }
 
     /// @dev CollateralLib.isBalanceShort read from outside the pair: the USDC the pair holds against
@@ -570,10 +570,10 @@ contract BazaarPairLens {
     /// @param pair The BazaarPair to read
     /// @return short True when the books promise materially more than the pair holds
     function _isBalanceShort(address pair) internal view returns (bool short) {
-        (,,,, uint256 ledger, uint256 insurance,,,,,,) = IBazaarPairLens(pair).pairVault();
-        uint256 escrow = uint256(IBazaarPairLens(pair).extsload(bytes32(SLOT_FEE_ESCROW_TOTAL)));
+        (,,,, uint256 ledger, uint256 insurance,,,,,,) = IBazaarPairView(pair).pairVault();
+        uint256 escrow = uint256(IBazaarPairView(pair).extsload(bytes32(SLOT_FEE_ESCROW_TOTAL)));
         uint256 expected = (insurance + ledger + escrow) / 1e12;
-        (bool ok, bytes memory data) = IBazaarPairLens(pair).usdc().staticcall(abi.encodeWithSelector(0x70a08231, pair));
+        (bool ok, bytes memory data) = IBazaarPairView(pair).usdc().staticcall(abi.encodeWithSelector(0x70a08231, pair));
         if (!ok || data.length < 32) return false;
         return expected
             > abi.decode(data, (uint256)) + (expected * CollateralLib.USDC_BALANCE_TOLERANCE_BP / BazaarTypes.BP_SCALE);
@@ -594,15 +594,15 @@ contract BazaarPairLens {
     function _terminalMaxWithdrawable(address pair, address user) internal view returns (uint256 amount) {
         BazaarTypes.PositionBucket memory bucket;
         (bucket.isLong, bucket.size, bucket.entryValue, bucket.collateral, bucket.entryFundingIndex,,) =
-            IBazaarPairLens(pair).positionBuckets(user);
-        (uint256 longOi, uint256 shortOi,,, uint256 ledger,,,,,,,) = IBazaarPairLens(pair).pairVault();
-        BazaarTypes.AuxState memory aux = IBazaarPairLens(pair).auxState();
+            IBazaarPairView(pair).positionBuckets(user);
+        (uint256 longOi, uint256 shortOi,,, uint256 ledger,,,,,,,) = IBazaarPairView(pair).pairVault();
+        BazaarTypes.AuxState memory aux = IBazaarPairView(pair).auxState();
 
         amount = bucket.collateral;
         if (bucket.size != 0) {
             BazaarTypes.MarginRequirements memory zeroReqs; // settlement ignores margins
             BazaarTypes.BucketState memory state = BucketLib.calculateState(
-                bucket, aux.settlementPrice, IBazaarPairLens(pair).currentFundingIndex(), zeroReqs
+                bucket, aux.settlementPrice, IBazaarPairView(pair).currentFundingIndex(), zeroReqs
             );
             int256 equity = int256(amount) + state.totalPnl;
             amount = equity > 0 ? uint256(equity) : 0;
@@ -611,7 +611,7 @@ contract BazaarPairLens {
         }
 
         uint256 claimPay =
-            Math.mulDiv(IBazaarPairLens(pair).terminalProfitClaim(user), aux.terminalProfitRatio, BAZAAR_SCALE);
+            Math.mulDiv(IBazaarPairView(pair).terminalProfitClaim(user), aux.terminalProfitRatio, BAZAAR_SCALE);
         amount += claimPay;
         ledger += claimPay;
         if (amount > ledger && (longOi != 0 || shortOi != 0)) amount = ledger;
@@ -632,7 +632,7 @@ contract BazaarPairLens {
         view
         returns (BazaarTypes.Inventory memory longInv, BazaarTypes.Inventory memory shortInv)
     {
-        (,,,,,,,,,, longInv, shortInv) = IBazaarPairLens(pair).pairVault();
+        (,,,,,,,,,, longInv, shortInv) = IBazaarPairView(pair).pairVault();
     }
 
     // ---- Library constant getters ----
@@ -691,7 +691,7 @@ contract BazaarPairLens {
     /// @param pair The pair
     /// @return The next counter value
     function nextOrderId(address pair) external view returns (uint256) {
-        return uint256(IBazaarPairLens(pair).extsload(bytes32(SLOT_NEXT_ORDER_ID)));
+        return uint256(IBazaarPairView(pair).extsload(bytes32(SLOT_NEXT_ORDER_ID)));
     }
 
     /// @notice Returns order lifetime constants (block-based, derived from ~250ms Arbitrum blocks)
@@ -783,7 +783,7 @@ contract BazaarPairLens {
         uint256 fund;
         (coverageRatioBp, oiNotional, heldCap, fund) = _coverage(pair, price);
         targetRatioBp = _liveTargetRatio(pair);
-        if (IBazaarPairLens(pair).isPairTerminated() || oiNotional == 0) {
+        if (IBazaarPairView(pair).isPairTerminated() || oiNotional == 0) {
             return (type(uint256).max, type(uint256).max, type(uint256).max, coverageRatioBp, targetRatioBp);
         }
 
@@ -824,7 +824,7 @@ contract BazaarPairLens {
         view
         returns (bool isLocked, uint256 lockedAmount, uint256 lockTs, uint256 claimOpensTs, uint256 windowEndTs)
     {
-        IBazaarPairLens p = IBazaarPairLens(pair);
+        IBazaarPairView p = IBazaarPairView(pair);
         uint256 requestTs = uint256(uint64(p.insuranceWithdrawalRequestTs(user)));
         if (requestTs == 0 || p.isPairTerminated()) return (false, 0, 0, 0, 0);
         uint256 windowOpensTs = requestTs + InsuranceVaultLib.INSURANCE_WITHDRAWAL_COOLDOWN;
@@ -853,7 +853,7 @@ contract BazaarPairLens {
         view
         returns (uint256 spent, uint256 periodStart, uint256 periodCap)
     {
-        IBazaarPairLens p = IBazaarPairLens(pair);
+        IBazaarPairView p = IBazaarPairView(pair);
         spent = uint256(p.extsload(bytes32(SLOT_INSURANCE_RATE_LIMIT)));
         periodStart = uint256(p.extsload(bytes32(SLOT_INSURANCE_RATE_LIMIT + 1)));
         periodCap = uint256(p.extsload(bytes32(SLOT_INSURANCE_RATE_LIMIT + 2)));
@@ -884,7 +884,7 @@ contract BazaarPairLens {
             uint256 trailingOiSize,
             BazaarTypes.Inventory memory l,
             BazaarTypes.Inventory memory s
-        ) = IBazaarPairLens(pair).pairVault();
+        ) = IBazaarPairView(pair).pairVault();
         fund = balance;
         // An unvaluable price reads as no OI notional, which execution does not rate-limit either.
         if (price == 0) return (0, 0, 0, fund);
@@ -893,7 +893,7 @@ contract BazaarPairLens {
         heldCap = InsuranceVaultLib.heldOiTermOf(liveOiSize, trailingOiSize, price);
         int256 pnl;
         if (l.size + s.size != 0) {
-            int256 fundingIndex = IBazaarPairLens(pair).currentFundingIndex();
+            int256 fundingIndex = IBazaarPairView(pair).currentFundingIndex();
             pnl = RiskParamsLib.inventoryPnl(l.size, l.entryNotional, l.entryFundingIndex, true, price, fundingIndex)
                 + RiskParamsLib.inventoryPnl(s.size, s.entryNotional, s.entryFundingIndex, false, price, fundingIndex);
         }
@@ -904,7 +904,7 @@ contract BazaarPairLens {
     ///      move from the stored variance, faded slippage and reopen floor, with the faded drift
     ///      competing against it for the target.
     function _liveTargetRatio(address pair) internal view returns (uint256) {
-        IBazaarPairLens p = IBazaarPairLens(pair);
+        IBazaarPairView p = IBazaarPairView(pair);
         (, uint256 emaVarianceBp, uint256 lastPriceTs,,) = p.lastPairPrice();
         uint256 anchors = uint256(p.extsload(bytes32(SLOT_LIQUIDATION_GAP_EMA + 2)));
         (int256 slippageBp, int256 driftBp) = RiskParamsLib.fadedLiquidationGapsOf(
@@ -1005,7 +1005,7 @@ contract BazaarPairLens {
     }
 
     function _claimableFees(address pair, address recipient) internal view returns (uint256 owed, uint256 total) {
-        IBazaarPairLens p = IBazaarPairLens(pair);
+        IBazaarPairView p = IBazaarPairView(pair);
         owed = uint256(p.extsload(keccak256(abi.encode(recipient, SLOT_FEE_ESCROW_CLAIMABLE))));
         total = uint256(p.extsload(bytes32(SLOT_FEE_ESCROW_TOTAL)));
     }
@@ -1023,7 +1023,7 @@ contract BazaarPairLens {
     /// @param pair The pair
     /// @return The mark at this block, BAZAAR_SCALE precision
     function markPrice(address pair) external view returns (uint256) {
-        IBazaarPairLens p = IBazaarPairLens(pair);
+        IBazaarPairView p = IBazaarPairView(pair);
         BazaarTypes.AuxState memory aux = p.auxState();
         if (aux.lastMarkUpdateTs == 0) return 0;
         int256 premiumNotional = int256(uint256(p.extsload(bytes32(SLOT_MARK_PREMIUM_NOTIONAL))));
@@ -1062,7 +1062,7 @@ contract BazaarPairLens {
         view
         returns (int256 currentRate, int256 accruingRate, int256 fundingIndex)
     {
-        IBazaarPairLens p = IBazaarPairLens(pair);
+        IBazaarPairView p = IBazaarPairView(pair);
         fundingIndex = p.currentFundingIndex();
         uint256 cutoff = p.scheduledTerminationTs();
         if (p.settlementPriceFixedTs() != 0 || (cutoff != 0 && block.timestamp > cutoff)) {
@@ -1151,13 +1151,13 @@ contract BazaarPairLens {
     /// @notice The pair's ADL epoch: advanced each time a window opens, the tag window deposits
     ///         are ranked by.
     function adlEpoch(address pair) external view returns (uint64) {
-        return uint64(uint256(IBazaarPairLens(pair).extsload(bytes32(SLOT_ADL_EPOCH))));
+        return uint64(uint256(IBazaarPairView(pair).extsload(bytes32(SLOT_ADL_EPOCH))));
     }
 
     /// @notice The instant from which a timed-out ADL auction may terminate the pair; 0 while
     ///         unarmed.
     function adlTerminationTs(address pair) external view returns (uint256) {
-        return uint256(IBazaarPairLens(pair).extsload(bytes32(SLOT_ADL_TERMINATION_TS)));
+        return uint256(IBazaarPairView(pair).extsload(bytes32(SLOT_ADL_TERMINATION_TS)));
     }
 
     /// @notice A user's live Limit and StopLimit orders on `pair` — the entries of the pair's
@@ -1203,7 +1203,7 @@ contract BazaarPairLens {
     ///         gate reads the set in full; `stopCount` at its maximum marks a tally the gates
     ///         will not use until then.
     function restingTally(address pair, address user) external view returns (BazaarTypes.RestingTally memory t) {
-        IBazaarPairLens p = IBazaarPairLens(pair);
+        IBazaarPairView p = IBazaarPairView(pair);
         bytes32 base = keccak256(abi.encode(user, SLOT_RESTING_TALLY));
         uint256 sizes = uint256(p.extsload(base));
         uint256 notionals = uint256(p.extsload(bytes32(uint256(base) + 1)));
@@ -1250,7 +1250,7 @@ contract BazaarPairLens {
         view
         returns (uint256 longExposure, uint256 shortExposure, uint256 fillDebit)
     {
-        (uint256 spot,,,,) = IBazaarPairLens(pair).lastPairPrice();
+        (uint256 spot,,,,) = IBazaarPairView(pair).lastPairPrice();
         uint256[] memory all = _activeOrderIds(pair, user);
         uint64 currentBlock = _l2Block();
         for (uint256 i; i < all.length; ++i) {
@@ -1274,7 +1274,7 @@ contract BazaarPairLens {
         returns (uint256 notional, uint256 debit)
     {
         (,, uint8 otRaw,,,, address integrator,, bool inBook,, uint128 triggerPrice, uint128 limitPrice,,,,,,,,) =
-            IBazaarPairLens(pair).orders(orderId);
+            IBazaarPairView(pair).orders(orderId);
         BazaarTypes.OrderType ot = inBook ? BazaarTypes.OrderType.Limit : BazaarTypes.OrderType(otRaw);
         uint256 valuation = spot;
         if (ot == BazaarTypes.OrderType.StopLimit) {
@@ -1311,7 +1311,7 @@ contract BazaarPairLens {
     ///      EnumerableSet.UintSet, whose values array has its length at the mapping entry's slot
     ///      and its elements from keccak256 of that slot.
     function _activeOrderIds(address pair, address user) internal view returns (uint256[] memory ids) {
-        IBazaarPairLens p = IBazaarPairLens(pair);
+        IBazaarPairView p = IBazaarPairView(pair);
         bytes32 base = keccak256(abi.encode(user, SLOT_USER_ACTIVE_LIMIT_ORDERS));
         uint256 len = uint256(p.extsload(base));
         ids = new uint256[](len);
@@ -1337,7 +1337,7 @@ contract BazaarPairLens {
             uint128 size,
             uint128 filledSize,,
             uint64 filledBlock,,,,
-        ) = IBazaarPairLens(pair).orders(orderId);
+        ) = IBazaarPairView(pair).orders(orderId);
         if (canceledBlock != 0 || filledBlock != 0 || currentBlock > expiryBlock) return (false, long_, 0, 0);
         remaining = size - filledSize;
         notional = Math.mulDiv(remaining, limitPrice, BAZAAR_SCALE);
@@ -1355,14 +1355,14 @@ contract BazaarPairLens {
     /// @dev Read from the escrow's per-order mapping through `extsload`, at the slot
     ///      keccak256(orderId . SLOT_TRIGGER_BOUNTY).
     function triggerBounty(address pair, uint256 orderId) external view returns (uint256) {
-        return uint256(IBazaarPairLens(pair).extsload(keccak256(abi.encode(orderId, SLOT_TRIGGER_BOUNTY))));
+        return uint256(IBazaarPairView(pair).extsload(keccak256(abi.encode(orderId, SLOT_TRIGGER_BOUNTY))));
     }
 
     // ---- Order book views ----
 
     /// @dev limitPrice + book links of one order, read through the pair's public getter.
     function _bookNode(address pair, uint64 id) internal view returns (uint256 price, uint64 next) {
-        (,,,,,,,,,,, uint128 p,,,,,,,, uint48 nxt) = IBazaarPairLens(pair).orders(id);
+        (,,,,,,,,,,, uint128 p,,,,,,,, uint48 nxt) = IBazaarPairView(pair).orders(id);
         return (uint256(p), nxt);
     }
 
@@ -1377,7 +1377,7 @@ contract BazaarPairLens {
         view
         returns (uint256[] memory orderIds, uint256[] memory prices, uint64 nextId)
     {
-        (uint64 bidHead, uint64 askHead,,) = IBazaarPairLens(pair).book();
+        (uint64 bidHead, uint64 askHead,,) = IBazaarPairView(pair).book();
         uint64 cur = startId != 0 ? startId : (isLong ? bidHead : askHead);
         uint256[] memory ids = new uint256[](maxN);
         uint256[] memory pxs = new uint256[](maxN);
@@ -1431,7 +1431,7 @@ contract BazaarPairLens {
         view
         returns (uint64 pred, bool found)
     {
-        (uint64 bidHead, uint64 askHead,,) = IBazaarPairLens(pair).book();
+        (uint64 bidHead, uint64 askHead,,) = IBazaarPairView(pair).book();
         uint64 cur = startId != 0 ? startId : (isLong ? bidHead : askHead);
         pred = startId;
         for (uint256 i; i < maxIter; ++i) {
@@ -1450,6 +1450,6 @@ contract BazaarPairLens {
 
     /// @notice Returns the full auxiliary state struct (funding/mark/ADL/termination/warmup vars).
     function getAuxState(address pair) external view returns (BazaarTypes.AuxState memory) {
-        return IBazaarPairLens(pair).auxState();
+        return IBazaarPairView(pair).auxState();
     }
 }

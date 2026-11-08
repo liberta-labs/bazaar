@@ -97,10 +97,18 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
     /// @notice A pending, disputed deployment proposal whose assertion could not be settled was
     ///         discarded, releasing the pairId so the asset can be listed again. The escrowed seed
     ///         is credited to `seedRefundOwed`; the assertion itself is untouched on the OO. An
-    ///         undisputed proposal in the same position emits PairDeploymentProposalResolved.
+    ///         undisputed proposal in the same position emits PairDeploymentProposalResolved, or
+    ///         PairDeploymentProposalVoided if its assertion identifier has been removed.
     event PairDeploymentProposalExpired(bytes32 indexed assertionId, address indexed deployer);
 
-    /// @notice Escrowed seed became claimable by its deployer (proposal rejected or expired).
+    /// @notice An undisputed deployment proposal resolved after the identifier it was asserted
+    ///         under left UMA's live whitelist, so it was released instead of deployed: the pairId
+    ///         and feed slots are free again and the escrowed seed is credited to `seedRefundOwed`.
+    ///         Once the identifier is gone no dispute under it can be ruled on, and the factory
+    ///         cannot tell whether the removal came before the liveness ended.
+    event PairDeploymentProposalVoided(bytes32 indexed assertionId, address indexed deployer);
+
+    /// @notice Escrowed seed became claimable by its deployer (proposal rejected, expired or voided).
     event SeedRefundCredited(bytes32 indexed assertionId, address indexed deployer, uint256 amountUsdc);
 
     event SeedRefundClaimed(address indexed deployer, uint256 amountUsdc);
@@ -109,10 +117,12 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
 
     event UmaIdentifierUpgradeDisputed(bytes32 indexed assertionId);
 
-    /// @notice An upgrade proposal was approved and queued; it activates at effectiveTs. This
-    ///         event is the user-facing exit signal: the identifier decides how UMA voters
-    ///         adjudicate every future listing and termination, so anyone who distrusts the
-    ///         incoming one has until effectiveTs to close positions and withdraw.
+    /// @notice An upgrade proposal was approved and queued. It may activate from effectiveTs, or
+    ///         earlier once the incumbent identifier is off UMA's live whitelist, but never sooner
+    ///         than IDENTIFIER_UPGRADE_MIN_NOTICE after this event. This event is the user-facing
+    ///         exit signal: the identifier decides how UMA voters adjudicate every future listing
+    ///         and termination, so anyone who distrusts the incoming one has at least that long, in
+    ///         calendar time, to close positions and withdraw.
     event UmaIdentifierUpgradeQueued(bytes32 indexed assertionId, bytes32 newIdentifier, uint256 effectiveTs);
 
     event UmaIdentifierUpgraded(bytes32 indexed assertionId, bytes32 oldIdentifier, bytes32 newIdentifier);
@@ -145,7 +155,7 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
     error Factory__IdentifierNotWhitelisted(bytes32 identifier);
     error Factory__IdentifierNotAssertTruth(bytes32 identifier);
     error Factory__NoQueuedIdentifierUpgrade();
-    error Factory__IdentifierUpgradeTimelocked(uint256 effectiveTs);
+    error Factory__IdentifierUpgradeTimelocked(uint256 opensAt);
     error Factory__NoPendingIdentifierUpgrade();
     error Factory__IdentifierUpgradeNotExpired(uint256 expiryTs);
     error Factory__NoPendingDeployment(bytes32 pairId);
@@ -174,17 +184,32 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
     uint64 public constant IDENTIFIER_UPGRADE_LIVENESS = 2 days;
     /// @notice Delay between an upgrade proposal being APPROVED and the new identifier taking
     ///         effect. The dispute window defends against bad proposals; this timelock is the
-    ///         second line: if a bad upgrade somehow survives liveness/DVM, users get 12 days'
-    ///         notice to close positions and exit before the new identifier governs anything.
-    ///         Insurance-LP withdrawals are not released by it: InsuranceVaultLib's
-    ///         INSURANCE_WITHDRAWAL_COOLDOWN outlasts this timelock, so the fund that backstops
-    ///         those exits stays committed through the notice period.
-    uint256 public constant IDENTIFIER_UPGRADE_TIMELOCK = 12 days;
+    ///         second line: if a bad upgrade somehow survives liveness/DVM, users get notice to
+    ///         close positions and exit before the new identifier governs anything. Once the
+    ///         incumbent is off UMA's live whitelist, activation may come as soon as
+    ///         IDENTIFIER_UPGRADE_MIN_NOTICE after approval (see activateIdentifierUpgrade).
+    ///         InsuranceVaultLib's INSURANCE_WITHDRAWAL_COOLDOWN outlasts this timelock, so an
+    ///         insurance-LP withdrawal requested at or after approval ripens only after activation.
+    ///         Only one requested more than the cooldown less this timelock before approval can
+    ///         ripen inside the notice period: a standing request, or one filed during liveness
+    ///         when approval comes days after it ends.
+    uint256 public constant IDENTIFIER_UPGRADE_TIMELOCK = 7 days;
+    /// @notice How long after approval a queued upgrade may activate once the incumbent identifier
+    ///         is off UMA's live whitelist, in place of IDENTIFIER_UPGRADE_TIMELOCK. In that state
+    ///         listings and UMA termination proposals are refused until activation, so waiting out
+    ///         the full timelock would only keep them closed longer. The floor is calendar time. It
+    ///         outlasts a single holiday next to a weekend, so a session pair approved as its venue
+    ///         shuts still trades before activation; a longer closure can cover all of it, such as
+    ///         Easter on a venue that shuts both Good Friday and Easter Monday, or a week-long
+    ///         holiday. Shorter than the timelock.
+    uint256 public constant IDENTIFIER_UPGRADE_MIN_NOTICE = 4 days;
     /// @notice Extra wait, on top of an assertion's own liveness, before a DISPUTED proposal that
     ///         still cannot settle may be discarded. Shared by the deployment and identifier tracks:
     ///         the bound is a property of the DVM, not of what is being proposed. Only disputed
     ///         proposals need it — their unsettleability is expected while the DVM votes, and the
-    ///         factory cannot query whether that vote has finished.
+    ///         factory cannot query whether that vote has finished. A proposal disputed after its
+    ///         assertion identifier had already left UMA's live whitelist skips it
+    ///         (disputedAfterRemoval).
     ///         Derived from mainnet VotingV2 (0x004395edb43EFca9885CEdad51EC9fAf93Bd34ac):
     ///         phaseLength = 24h — so a commit+reveal round is 48h — and maxRolls = 4. Deletion
     ///         triggers on `rollCount > maxRolls`, so a request gets 5 rounds (initial + 4 rolls)
@@ -279,9 +304,9 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
 
     /// @notice Whether a deployment assertion was disputed, recorded from assertionDisputedCallback.
     /// @dev Keyed by assertionId rather than held in PairDeploymentProposal so the struct's public
-    ///      getter keeps a stable tuple shape for consumers. Read only by
-    ///      expireStuckDeploymentProposal, to tell "the DVM is still voting" from "this can never
-    ///      settle".
+    ///      getter keeps a stable tuple shape for consumers. Read by expireStuckDeploymentProposal,
+    ///      to tell "the DVM is still voting" from "this can never settle", and by
+    ///      _handleDeploymentResolution, which voids only an undisputed approval.
     mapping(bytes32 => bool) public deploymentDisputed;
 
     /// @notice USDC (6dp) a deployer may claim back because their proposal did not deploy a pair.
@@ -307,6 +332,16 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
 
     // set of all pair addresses (O(1) membership checks)
     EnumerableSet.AddressSet private _allPairs;
+
+    /// @dev Whether a proposal was disputed after the identifier its assertion was made under had
+    ///      already left UMA's live whitelist, recorded from assertionDisputedCallback on both
+    ///      tracks. Such a dispute's price request reaches the DVM after the removal and is
+    ///      refused, so no ruling can come, and the expiry paths may discard the proposal at once.
+    ///      A dispute filed while the identifier was live is not recorded: its request may have
+    ///      reached the DVM in time. If this chain's whitelist ever drops an identifier before
+    ///      mainnet's does, a dispute filed in between could still be voted on, and is discarded
+    ///      at once all the same. Internal, so the factory's ABI is unchanged.
+    mapping(bytes32 => bool) internal disputedAfterRemoval;
 
     // -------------------- Constructor --------------------
     /// @dev `_pairTerminator` is deployed by the deploy script with THIS factory's
@@ -414,12 +449,15 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
             }
         }
 
-        // Fail closed while the protocol's identifier is off UMA's live whitelist: disputes on new
-        // assertions are impossible in that state (VotingV2 re-checks the live list on every
-        // dispute), so a submission here would be adjudicated by nobody and auto-approve after
-        // liveness. Reverting keeps junk listings out of an undisputable pipeline; listings resume
-        // once the identifier-upgrade track (which stays open — see proposeUmaIdentifierUpgrade)
-        // has moved to a live identifier.
+        // Fail closed while the protocol's identifier is off UMA's live whitelist: no dispute on a
+        // new assertion can be resolved in that state. The DVM checks the live list when a
+        // dispute's price request reaches it and refuses a dead identifier. On Arbitrum, OOv3's
+        // oracle is UMA's OracleSpoke, which accepts the dispute and relays the request without
+        // that check, so the assertion is held but never ruled on and both bonds stay locked in
+        // OOv3. A submission here could therefore end only voided at settlement or discarded
+        // after a dispute that never resolves, so it is refused up front. Listings resume once the
+        // identifier-upgrade track (which stays open — see proposeUmaIdentifierUpgrade) has moved
+        // to a live identifier.
         if (!umaIdentifierIsLive()) revert Factory__IdentifierNotWhitelisted(umaIdentifier);
 
         bytes32 pairId = baseFeedId;
@@ -524,8 +562,8 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
     ///      attacker-chosen brick value unrepresentable. The assertion
     ///      itself runs under the CURRENT identifier while it is live, and under the PROPOSED
     ///      (validated-live) identifier once the incumbent has been de-whitelisted — so this path
-    ///      works in both modes without ever submitting under a dead identifier, and stays
-    ///      disputable in both. See the routing comment below.
+    ///      works in both modes without ever submitting under a dead identifier, and a dispute on
+    ///      it stays resolvable in both. See the routing comment below.
     function proposeUmaIdentifierUpgrade(bytes32 newIdentifier) external nonReentrant returns (bytes32 assertionId) {
         if (newIdentifier == bytes32(0)) revert Factory__InvalidIdentifier();
 
@@ -537,10 +575,10 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
             }
         }
 
-        // An approved upgrade waiting out its timelock blocks new proposals; once the timelock
-        // has elapsed, activate it now rather than leaving it stranded.
+        // An approved upgrade waiting out its timelock blocks new proposals; once it may activate
+        // (_activationOpensAt), activate it now rather than leaving it stranded.
         if (queuedIdentifierUpgrade.effectiveTs != 0) {
-            if (block.timestamp < queuedIdentifierUpgrade.effectiveTs) {
+            if (block.timestamp < _activationOpensAt(queuedIdentifierUpgrade)) {
                 revert Factory__IdentifierUpgradeStillPending();
             }
             activateIdentifierUpgrade();
@@ -562,11 +600,18 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
 
         // Which identifier carries the assertion itself. Normally the incumbent — proposers must
         // not get to choose the adjudication identifier while governance is healthy. But if the
-        // incumbent has been de-whitelisted, an assertion under it would be undisputable (the DVM
-        // rejects dispute price requests against the live whitelist), turning this into
-        // first-proposer-wins governance. Routing the assertion under the PROPOSED identifier —
-        // just validated live above — keeps the recovery proposal disputable. This is the one
-        // UMA submission that must never gate on the incumbent being live: it is the repair path.
+        // incumbent has been de-whitelisted, no dispute under it can be resolved (see the gate in
+        // proposePairDeployment): a proposal would pass unless disputed, and a disputed one would
+        // hold the single pending slot until expireStuckIdentifierUpgradeProposal discards it.
+        // Routing the assertion under the PROPOSED identifier — just validated live above — keeps
+        // a dispute on the recovery proposal resolvable. The choice is made once, at proposal: one
+        // asserted under the incumbent shortly before its removal keeps that identifier, a dispute
+        // filed after the removal can never be ruled on, and expireStuckIdentifierUpgradeProposal
+        // discards such a proposal at once. An undisputed one is still approved, unlike a listing
+        // in that position: while UMA whitelists a single successor, the name and whitelist checks
+        // leave it the only candidate, so voiding it would only delay the one valid repair. This
+        // is the one UMA submission that must never gate on the incumbent being live: it is the
+        // repair path.
         bytes32 assertionIdentifier = umaIdentifierIsLive() ? umaIdentifier : newIdentifier;
 
         IERC20Minimal usdcToken = IERC20Minimal(usdc);
@@ -638,8 +683,9 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
     }
 
     /// @notice Release a pairId whose deployment assertion cannot be settled on the OO. An
-    ///         undisputed proposal is approved and its pair deployed; a disputed one is discarded
-    ///         and its escrowed seed made claimable by the deployer. Permissionless.
+    ///         undisputed proposal is approved and its pair deployed, or voided if its assertion
+    ///         identifier has been removed; a disputed one is discarded. A proposal that does not
+    ///         deploy has its escrowed seed made claimable by the deployer. Permissionless.
     /// @dev OOv3 pays the winning party BEFORE firing the resolve callback (`settleAssertion`), so a
     ///      payout that reverts takes settlement down with it and the callback never fires. Every
     ///      outcome has such a party: the deployer receives the bond when undisputed or ruled TRUE,
@@ -660,7 +706,8 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
     ///      give anyone a veto over every listing for the price of gas. The outcome is known
     ///      without settling (_approvalIsFixed), so the factory applies it here. Forcing the
     ///      failure then gains a caller nothing, and a deployer whose bond payout is blocked still
-    ///      gets the listing the unchallenged liveness window earned; only the bond waits on the OO.
+    ///      gets the listing the unchallenged liveness window earned, unless its identifier has
+    ///      since been removed (_handleDeploymentResolution); only the bond waits on the OO.
     ///
     ///      DISPUTED proposals wait out DVM_DISPUTE_GRACE on top of liveness, because being
     ///      unsettleable is expected while the DVM votes and whether that vote finished is not
@@ -668,15 +715,27 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
     ///      liveness ended regardless of how the DVM later voted, turning one bond into a guaranteed
     ///      veto on any listing. Past the grace they are discarded: their outcome is the DVM's, and
     ///      nothing here can read it.
+    ///
+    ///      The exception is a proposal disputed after its assertion identifier had already left
+    ///      UMA's live whitelist (disputedAfterRemoval), which is discarded at once while the
+    ///      identifier stays removed. Its price request reaches the DVM after the removal and is
+    ///      refused, so no ruling can come, and waiting out the grace would only hold the asset's
+    ///      listing slot. A dispute filed while the identifier was live keeps the grace even after
+    ///      a later removal: its request may have reached the DVM in time, and the ruling it gets
+    ///      still counts. The identifier counts as removed only when the whitelist answers that
+    ///      it is unsupported (_identifierRemoved), so a lookup that fails keeps the grace.
     /// @param pairId The asset whose pending proposal should be released.
     function expireStuckDeploymentProposal(bytes32 pairId) external nonReentrant {
         bytes32 assertionId = pendingDeploymentByPairId[pairId];
         if (assertionId == bytes32(0)) revert Factory__NoPendingDeployment(pairId);
 
         PairDeploymentProposal storage p = deploymentProposals[assertionId];
-        uint256 expiryTs = p.proposalTs + DEPLOYMENT_LIVENESS;
-        if (deploymentDisputed[assertionId]) expiryTs += DVM_DISPUTE_GRACE;
-        if (block.timestamp < expiryTs) revert Factory__DeploymentNotExpired(expiryTs);
+        bool disputed = deploymentDisputed[assertionId];
+        if (!(disputedAfterRemoval[assertionId] && _assertionIdentifierRemoved(assertionId))) {
+            uint256 expiryTs = p.proposalTs + DEPLOYMENT_LIVENESS;
+            if (disputed) expiryTs += DVM_DISPUTE_GRACE;
+            if (block.timestamp < expiryTs) revert Factory__DeploymentNotExpired(expiryTs);
+        }
 
         // Prefer the real outcome. On success the resolve callback releases the pairId and either
         // deploys the pair or credits the refund, so there is nothing left to do.
@@ -699,7 +758,7 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
         emit PairDeploymentProposalExpired(assertionId, p.deployer);
     }
 
-    /// @notice Withdraw seed escrow owed to you from a rejected or expired deployment proposal.
+    /// @notice Withdraw seed escrow owed to you from a rejected, expired or voided deployment proposal.
     /// @dev Only ever pays the caller: an address that cannot receive USDC must not be able to
     ///      stall anyone else, nor to redirect its own credit elsewhere.
     function claimSeedRefund() external nonReentrant {
@@ -726,8 +785,8 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
     ///      UNDISPUTED proposals are approved when that attempt fails, never discarded, for the
     ///      reason given on expireStuckDeploymentProposal: a caller can force the failure from
     ///      inside one of OOv3's callbacks, and the outcome is known without settling
-    ///      (_approvalIsFixed). Approval only queues the upgrade; it still waits out
-    ///      IDENTIFIER_UPGRADE_TIMELOCK and the whitelist re-check at activation.
+    ///      (_approvalIsFixed). Approval only queues the upgrade; it still waits for
+    ///      activateIdentifierUpgrade and its whitelist re-check.
     ///
     ///      DISPUTED proposals are the one case a timer is unavoidable: being unsettleable is
     ///      expected while the DVM votes, and whether that vote has finished is not queryable from
@@ -735,14 +794,23 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
     ///      DVM_DISPUTE_GRACE keeps a dispute from becoming a cheap veto: without
     ///      it, any disputer could discard the proposal the moment liveness ended, regardless of
     ///      how the DVM later voted. Past the grace they are discarded.
+    ///
+    ///      A proposal disputed after its assertion identifier had already left UMA's live
+    ///      whitelist is discarded at once, on the terms given on expireStuckDeploymentProposal.
+    ///      Here that frees the single slot for a new proposal, which proposeUmaIdentifierUpgrade
+    ///      asserts under the proposed identifier when the removed one is the incumbent, so a
+    ///      dispute on it can be ruled on.
     function expireStuckIdentifierUpgradeProposal() external nonReentrant {
         bytes32 assertionId = pendingIdentifierUpgradeAssertionId;
         if (assertionId == bytes32(0)) revert Factory__NoPendingIdentifierUpgrade();
 
         UmaIdentifierUpgradeProposal storage p = identifierUpgradeProposals[assertionId];
-        uint256 expiryTs = p.proposalTs + IDENTIFIER_UPGRADE_LIVENESS;
-        if (p.disputed) expiryTs += DVM_DISPUTE_GRACE;
-        if (block.timestamp < expiryTs) revert Factory__IdentifierUpgradeNotExpired(expiryTs);
+        bool disputed = p.disputed;
+        if (!(disputedAfterRemoval[assertionId] && _assertionIdentifierRemoved(assertionId))) {
+            uint256 expiryTs = p.proposalTs + IDENTIFIER_UPGRADE_LIVENESS;
+            if (disputed) expiryTs += DVM_DISPUTE_GRACE;
+            if (block.timestamp < expiryTs) revert Factory__IdentifierUpgradeNotExpired(expiryTs);
+        }
 
         // Prefer the real outcome. On success the resolve callback clears the slot and queues the
         // upgrade if it was approved, so there is nothing left to do.
@@ -794,12 +862,16 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
     }
 
     /// @notice Called by UMA oracle when assertion is disputed. Proposal stays pending during DVM voting.
-    /// @dev Records the dispute against the matching track and nothing else. Both branches are plain
-    ///      storage writes: this callback runs inside OOv3.disputeAssertion with no try/catch, so it
-    ///      must never revert or disputes themselves become impossible. The flag is what lets the
-    ///      expiry paths tell "the DVM has not finished voting" from "this can never settle".
+    /// @dev Records the dispute against the matching track and, in disputedAfterRemoval, whether
+    ///      the assertion's identifier had already left UMA's live whitelist, and nothing else. This
+    ///      callback runs inside OOv3.disputeAssertion with no try/catch, so it must never revert or
+    ///      disputes themselves become impossible: the writes are plain storage writes, and the read
+    ///      cannot revert (_assertionIdentifierRemoved). The flags are what let the expiry paths tell
+    ///      "the DVM has not finished voting" from "this can never settle".
     function assertionDisputedCallback(bytes32 assertionId) external override {
         if (msg.sender != address(assertionOo[assertionId])) revert Factory__OnlyUmaOracle();
+
+        if (_assertionIdentifierRemoved(assertionId)) disputedAfterRemoval[assertionId] = true;
 
         if (deploymentProposals[assertionId].deployer != address(0)) {
             deploymentDisputed[assertionId] = true;
@@ -881,8 +953,9 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
     }
 
     /// @dev Move a proposal's escrowed seed into its deployer's claimable balance. Called once per
-    ///      proposal: both call sites release the pending slots (_releasePending) and set `resolved`
-    ///      in the same transaction, and each is reachable only while those are still unset.
+    ///      proposal: every call site (a rejection, a void, an expiry discard) releases the pending
+    ///      slots (_releasePending) and sets `resolved` in the same transaction, and each is
+    ///      reachable only while those are still unset.
     function _creditSeedRefund(bytes32 assertionId, PairDeploymentProposal storage p) internal {
         uint256 amount = p.seedAmountUsdc;
         if (amount == 0) return;
@@ -928,6 +1001,19 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
             return;
         }
 
+        // An undisputed approval made under an identifier UMA has since removed is released
+        // instead of deployed. Its only check was the chance to dispute, no dispute under a
+        // removed identifier can be ruled on, and the factory cannot tell whether the removal
+        // came before the liveness ended. A disputed proposal that resolved TRUE was ruled on by
+        // the DVM and deploys as usual. The deployer gets the seed back through seedRefundOwed
+        // and the bond from UMA, and can propose again under a live identifier.
+        if (!deploymentDisputed[assertionId] && _assertionIdentifierRemoved(assertionId)) {
+            _releasePending(p);
+            _creditSeedRefund(assertionId, p);
+            emit PairDeploymentProposalVoided(assertionId, p.deployer);
+            return;
+        }
+
         // Assertion was truthful. The bond is UMA's to return to the deployer when the assertion
         // settles. Deploy the pair with the escrowed seed.
         _releasePending(p);
@@ -967,19 +1053,23 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
         }
     }
 
-    /// @notice Activate an approved identifier upgrade once its 12-day timelock has elapsed.
-    ///         Callable by anyone. The delay is the users' guaranteed exit window: between
-    ///         approval (UmaIdentifierUpgradeQueued) and activation the incoming identifier
-    ///         governs nothing, so anyone who distrusts it can close positions and withdraw first.
+    /// @notice Activate an approved identifier upgrade once it may activate: when its timelock has
+    ///         elapsed, or, while the incumbent identifier is off UMA's live whitelist, from
+    ///         IDENTIFIER_UPGRADE_MIN_NOTICE after approval. Callable by anyone. The delay is the
+    ///         users' guaranteed exit window: between approval (UmaIdentifierUpgradeQueued) and
+    ///         activation the incoming identifier governs nothing, so anyone who distrusts it can
+    ///         close positions and withdraw first. A call that comes too early reverts with the
+    ///         time activation opens.
     function activateIdentifierUpgrade() public {
         QueuedIdentifierUpgrade memory queued = queuedIdentifierUpgrade;
         if (queued.effectiveTs == 0) revert Factory__NoQueuedIdentifierUpgrade();
-        if (block.timestamp < queued.effectiveTs) revert Factory__IdentifierUpgradeTimelocked(queued.effectiveTs);
+        uint256 opensAt = _activationOpensAt(queued);
+        if (block.timestamp < opensAt) revert Factory__IdentifierUpgradeTimelocked(opensAt);
 
         delete queuedIdentifierUpgrade;
 
-        // Re-validate at activation: the identifier was whitelisted at propose time, but liveness
-        // plus the timelock leave 14 days in which UMA can de-whitelist it. A dud must CANCEL
+        // Re-validate at activation: the identifier was whitelisted at propose time, but UMA can
+        // de-whitelist it between proposal and activation. A dud must CANCEL
         // (keep the incumbent identifier) rather than revert — reverting would strand the queue
         // forever, and proposeUmaIdentifierUpgrade's auto-activation would brick with it.
         // Cancellation keeps governance live: a corrected upgrade can be proposed immediately.
@@ -999,15 +1089,16 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
         emit UmaIdentifierUpgraded(queued.assertionId, oldIdentifier, queued.newIdentifier);
     }
 
-    /// @dev NO ROLLBACK LEVER, deliberately. Reverting to a predecessor identifier would require
-    ///      it to still be whitelisted, but a full upgrade cycle (2d liveness + 12d timelock = 14
-    ///      days) outlasts the ~7.7-day window UMA leaves between whitelisting a successor and
-    ///      retiring its predecessor — so a rollback target is already gone by the time it could
-    ///      be used. Nor would it help in the case that actually wants a rollback: an identifier
-    ///      that is semantically wrong but still whitelisted. A permissionless writer of
-    ///      `umaIdentifier` is therefore a liability, not insurance. The identifier-upgrade track
-    ///      is the sole recovery route; fail-closed gates hold listings and terminations meanwhile,
-    ///      so the cost of a slow recovery is liveness only.
+    // NO ROLLBACK LEVER, deliberately. Reverting to a predecessor identifier would require it to
+    // still be whitelisted, but a full upgrade cycle (IDENTIFIER_UPGRADE_LIVENESS plus
+    // IDENTIFIER_UPGRADE_TIMELOCK, 9 days) outlasts the ~7.7-day window UMA leaves between
+    // whitelisting a successor and retiring its predecessor, and a cycle ends sooner only once
+    // the predecessor is already off the whitelist — so a rollback target is gone by the time it
+    // could be used. Nor would it help in the case that actually wants a rollback: an identifier
+    // that is semantically wrong but still whitelisted. A permissionless writer of
+    // `umaIdentifier` is therefore a liability, not insurance. The identifier-upgrade track is
+    // the sole recovery route; fail-closed gates hold listings and terminations meanwhile, so the
+    // cost of a slow recovery is liveness only.
 
     /// @notice USDC a deployment proposal must post as its UMA bond.
     /// @dev Bazaar's constant is a floor, not the figure. UMA derives its own minimum from the final
@@ -1030,10 +1121,12 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
     }
 
     /// @notice Whether the protocol's current identifier is on UMA's LIVE IdentifierWhitelist.
-    ///         False means new assertions would be undisputable (the DVM rejects dispute price
-    ///         requests against the live list), so listing and termination proposals fail closed
-    ///         and the identifier-upgrade track routes its assertion under the proposed identifier
-    ///         instead. Also the one-call monitoring endpoint: alarm when this turns false.
+    ///         False means no dispute on a new assertion could be resolved (the DVM refuses price
+    ///         requests for an identifier off its list), so listing and termination proposals fail
+    ///         closed and the identifier-upgrade track routes its assertion under the proposed
+    ///         identifier instead. The list read is this chain's copy, which UMA updates by relay
+    ///         from its mainnet governance, so it can trail the list the DVM checks. Also the
+    ///         one-call monitoring endpoint: alarm when this turns false.
     function umaIdentifierIsLive() public view returns (bool) {
         return _identifierWhitelisted(address(oo), umaIdentifier);
     }
@@ -1046,28 +1139,81 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
         return (id & ASSERT_TRUTH_PREFIX_MASK) == ASSERT_TRUTH_PREFIX;
     }
 
-    /// @dev Checks a candidate identifier against UMA's LIVE IdentifierWhitelist, resolved the
-    ///      same way OOv3 resolves it: oracle → finder → getImplementationAddress → whitelist.
-    ///      Every hop is a raw staticcall with its success flag checked, so this never reverts —
-    ///      it must stay usable inside `activateIdentifierUpgrade`'s cancel path, and behind the
-    ///      fail-closed gates, regardless of external contract state.
-    ///      Deliberately checks the live registry rather than OOv3's cache: the DVM re-reads the
-    ///      live list on every dispute, so the live list — not the cache — is what decides whether
-    ///      an identifier's dispute layer still works.
-    function _identifierWhitelisted(address oracle_, bytes32 id) internal view returns (bool) {
+    /// @dev Reads UMA's LIVE IdentifierWhitelist for `id`, resolved the same way OOv3 resolves it:
+    ///      oracle → finder → getImplementationAddress → whitelist. Every hop is a raw staticcall
+    ///      whose success flag and reply are checked, so this never reverts — it must stay usable
+    ///      inside `activateIdentifierUpgrade`'s cancel path, behind the fail-closed gates and
+    ///      inside the resolve and dispute callbacks, regardless of external contract state.
+    ///      `answered` is false when any hop fails. A caller can make a hop fail by limiting gas,
+    ///      but under the 63/64 rule what is left for the rest of the transaction is then too
+    ///      little for the write, event or call each caller makes next, so a starved lookup
+    ///      reverts the transaction instead of steering it. Each reading maps a failed lookup to
+    ///      the default path: the gates stay closed and an activation cancels
+    ///      (_identifierWhitelisted), while early activation, the immediate discard and the void
+    ///      stay off (_identifierRemoved).
+    ///      Deliberately reads the live registry rather than OOv3's cache: the DVM checks its live
+    ///      list when a dispute's price request arrives, so the live list — not the cache — is what
+    ///      decides whether an identifier's dispute layer still works.
+    function _whitelistAnswer(address oracle_, bytes32 id) internal view returns (bool answered, bool supported) {
         (bool ok, bytes memory ret) = oracle_.staticcall(abi.encodeWithSelector(IOptimisticOracleV3.finder.selector));
-        if (!ok || ret.length < 32) return false;
-        address finderAddr = abi.decode(ret, (address));
+        if (!ok || ret.length < 32) return (false, false);
+        uint256 word = abi.decode(ret, (uint256));
+        if (word >> 160 != 0) return (false, false);
+        address finderAddr = address(uint160(word));
 
         (ok, ret) = finderAddr.staticcall(
             abi.encodeWithSignature("getImplementationAddress(bytes32)", bytes32("IdentifierWhitelist"))
         );
-        if (!ok || ret.length < 32) return false;
-        address whitelist = abi.decode(ret, (address));
+        if (!ok || ret.length < 32) return (false, false);
+        word = abi.decode(ret, (uint256));
+        if (word >> 160 != 0) return (false, false);
+        address whitelist = address(uint160(word));
 
         (ok, ret) = whitelist.staticcall(abi.encodeWithSignature("isIdentifierSupported(bytes32)", id));
-        if (!ok || ret.length < 32) return false;
-        return abi.decode(ret, (bool));
+        if (!ok || ret.length < 32) return (false, false);
+        // Decoded as a raw word so a malformed reply reads as no answer instead of reverting.
+        word = abi.decode(ret, (uint256));
+        if (word > 1) return (false, false);
+        return (true, word == 1);
+    }
+
+    /// @dev Whether `id` is on the live whitelist. A failed lookup reads as not whitelisted: the
+    ///      gates that call this stay closed, and an activation cancels rather than adopt an
+    ///      identifier it could not check.
+    function _identifierWhitelisted(address oracle_, bytes32 id) internal view returns (bool) {
+        (bool answered, bool supported) = _whitelistAnswer(oracle_, id);
+        return answered && supported;
+    }
+
+    /// @dev Whether the live whitelist answers that `id` is unsupported. Used where a removed
+    ///      identifier unlocks something (early activation, an immediate discard, a voided
+    ///      listing), so a failed lookup reads as not removed and the default path stays in place.
+    function _identifierRemoved(address oracle_, bytes32 id) internal view returns (bool) {
+        (bool answered, bool supported) = _whitelistAnswer(oracle_, id);
+        return answered && !supported;
+    }
+
+    /// @dev Whether the identifier `assertionId` was asserted under is now removed from the live
+    ///      whitelist (_identifierRemoved). Read from the OO that holds the assertion, as
+    ///      _approvalIsFixed reads it; a failed read reports false. Safe inside OOv3's resolve
+    ///      callback: getAssertion takes no lock, a reverting call reports false, and the lookup
+    ///      never reverts.
+    function _assertionIdentifierRemoved(bytes32 assertionId) internal view returns (bool) {
+        IOptimisticOracleV3 assertionOracle = assertionOo[assertionId];
+        try assertionOracle.getAssertion(assertionId) returns (IOptimisticOracleV3.Assertion memory a) {
+            return _identifierRemoved(address(assertionOracle), a.identifier);
+        } catch {
+            return false;
+        }
+    }
+
+    /// @dev When `queued` may activate: at its effectiveTs, or IDENTIFIER_UPGRADE_MIN_NOTICE after
+    ///      approval while the incumbent identifier is removed from the live whitelist
+    ///      (_identifierRemoved). Approval is recovered as effectiveTs minus
+    ///      IDENTIFIER_UPGRADE_TIMELOCK, the instant the upgrade was queued.
+    function _activationOpensAt(QueuedIdentifierUpgrade memory queued) internal view returns (uint256) {
+        if (!_identifierRemoved(address(oo), umaIdentifier)) return queued.effectiveTs;
+        return queued.effectiveTs - IDENTIFIER_UPGRADE_TIMELOCK + IDENTIFIER_UPGRADE_MIN_NOTICE;
     }
 
     function _executePairDeployment(PairDeploymentProposal storage p) internal {

@@ -45,7 +45,7 @@ External dependencies on Arbitrum Sepolia:
 | Contract | Address |
 |---|---|
 | Pyth Core | `0x4374e5a8b9C22271E9EB878A2AA31DE97DF15DAF` |
-| USDC (testnet) | `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d` |
+| USDC (testnet) | By default a **`TestnetUSDC`** deployed by the script and owned by the deploying account, so the testnet has enough USDC to list pairs and trade: anyone can call `claim()` for 10,000 USDC once every 24 hours per address, and the owner mints any amount. Like USDC it has 6 decimals and an ERC-2612 permit. With `SEPOLIA_OFFICIAL_USDC=true` the script uses Circle's test USDC, `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`, instead, to rehearse the mainnet deployment against the real token; Circle's faucet pays out only small amounts |
 | UMA OOv3 | **mock** (`OwnedMockOptimisticOracleV3`), deployed by the script and owned by the deploying account, which alone can force-settle assertions, resolve disputes, and set the identifier whitelist and minimum bond (Bazaar's assertions set their own liveness periods). UMA's own Arbitrum Sepolia OOv3 is not used: it does not accept Circle's test USDC as bond collateral, and its stand-in DVM lets anyone resolve a dispute |
 
 ## Anvil (31337)

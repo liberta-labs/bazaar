@@ -18,6 +18,7 @@ Read those from `BazaarPairLens` over RPC, as front ends and keepers already do 
 | `networks.json` | Addresses and start blocks per network |
 | `src/` | Handlers: `factory.ts`, `terminator.ts`, `oracle.ts`, and `pair.ts`, which re-exports the pair handlers in `src/pair/` |
 | `tests/` | Matchstick unit tests |
+| `e2e/` | Local end-to-end run: Graph Node in Docker, Anvil, a trading scenario and a checker against chain reads |
 
 ## Requirements
 
@@ -25,7 +26,8 @@ Run everything from WSL, where Foundry also lives.
 
 - Node.js 20.18.1 or newer, which the Graph CLI's package requires.
 - PostgreSQL client libraries, which Matchstick links against: `sudo apt install postgresql libpq-dev`.
-- Optional, for indexing a local chain: Docker Desktop with WSL integration, to run Graph Node.
+- Optional, for the local end-to-end run: Docker Desktop, to run Graph Node, and `python3`, `jq` and
+  `rsync` in WSL.
 
 ## ABIs
 
@@ -77,10 +79,60 @@ npm test
 `subgraph.yaml`. The manifest is kept in the format the CLI writes, so a build changes nothing but
 those values.
 
-For a local chain, run Graph Node with its chain named `anvil` (for example
-`ethereum: 'anvil:http://host.docker.internal:8545'` in Graph Node's Docker Compose file), fill the
-`anvil` entry of `networks.json` from the addresses `make deploy-anvil` prints, and run
-`npm run build:local` then `npm run deploy:local`.
+## Local end-to-end run
+
+`e2e/` indexes a local Anvil chain with a local Graph Node, drives a trading scenario, and checks
+what the subgraph indexed against direct chain reads. Run it after changing a handler or an event.
+
+The scenario lists an ETH/USD pair, then rests, takes, cancels and amends orders, fires a stop-loss
+and a stop-limit through a keeper, refreshes the price, liquidates a position and unloads the vault
+into the book, withdraws collateral, sweeps an expired order, takes an insurance withdrawal through
+request, lock and claim, and claims keeper fees. ADL and termination are not exercised.
+
+The checker compares every order, both sides of the book level by level, every position, open
+interest, insurance stakes and requests, and claimable fees with the contracts' getters, and every
+record with the event log it came from. It exits 1 on any mismatch.
+
+From the repository root, in WSL, with the contracts built and `npm install` done in `subgraph/`:
+
+```bash
+docker compose -f subgraph/e2e/docker-compose.yml -p bazaar-graph up -d
+```
+
+```bash
+anvil --host 0.0.0.0 --code-size-limit 100000
+```
+
+Then, in another shell:
+
+```bash
+bash subgraph/e2e/deploy-contracts.sh
+bash subgraph/e2e/deploy-subgraph.sh
+python3 subgraph/e2e/scenario.py
+python3 subgraph/e2e/check.py
+```
+
+- Queries go to `http://localhost:8000/subgraphs/name/bazaar/graphql`.
+- The scripts share `/tmp/bazaar-e2e` (`E2E_WORK`): the addresses, the scenario's progress, logs, and
+  a built copy of the subgraph. The copy holds the Anvil addresses, so the tracked `subgraph.yaml`
+  and `networks.json` stay as they are.
+- `REPO` points both deploy scripts at another built checkout of the contracts, so you can deploy
+  from it without rebuilding here.
+- A failed scenario step stops the run with the decoded revert. Rerunning `scenario.py` resumes from
+  that step.
+- After a handler change, run `deploy-subgraph.sh v0.0.2` (any new label). That reindexes the same
+  chain from block 0; then run `check.py` again.
+- For a fresh chain, restart Anvil and rerun everything from `deploy-contracts.sh`.
+- To stop, run `docker compose -p bazaar-graph down -v` and stop Anvil.
+
+Docker Desktop runs inside the same WSL VM as Foundry. Stop the containers before a large
+`forge build`.
+
+Without WSL integration in Docker Desktop, run the `docker compose` command from Windows instead.
+Run it from the repository's Windows path; the rest is unchanged.
+
+The containers reach Anvil through `host.docker.internal`. This was tested with WSL's mirrored
+networking mode.
 
 ## Semantics worth knowing
 

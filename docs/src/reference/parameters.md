@@ -112,8 +112,8 @@ All constants live in `src/libraries/BazaarTypes.sol`, `src/libraries/RiskParams
 | Parameter | Value |
 |---|---|
 | Listing | ≥ $4,000 = $1,000 UMA bond + ≥ $3,000 seed (`MIN_INSURANCE_SEED`); 48 h liveness |
-| UMA identifier upgrade | $5,000 bond, 2-day liveness, then a 12-day activation timelock (`IDENTIFIER_UPGRADE_TIMELOCK`) after approval |
-| `DVM_DISPUTE_GRACE` | 14 days on top of liveness before a **disputed** proposal may be discarded as unsettleable; shared by the deployment and identifier tracks (it bounds the DVM, not the claim) |
+| UMA identifier upgrade | $5,000 bond, 2-day liveness, then a 7-day activation timelock (`IDENTIFIER_UPGRADE_TIMELOCK`) after approval, or 4 days (`IDENTIFIER_UPGRADE_MIN_NOTICE`) once the incumbent identifier is off UMA's live whitelist |
+| `DVM_DISPUTE_GRACE` | 14 days on top of liveness before a **disputed** proposal may be discarded as unsettleable; shared by the deployment and identifier tracks (it bounds the DVM, not the claim); skipped for a dispute filed after the assertion's identifier had already left UMA's live whitelist, since no ruling can come |
 | Bond constants | floors, not fixed amounts — `requiredDeploymentBond()` / `requiredIdentifierUpgradeBond()` / `requiredTerminationBond()` each return `max(constant, UMA's live minimum)` |
 | Proposer free text | listing `description` ≤ 200 bytes; termination `reason` ≤ 1,000 (`MAX_REASON_LENGTH`); restricted ASCII, no square brackets |
 | Scheduled termination | $1,000 bond, 12 h liveness, `lastTradingTs` ≥ 2 h out (`INSURER_TERMINATION_MIN_LEAD`), enforceable as proposed by acceptance alone only when ≥ 12 h out; every claim opens an insurer vote on its cutoff; settles at the first Pyth print in the 3 s window ending at the cutoff (`MAX_PRICE_STALENESS`), with limbo from 6 s before it (`LIMBO_LEAD`); 12 h precise-tick grace from the cutoff, which moves to 7 s after acceptance when the proposed one is sooner; for a pair a vote halted under a claim UMA upheld, the grace counts from when the verdict became known (the end of the liveness, or the on-chain recording of a disputed result) if that is later |

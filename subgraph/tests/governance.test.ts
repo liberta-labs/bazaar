@@ -2,6 +2,7 @@ import { BigInt, Bytes } from "@graphprotocol/graph-ts"
 import { assert, beforeEach, clearStore, describe, test } from "matchstick-as/assembly/index"
 import {
   handlePairDeployed,
+  handlePairDeploymentProposalVoided,
   handlePairDeploymentProposed,
   handleUmaIdentifierUpgradeDisputed,
   handleUmaIdentifierUpgradeProposed,
@@ -32,6 +33,7 @@ import {
   mockFactoryReads,
   mockSchedule,
   pairDeployed,
+  pairDeploymentProposalVoided,
   pairDeploymentProposed,
   pairTerminated,
   settlementPriceFixed,
@@ -59,6 +61,14 @@ describe("listings and identifier upgrades", () => {
     assert.fieldEquals("Pair", PAIR.toHexString(), "listing", ASSERTION_A.toHexString())
     assert.fieldEquals("Protocol", "bazaar", "pairCount", "1")
     assert.fieldEquals("Protocol", "bazaar", "umaIdentifier", "0x4153534552545f54525554483200000000000000000000000000000000000000")
+  })
+
+  test("a listing voided after its identifier's removal is marked Voided", () => {
+    mockFactoryReads()
+    handlePairDeploymentProposed(pairDeploymentProposed(ASSERTION_A))
+    handlePairDeploymentProposalVoided(pairDeploymentProposalVoided(ASSERTION_A))
+    assert.fieldEquals("ListingProposal", ASSERTION_A.toHexString(), "status", "Voided")
+    assert.fieldEquals("ListingProposal", ASSERTION_A.toHexString(), "resolvedAt", "1800000000")
   })
 
   test("a disputed upgrade the next proposal replaces is marked Rejected", () => {

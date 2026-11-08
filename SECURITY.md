@@ -59,9 +59,9 @@ Read this before reporting; it rules out a class of findings that do not apply h
 - **One governed parameter**, and it is the loudest one: the UMA identifier that assertions are
   adjudicated under. It moves only through a bonded assertion (at least $5,000,
   `IDENTIFIER_UPGRADE_BOND_USDC`), a 2-day dispute window (`IDENTIFIER_UPGRADE_LIVENESS`), a
-  whitelist re-check, and a 12-day activation timelock (`IDENTIFIER_UPGRADE_TIMELOCK`) users can
-  exit during. While the identifier is off UMA's live whitelist, listings and UMA terminations fail
-  closed rather than entering an undisputable pipeline. `BazaarFactory.umaIdentifierIsLive()` is the
+  whitelist re-check, and a 7-day activation timelock (`IDENTIFIER_UPGRADE_TIMELOCK`; 4 days,
+  `IDENTIFIER_UPGRADE_MIN_NOTICE`, once UMA has removed the incumbent) users can exit during. While the identifier is off UMA's live whitelist, listings and UMA terminations fail
+  closed rather than entering a pipeline where no dispute can be resolved. `BazaarFactory.umaIdentifierIsLive()` is the
   one-call monitoring endpoint.
 - **Matching fairness is structural, not promised.** The order book lives on-chain, sorted, and
   [matching happens on arrival][matching]: price-time priority and every fill price are enforced

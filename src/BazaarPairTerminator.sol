@@ -362,10 +362,12 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
         }
         _validateReason(reason);
 
-        // Fail closed while the protocol's identifier is off UMA's live whitelist — an assertion
-        // made now would be undisputable (auto-TRUE after liveness), and termination proposals
-        // pin settlement semantics. Non-UMA termination paths (insurer vote, stale price,
-        // insolvency) remain available; this path resumes after the identifier upgrade.
+        // Fail closed while the protocol's identifier is off UMA's live whitelist: no dispute on
+        // an assertion made now could be resolved (BazaarFactory.proposePairDeployment explains
+        // why), so a claim would be accepted after liveness unless disputed, at the cost of a bond
+        // that never returns, and termination proposals pin settlement semantics. Non-UMA
+        // termination paths (insurer vote, stale price, insolvency) remain available; this path
+        // resumes after the identifier upgrade.
         if (!IBazaarFactory(factory).umaIdentifierIsLive()) revert BazaarPairTerminator__UmaIdentifierNotLive();
 
         IOptimisticOracleV3 oo = _oo();

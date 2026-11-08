@@ -1,22 +1,58 @@
-// SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity 0.8.34;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.16;
 
+/// @title IBazaarOracle
+/// @notice The external interface of BazaarOracle, the Pyth adapter every pair prices through:
+///         fresh and stale reads, update-and-fetch, the settlement samplers, and composite feeds
+///         that price an asset in USD from its native-currency feed and an FX feed.
+/// @dev Declares every function, event and error in the oracle's ABI.
+///      `script/check-interfaces.sh`, which `make abis` and CI run, fails on any difference
+///      between this interface and that ABI in a name, a type, an indexed flag or a state mutability.
+///      MIT-licensed, unlike the AGPL implementation, so integrators can compile it into their own code.
 interface IBazaarOracle {
-    /// @notice Parse a price update and return the USD price of the first tick published at or after
-    ///         minPublishTime, provided that tick was published no later than maxPublishTime.
-    /// @dev Reverts with Pyth's PriceFeedNotFoundWithinRange when no supplied update is that tick.
+    // -------------------- Events --------------------
+
+    // Declared in BazaarOracle
+    event CompositeFeedRegistered(
+        bytes32 indexed compositeId, bytes32 indexed baseId, bytes32 indexed quoteId, bool invertQuote
+    );
+
+    // -------------------- Errors --------------------
+
+    // Declared in BazaarOracle
+    error BazaarOracle__ZeroAddress();
+    error BazaarOracle__InvalidPrice(bytes32 feedId, int64 price, int32 expo);
+    error BazaarOracle__ConfidenceTooHigh(uint256 confidence, uint256 price);
+    error BazaarOracle__InvalidCompositeLegs(bytes32 baseId, bytes32 quoteId);
+    error BazaarOracle__SampleCountMismatch(uint256 updates, uint256 expected);
+    error BazaarOracle__SampleFeeMismatch(uint256 supplied, uint256 required);
+
+    // -------------------- Functions --------------------
+
+    // ---- Price reads ----
+    function tryReadFreshPrice(bytes32 baseFeedId, uint256 maxStaleness)
+        external
+        view
+        returns (bool found, uint256 spotPrice, uint256 lowPrice, uint256 highPrice, uint256 publishTime);
+    function tryReadStalePrice(bytes32 baseFeedId)
+        external
+        view
+        returns (bool found, uint256 spotPrice, uint256 lowPrice, uint256 highPrice, uint256 publishTime);
+    function getUpdateFee(bytes[] calldata priceUpdate) external view returns (uint256);
+    function getSampleSetFee(bytes32 baseFeedId, bytes[] calldata priceUpdate) external view returns (uint256 fee);
+
+    // ---- Price updates ----
+    // msg.value pays Pyth's update fee.
+    function updateAndFetchPrice(bytes32 baseFeedId, bytes[] calldata priceUpdate, uint256 maxStaleness)
+        external
+        payable
+        returns (uint256 spotPrice, uint256 lowPrice, uint256 highPrice, uint256 publishTime);
     function fetchFirstPriceAtOrAfter(
         bytes32 baseFeedId,
         bytes[] calldata priceUpdate,
         uint64 minPublishTime,
         uint64 maxPublishTime
     ) external payable returns (uint256 spotPrice);
-
-    /// @notice Parse a chained sample set and return the median of its USD prices: the first print
-    ///         at or after firstTarget, then for each later sample the first print at or after
-    ///         spacing past the sample before, every one published no later than maxPublishTime.
-    /// @dev Reverts unless the set holds exactly count samples, one update per leg each, and every
-    ///      sample is the first print at or after its own target; msg.value must equal getSampleSetFee.
     function fetchChainedMedian(
         bytes32 baseFeedId,
         bytes[] calldata priceUpdate,
@@ -26,8 +62,16 @@ interface IBazaarOracle {
         uint256 count
     ) external payable returns (uint256 medianPrice);
 
-    function getUpdateFee(bytes[] calldata priceUpdate) external view returns (uint256);
+    // ---- Composite feeds ----
+    // `registerComposite` is permissionless and idempotent.
+    function registerComposite(bytes32 baseId, bytes32 quoteId, bool invertQuote) external returns (bytes32 compositeId);
+    function getCompositeId(bytes32 baseId, bytes32 quoteId, bool invertQuote) external pure returns (bytes32);
+    function composites(bytes32) external view returns (bytes32 baseId, bytes32 quoteId, bool invertQuote);
 
-    /// @notice The fee fetchChainedMedian charges for priceUpdate: Pyth's fee for each sample's updates, summed.
-    function getSampleSetFee(bytes32 baseFeedId, bytes[] calldata priceUpdate) external view returns (uint256 fee);
+    // ---- Wiring and constants ----
+    function pyth() external view returns (address);
+    function BAZAAR_EXPONENT() external view returns (int32);
+    function BAZAAR_SCALE() external view returns (uint256);
+    function BP_SCALE() external view returns (uint256);
+    function MAX_CONFIDENCE_BP() external view returns (uint256);
 }

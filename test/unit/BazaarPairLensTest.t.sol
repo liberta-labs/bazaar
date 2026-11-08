@@ -12,7 +12,7 @@ import {AdlLib} from "../../src/libraries/AdlLib.sol";
 import {FundingLib} from "../../src/libraries/FundingLib.sol";
 import {MockArbSys} from "../mocks/MockArbSys.sol";
 
-/// @notice Minimal stand-in exposing only the IBazaarPairLens selectors the Lens reads, with
+/// @notice Minimal stand-in exposing only the IBazaarPairView selectors the Lens reads, with
 ///         settable state — lets us drive the Lens's computed getters without a full pair deploy.
 contract MockPairForLens {
     uint256 public totalInsuranceShares;

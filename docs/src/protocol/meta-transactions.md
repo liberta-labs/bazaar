@@ -19,6 +19,23 @@ Each function takes a `(nonce, deadline, relayerFee, signature)` tuple, and ever
 
 Typed structs exist for `depositCollateral`, `withdrawCollateral`, `createOrder`, `cancelOrders`, `amendOrders` (one `uint256[]` of word triples — an id word carrying the order id and its optional insertion hints, the new price and the new size per amendment — hashed as EIP-712 hashes an array; the hints are signed too, so a relayer cannot refresh them), `depositToInsurance`, `requestInsuranceWithdrawal`, `executeInsuranceWithdrawal`. `createOrder` signs the order spec but not its `MatchHints`: like `priceUpdate`, the relayer attaches insertion hints at submission (each verified on-chain against the real neighbours), and a relayed order always walks the protocol-default step budget, since only the signer may bound how much of their order executes. `BazaarPairLens.getEip712Constants()` and `getTypehashes()` expose everything an integrator needs to build signatures.
 
+## Type strings
+
+Every pair is its own EIP-712 domain: `EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)` with name `"BazaarPair"`, version `"1"`, the chain's id, and the pair's address as `verifyingContract`. The primary types, whose hashes `getTypehashes()` returns:
+
+```text
+DepositCollateral(uint256 amount,uint256 nonce,uint256 deadline,uint256 relayerFee)
+WithdrawCollateral(uint256 amount,uint256 nonce,uint256 deadline,uint256 relayerFee)
+DepositToInsurance(uint256 amount,uint256 nonce,uint256 deadline,uint256 relayerFee)
+RequestInsuranceWithdrawal(uint256 shareAmount,uint256 nonce,uint256 deadline,uint256 relayerFee)
+ExecuteInsuranceWithdrawal(uint256 nonce,uint256 deadline,uint256 relayerFee)
+CreateOrder(uint8 orderType,uint256 triggerPrice,uint256 limitPrice,uint256 maxSlippageBp,uint256 size,bool isLong,bool isPostOnly,uint8 tif,uint256 expirationBlock,address integrator,uint256 nonce,uint256 deadline,uint256 relayerFee)
+CancelOrders(uint256[] orderIds,uint256 nonce,uint256 deadline,uint256 relayerFee)
+AmendOrders(uint256[] amends,uint256 nonce,uint256 deadline,uint256 relayerFee)
+```
+
+Each field is the call's argument of the same name — for `CreateOrder`, the field of the call's `OrderSpec` — and `nonce` is the signer's current `metaTxNonces` on that pair. `CreateOrder` lists its fields in its own order rather than the struct's, signs `orderType` and `tif` as the enums' `uint8` values, and signs `expirationBlock` as a `uint256` although the struct holds a `uint64`.
+
 ## Permit
 
 The functions that take a `permitData` execute it best-effort before the pull — approval and action in one signature. For the deposits the permit covers the deposit plus fee; for `createOrder` it covers the relayer fee plus the trigger bounty the order carries (the fee is pulled first, so one permit serves both); for `cancelOrders`, `amendOrders`, `requestInsuranceWithdrawal` and the locking `executeInsuranceWithdrawal` call it covers the relayer fee alone, so a trader who onboarded through a permit and holds no ETH can still trade, amend and cancel gaslessly, and an LP can request and lock an exit the same way. The paying `executeInsuranceWithdrawal` call needs no permit, since its fee comes out of the payout. A failed permit emits `PermitExecutionFailed` and falls through to the normal allowance path (so a griefed permit can't block a call that would succeed anyway).

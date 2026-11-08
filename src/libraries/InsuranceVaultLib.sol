@@ -47,9 +47,10 @@ library InsuranceVaultLib {
     ///         price and the lock-then-claim rule charge a leaver the losses the chain can already
     ///         price; the cooldown covers what it cannot. Capital stays committed through news that
     ///         has not reached the oracle yet, and a deposit placed to catch one realization carries
-    ///         the fund's risk long after it. Longer than BazaarFactory.IDENTIFIER_UPGRADE_TIMELOCK, so the
-    ///         fund stays through the notice period an approved identifier upgrade gives traders to
-    ///         unwind: a request filed at approval ripens only after activation.
+    ///         the fund's risk long after it. Longer than BazaarFactory.IDENTIFIER_UPGRADE_TIMELOCK,
+    ///         so a request filed at or after an identifier upgrade's approval ripens only after the
+    ///         upgrade activates. Only one filed more than the difference before approval can ripen
+    ///         inside the notice period the timelock gives traders.
     uint256 internal constant INSURANCE_WITHDRAWAL_COOLDOWN = 13 days;
     /// @notice How long a request stays executable once its cooldown has run, on a continuously
     ///         traded pair (withdrawalWindowOf). Both execute calls need a fresh price, and a 24/7

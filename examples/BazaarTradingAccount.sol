@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity 0.8.34;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.16;
 
 /// @title BazaarTradingAccount
 /// @notice The smallest contract account that trades on Bazaar from one transaction carrying
@@ -9,7 +9,7 @@ pragma solidity 0.8.34;
 /// @dev An example to deploy for yourself, not part of the protocol: review it to your own
 ///      standard and keep the owner key as safe as the funds it controls. Any smart wallet that
 ///      batches calls (an ERC-4337 account, a Safe) does the same job; this is the least code
-///      that does.
+///      that does. MIT-licensed, unlike the protocol, so it can be adapted into closed-source code.
 ///
 ///      Calls run in order, and the first failure reverts the whole batch with that call's own
 ///      revert data, so a batch is atomic: every call took effect or none did. ETH sent with

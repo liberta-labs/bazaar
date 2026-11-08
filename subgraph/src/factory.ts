@@ -5,6 +5,7 @@ import {
   PairDeploymentProposalDisputed,
   PairDeploymentProposalExpired,
   PairDeploymentProposalResolved,
+  PairDeploymentProposalVoided,
   PairDeploymentProposed,
   SeedRefundClaimed,
   SeedRefundCredited,
@@ -173,6 +174,16 @@ export function handlePairDeploymentProposalExpired(event: PairDeploymentProposa
   let listing = ListingProposal.load(event.params.assertionId)
   if (listing == null) return
   listing.status = "Expired"
+  listing.resolvedAt = event.block.timestamp
+  listing.save()
+}
+
+// The factory released an undisputed listing instead of deploying it, because UMA had removed the
+// identifier it was asserted under. SeedRefundCredited, emitted just before, records the refund.
+export function handlePairDeploymentProposalVoided(event: PairDeploymentProposalVoided): void {
+  let listing = ListingProposal.load(event.params.assertionId)
+  if (listing == null) return
+  listing.status = "Voided"
   listing.resolvedAt = event.block.timestamp
   listing.save()
 }

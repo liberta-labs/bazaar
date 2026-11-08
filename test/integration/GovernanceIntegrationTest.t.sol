@@ -146,7 +146,7 @@ contract GovernanceIntegrationTest is IntegrationBase {
     // ============================ identifier upgrade ============================
 
     /// @notice Identifier-upgrade governance: propose a new UMA identifier (whitelist-validated),
-    ///         wait out the liveness window, settle (queues the swap), wait out the 12-day
+    ///         wait out the liveness window, settle (queues the swap), wait out the
     ///         activation timelock — the users' exit window — then anyone activates and the
     ///         protocol asserts under the new identifier. The oracle address never moves — it is
     ///         immutable; the identifier is the axis UMA actually changes.
@@ -180,8 +180,8 @@ contract GovernanceIntegrationTest is IntegrationBase {
     }
 
     /// @notice Fail closed: while the protocol's identifier is off UMA's live whitelist, the
-    ///         termination proposal reverts — an assertion made in that state would be
-    ///         undisputable and termination assertions pin settlement semantics. The non-UMA
+    ///         termination proposal reverts — no dispute on an assertion made in that state could
+    ///         be resolved, and termination assertions pin settlement semantics. The non-UMA
     ///         termination paths (insurer vote, stale price, insolvency) are unaffected.
     function test_e2e_TerminationProposal_FailClosedWhileIdentifierDewhitelisted() public {
         mockOO.setIdentifierSupported(factory.umaIdentifier(), false);

@@ -7,6 +7,7 @@ import {MockUSDC} from "../test/mocks/MockUSDC.sol";
 import {MockPyth} from "@pythnetwork/pyth-sdk-solidity/MockPyth.sol";
 import {MockOptimisticOracleV3} from "../test/mocks/MockOptimisticOracleV3.sol";
 import {OwnedMockOptimisticOracleV3} from "../test/mocks/OwnedMockOptimisticOracleV3.sol";
+import {TestnetUSDC} from "../test/mocks/TestnetUSDC.sol";
 
 contract HelperConfig is Script {
     // if we are on a local anvil, we deploy mocks
@@ -66,34 +67,44 @@ contract HelperConfig is Script {
     }
 
     // -------------------- Arbitrum Sepolia --------------------
-    // Uses Circle's test USDC and Pyth on Arbitrum Sepolia, but deploys its own mock OOv3 instead of
-    // UMA's OptimisticOracleV3 on that chain (0x1037A21a30aEfF90c269b01c3933eB9a5285d9b8), which
-    // cannot adjudicate Bazaar's assertions: the USDC below is not on its CollateralWhitelist, so
-    // every USDC-bonded assertTruth reverts; its default currency is an 18-decimal test token, which
+    // Uses Pyth on Arbitrum Sepolia, but deploys its own mock OOv3 instead of UMA's
+    // OptimisticOracleV3 on that chain (0x1037A21a30aEfF90c269b01c3933eB9a5285d9b8), which cannot
+    // adjudicate Bazaar's assertions: Circle's test USDC is not on its CollateralWhitelist, so every
+    // USDC-bonded assertTruth reverts; its default currency is an 18-decimal test token, which
     // cannot stand in for USDC; and its DVM stand-in, MockOracleAncillary, lets anyone push the
     // resolution of any dispute.
 
-    /// @dev Same sourcing rule as the mainnet config: `usdcContract` is the Arbitrum Sepolia test
-    ///      USDC and `pythFeed` the Pyth Core contract for that chain, both read from the issuer's
-    ///      published list. The mock OOv3 is constructed against the same USDC it will price bonds
-    ///      in, so a wrong USDC here surfaces as a broken listing flow on the rehearsal rather than
-    ///      on mainnet.
+    /// @dev Circle's test USDC on Arbitrum Sepolia, read from Circle's published list.
+    address internal constant ARBITRUM_SEPOLIA_CIRCLE_USDC = 0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d;
+
+    /// @dev The USDC follows the SEPOLIA_OFFICIAL_USDC environment variable.
     ///
-    ///      The mock is the owner-gated variant, owned by the broadcaster. The chain is public, and
-    ///      the base mock's helpers would let anyone settle any assertion with any result; here only
-    ///      the owner can force-settle, resolve disputes, or set the identifier whitelist and the
-    ///      minimum bond.
+    ///      - Unset or false: the script deploys a TestnetUSDC owned by the broadcaster. Anyone can
+    ///        claim from its faucet and the owner mints at will, which a public testnet needs: one
+    ///        listing alone takes the factory's MIN_DEPLOYMENT_AMOUNT, far more than Circle's
+    ///        rate-limited faucet pays one address.
+    ///      - True: it uses Circle's test USDC, sourced like the mainnet entry, so a rehearsal of the
+    ///        mainnet deploy runs against the real token — its permit domain, its proxy and its
+    ///        transfer costs, at an address the script did not create. A wrong address then surfaces
+    ///        as a broken listing flow on the rehearsal rather than on mainnet.
+    ///
+    ///      `pythFeed` is the Pyth Core contract for the chain, from Pyth's published list. The mock
+    ///      OOv3 prices its bonds in the same USDC the deployment uses. It is the owner-gated
+    ///      variant, owned by the broadcaster: the chain is public, and the base mock's helpers would
+    ///      let anyone settle any assertion with any result, where here only the owner can
+    ///      force-settle, resolve disputes, or set the identifier whitelist and the minimum bond.
     function getOrCreateArbitrumSepoliaConfig() public returns (NetworkConfig memory) {
         if (activeNetworkConfig.optimisticOracleV3 == address(0)) {
+            bool officialUsdc = vm.envOr("SEPOLIA_OFFICIAL_USDC", false);
             vm.startBroadcast();
             (, address broadcaster,) = vm.readCallers();
-            OwnedMockOptimisticOracleV3 mockOO =
-                new OwnedMockOptimisticOracleV3(0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d, 7200, broadcaster);
+            address usdc = officialUsdc ? ARBITRUM_SEPOLIA_CIRCLE_USDC : address(new TestnetUSDC(broadcaster));
+            OwnedMockOptimisticOracleV3 mockOO = new OwnedMockOptimisticOracleV3(usdc, 7200, broadcaster);
             vm.stopBroadcast();
 
             return NetworkConfig({
                 pythFeed: 0x4374e5a8b9C22271E9EB878A2AA31DE97DF15DAF,
-                usdcContract: 0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d,
+                usdcContract: usdc,
                 optimisticOracleV3: address(mockOO),
                 name: "Arbitrum-Sepolia"
             });

@@ -197,7 +197,7 @@ contract IdentifierUpgradeBrickTest is Test {
         factory.proposeUmaIdentifierUpgrade(good);
         vm.stopPrank();
 
-        // Undisputed -> settles TRUE and queues, blocking another 14 days.
+        // Undisputed -> settles TRUE and queues, blocking new proposals for the timelock.
         vm.warp(block.timestamp + 2);
         factory.settleIdentifierUpgradeProposal(idM);
         (,, uint256 effTs) = factory.queuedIdentifierUpgrade();

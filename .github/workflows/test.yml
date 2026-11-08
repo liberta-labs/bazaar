@@ -49,6 +49,20 @@ jobs:
           forge build
         id: build
 
+      # abi/ is committed for integrators and the MIT interfaces in src/interfaces/ declare the same
+      # surface, so both must match what this build compiles to.
+      - name: Check committed ABIs and interfaces
+        run: |
+          bash script/export-abis.sh
+          bash script/check-interfaces.sh
+          if [ -n "$(git status --porcelain -- abi/)" ]; then
+            git status --porcelain -- abi/
+            git diff -- abi/
+            echo "abi/ is stale: run make abis and commit the result" >&2
+            exit 1
+          fi
+        id: abis
+
       - name: Run Forge tests
         run: |
           forge test -vvv

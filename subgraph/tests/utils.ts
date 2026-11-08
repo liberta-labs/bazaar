@@ -2,6 +2,7 @@ import { Address, BigInt, Bytes, ethereum } from "@graphprotocol/graph-ts"
 import { createMockedFunction, newMockEvent } from "matchstick-as/assembly/index"
 import {
   PairDeployed,
+  PairDeploymentProposalVoided,
   PairDeploymentProposed,
   UmaIdentifierUpgradeDisputed,
   UmaIdentifierUpgradeProposed,
@@ -129,6 +130,13 @@ export function pairDeploymentProposed(assertionId: Bytes): PairDeploymentPropos
   event.parameters.push(param("baseFeedId", ethereum.Value.fromFixedBytes(FEED_ID)))
   event.parameters.push(param("description", ethereum.Value.fromString("Bitcoin / US Dollar")))
   event.parameters.push(param("seedAmount", big(SEED)))
+  return event
+}
+
+export function pairDeploymentProposalVoided(assertionId: Bytes): PairDeploymentProposalVoided {
+  let event = changetype<PairDeploymentProposalVoided>(mockEvent(FACTORY))
+  event.parameters.push(param("assertionId", ethereum.Value.fromFixedBytes(assertionId)))
+  event.parameters.push(param("deployer", ethereum.Value.fromAddress(DEPLOYER)))
   return event
 }
 

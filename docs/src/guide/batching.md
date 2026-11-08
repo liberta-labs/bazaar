@@ -31,7 +31,8 @@ function execute(Call[] calldata calls) external payable returns (bytes[] memory
 with that call's own revert data, so a batch is atomic and a failure reads like a direct call's
 (`MatchingEngineLib__FillOrKillUnfilled`, say). The example is yours to deploy, one per trader; it
 is not part of the protocol and has not been audited with it. The owner key controls everything
-the account holds, so treat it accordingly.
+the account holds, so treat it accordingly. Unlike the protocol, it is MIT-licensed, so you can
+adapt it into closed-source code.
 
 ### One transaction: fund, deposit, quote
 

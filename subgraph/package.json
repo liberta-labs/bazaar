@@ -2,7 +2,7 @@
   "name": "bazaar-subgraph",
   "version": "0.1.0",
   "private": true,
-  "license": "AGPL-3.0-only",
+  "license": "MIT",
   "description": "Subgraph indexing Bazaar's factory, terminator, oracle and every pair for front ends, keepers and analytics",
   "scripts": {
     "codegen": "graph codegen",

@@ -105,6 +105,8 @@ enum ListingStatus {
   Deployed
   Rejected
   Expired
+  "Approved undisputed after UMA removed the identifier it was asserted under, so released instead of deployed; the seed is credited back to the deployer."
+  Voided
 }
 
 enum IdentifierUpgradeStatus {
@@ -982,7 +984,7 @@ type IdentifierUpgradeProposal @entity(immutable: false) {
   disputed: Boolean!
   proposedAt: BigInt!
   livenessEndsAt: BigInt!
-  "When a queued upgrade may activate."
+  "When a queued upgrade's timelock ends. It may activate sooner once the incumbent identifier is off UMA's live whitelist, but never before BazaarFactory.IDENTIFIER_UPGRADE_MIN_NOTICE after approval."
   effectiveTs: BigInt
   oldIdentifier: Bytes
   resolvedAt: BigInt
