@@ -38,8 +38,8 @@ the disagreement as a finding.
 | Item | Value |
 |---|---|
 | Repository | https://github.com/liberta-labs/bazaar |
-| Tag | `v1.0.0-rc5` |
-| Commit | `158668cc3ace114b31fb4f5b409be56225ac8d6a` |
+| Tag | `v1.0.0-rc6` |
+| Commit | `5a2f74188c5359e47b5d70d6b55ff3f3c18ddf6d` |
 | Target chain | Arbitrum One (chain id 42161) |
 | Compiler | solc 0.8.34 |
 | Optimizer | on, `optimizer_runs = 150` for every contract |
@@ -94,13 +94,13 @@ Counts are non-blank, non-comment lines (natspec included in "comment"), compute
 tokenizer that skips `//` comments and `/* */` blocks and does not mistake `//` inside a string
 literal for a comment.
 
-### Tier 1 — full scope (21 files, 9,373 lines)
+### Tier 1 — full scope (21 files, 9,416 lines)
 
 | File | Lines | Role |
 |---|---:|---|
 | `src/BazaarPair.sol` | 1,221 | Market contract: entry points, price resolution, vault-health verdict, termination glue |
 | `src/BazaarPairTerminator.sol` | 961 | UMA, insurer-vote, scheduled and stale-oracle termination paths |
-| `src/BazaarFactory.sol` | 574 | UMA-gated listing, identifier governance, clone deployment |
+| `src/BazaarFactory.sol` | 617 | UMA-gated listing, identifier governance, clone deployment |
 | `src/BazaarOracle.sol` | 377 | Pyth adapter, composite feeds, confidence and staleness rules |
 | `src/libraries/MatchingEngineLib.sol` | 1,435 | Arrival walk, trigger execution, vault unload (one bucket per walk), per-fill margin checks, fees |
 | `src/libraries/RiskParamsLib.sol` | 791 | Margin curve, insurance target, reserve, the two-bucket read model and netting gate, unload planner, fund-ledger helpers, bounties |
@@ -119,7 +119,7 @@ literal for a comment.
 | `src/libraries/BazaarMathLib.sol` | 62 | Fixed point, exponent conversion |
 | `src/libraries/VaultHealthLib.sol` | 43 | Liquidation-exposure (ADL gate) check over both buckets |
 | `src/libraries/FeeEscrowLib.sol` | 36 | Claimable-balance escrow for every third-party payout |
-| **Total** | **9,373** | |
+| **Total** | **9,416** | |
 
 ### Tier 2 — riskiest subset for a competition (12 files, 6,225 lines)
 
@@ -150,23 +150,31 @@ margin curve (`calculateIMRandMMR`, `liquidationImrBp`).
 `BazaarPair`, `FundingLib` and `BazaarTypes` are required reading for it, since the tier's files are
 called from the pair.
 
-### Out of scope (6 files, 1,159 lines)
+### Out of scope (9 files, 2,104 lines)
 
 | File | Lines | Reason |
 |---|---:|---|
 | `src/BazaarPairLens.sol` | 880 | Read-only views for frontends and keepers. No contract calls it on-chain: the factory stores its address and reads `factory()` from it once in the constructor as a wiring check. Known limitation: `getMaxWithdrawable` does not reproduce the liquidation-exposure refusal a position holder's withdrawal can meet before an ADL window latches, as its natspec states. |
 | `src/libraries/ClaimTextLib.sol` | 179 | Static UMA claim text (pure functions returning bytes); its correctness as prose matters to UMA verifiers, not to the contracts' state. |
+| `src/interfaces/IBazaarPair.sol` | 445 | Interface |
+| `src/interfaces/IBazaarPairTerminator.sol` | 187 | Interface |
+| `src/interfaces/IBazaarFactory.sol` | 163 | Interface |
+| `src/interfaces/IBazaarPairLens.sol` | 143 | Interface |
 | `src/interfaces/IUmaOptimisticOracleV3.sol` | 55 | Interface |
-| `src/interfaces/IBazaarPair.sol` | 22 | Interface |
-| `src/interfaces/IBazaarOracle.sol` | 19 | Interface |
+| `src/interfaces/IBazaarOracle.sol` | 48 | Interface |
 | `src/interfaces/IArbSys.sol` | 4 | Interface |
+
+The five `IBazaar*` interfaces are MIT-licensed for integrators and declare every function, event
+and error of their contract's exported ABI. `script/check-interfaces.sh`, which `make abis` and CI
+run, fails on any difference in a name, a type, an indexed flag or a state mutability.
+`BazaarPairTerminator` calls the pair through `IBazaarPair`; no other contract imports them.
 
 Also out of scope: `script/`, `test/` (including mocks), `examples/`, `docs/`, and the dependencies
 themselves (OpenZeppelin, Pyth SDK, UMA, forge-std). How Bazaar integrates its dependencies is in
 scope, including whether the local interface `IUmaOptimisticOracleV3` matches the deployed oracle's
 ABI, since the factory decodes `getAssertion` results to decide proposal outcomes.
 
-All files: 27, 10,532 lines (9,373 in scope + 1,159 out of scope).
+All files: 30, 11,520 lines (9,416 in scope + 2,104 out of scope).
 
 ## 4. Build and test
 
@@ -184,7 +192,7 @@ git clone --recursive https://github.com/liberta-labs/bazaar.git bazaar
 ```
 
 ```bash
-git checkout v1.0.0-rc5
+git checkout v1.0.0-rc6
 ```
 
 ```bash
@@ -299,12 +307,16 @@ immutable. A change works as follows (listing.md, "The only governance"):
   upward) under a liveness of `IDENTIFIER_UPGRADE_LIVENESS` (2 days). The candidate must be on UMA's
   live IdentifierWhitelist (resolved through the Finder, as OOv3 resolves it) and must start with
   `ASSERT_TRUTH`. One proposal can be pending at a time.
-- Approval queues the change behind `IDENTIFIER_UPGRADE_TIMELOCK` (12 days). Anyone can then call
-  `activateIdentifierUpgrade()`, which re-checks the whitelist; a candidate de-whitelisted meanwhile
-  cancels the upgrade and keeps the incumbent.
+- Approval queues the change behind `IDENTIFIER_UPGRADE_TIMELOCK` (7 days), or behind
+  `IDENTIFIER_UPGRADE_MIN_NOTICE` (4 days) once the incumbent is off UMA's live whitelist. Anyone
+  can then call `activateIdentifierUpgrade()`, which re-checks the whitelist; a candidate
+  de-whitelisted meanwhile cancels the upgrade and keeps the incumbent.
 - A disputed proposal waits up to `DVM_DISPUTE_GRACE` (14 days) past liveness before
   `expireStuckIdentifierUpgradeProposal` can discard it; an undisputed one past its expiration is
-  approved even if its settlement reverts.
+  approved even if its settlement reverts. On both tracks a proposal disputed after UMA removed its
+  assertion identifier can be discarded at once, and an undisputed listing that resolves after its
+  identifier was removed is voided rather than deployed. A failed whitelist lookup never counts
+  as a removal.
 - While `umaIdentifierIsLive()` is false, new listings and UMA termination proposals revert; the
   identifier-upgrade path, as the repair path, then asserts under the proposed identifier.
 
@@ -373,10 +385,13 @@ Callback behaviour:
   settlement revert. The factory bounds this with `expireStuckDeploymentProposal` and
   `expireStuckIdentifierUpgradeProposal`: an undisputed proposal past its expiration is approved by
   reading the assertion back (`_approvalIsFixed`, since a failed settlement attempt proves nothing
-  inside OOv3's reentrancy lock), and a disputed one is discarded after `DVM_DISPUTE_GRACE`. A
-  resolved proposal makes a late callback a no-op.
+  inside OOv3's reentrancy lock), and a disputed one is discarded after `DVM_DISPUTE_GRACE`, or at
+  once if it was disputed after UMA removed its assertion identifier. A resolved proposal makes a
+  late callback a no-op.
 - An approved listing deploys the clone, transfers the seed and registers the pair inside the
-  callback; rejections only write storage, and the escrowed seed is credited for `claimSeedRefund`.
+  callback, unless it was undisputed and its assertion identifier has since been removed, which
+  voids it; rejections and voids only write storage, and the escrowed seed is credited for
+  `claimSeedRefund`.
 - An accepted termination schedules the pair through `try p.setScheduledTermination(...)`, emitting
   `TerminationScheduleRefused` on a refusal and re-raising an empty revert (out of gas) as
   `BazaarPairTerminator__ScheduleOutOfGas`, so a starved settlement cannot consume the assertion.
@@ -511,8 +526,8 @@ in scope whatever its profit.
     fill, deposit or insurance flow executes, no price published after the cutoff is stored, and no
     price at all is stored once the settlement price is fixed.
 16. **Governance fails closed.** While `umaIdentifierIsLive()` is false, `proposePairDeployment` and
-    `proposeTermination` revert, so no assertion enters a pipeline that cannot be disputed
-    (listing.md).
+    `proposeTermination` revert, so no assertion enters a pipeline where no dispute can be
+    resolved (listing.md).
 17. **One market per asset feed.** No two non-terminated pairs, and no two pending proposals, share
     a raw Pyth feed (`pairAddressByBaseFeed`, `pendingDeploymentByBaseFeed`).
 
@@ -600,7 +615,9 @@ found most of their defects.
    `assertionResolvedCallback`, `assertionDisputedCallback`, `_handleDeploymentResolution`,
    `_executePairDeployment`, `expireStuckDeploymentProposal`, `_approvalIsFixed`, `claimSeedRefund`,
    `proposeUmaIdentifierUpgrade`, `activateIdentifierUpgrade`,
-   `expireStuckIdentifierUpgradeProposal`, `_identifierWhitelisted`, `_isAssertTruthIdentifier`,
+   `expireStuckIdentifierUpgradeProposal`, `_whitelistAnswer`, `_identifierWhitelisted`,
+   `_identifierRemoved`, `_assertionIdentifierRemoved`, `_activationOpensAt`,
+   `_isAssertTruthIdentifier`,
    `_isValidDescription`; `BazaarOracle.registerComposite`. Includes the spoofing and duplicate-request
    cases in section 6.
 10. **Price resolution, relayed calls and ETH refunds.** `BazaarPair._getCurrentPairPrice`,
@@ -787,13 +804,16 @@ without a new consequence (a larger impact, a cheaper path, or a broken bound) a
     Accepted: no funds on any live pair are reachable, each cycle burns part of the attacker's bond,
     and the pattern is visible on-chain.
 25. **The single identifier-upgrade slot can be held by a proposer who wins every race.** Only one
-    identifier-upgrade proposal can be pending, and an approved one blocks new proposals until its
-    `IDENTIFIER_UPGRADE_TIMELOCK` ends. A candidate must be on UMA's live whitelist, start with
+    identifier-upgrade proposal can be pending, and an approved one blocks new proposals until it
+    may activate (`IDENTIFIER_UPGRADE_TIMELOCK`, or `IDENTIFIER_UPGRADE_MIN_NOTICE` once the
+    incumbent is off UMA's live whitelist). A candidate must be on UMA's live whitelist, start with
     `ASSERT_TRUTH` and differ from the current identifier, so while UMA whitelists one successor,
     every valid proposal names it and is approved once the incumbent's retirement makes the upgrade
     necessary. By disputing their own proposal an attacker can delay that approval by about one DVM
-    vote (typically 2–4 days), at the cost of the share UMA burns from the losing bond. If UMA ever
-    whitelists two such identifiers and one is unfit, a proposer who re-proposes the unfit one first
+    vote (typically 2–4 days), at the cost of the share UMA burns from the losing bond. A dispute
+    filed after UMA removes the identifier a proposal was asserted under cannot hold the slot:
+    anyone may discard that proposal at once. If UMA ever whitelists two such identifiers and one
+    is unfit, a proposer who re-proposes the unfit one first
     after every rejection can hold the slot for as long as they keep paying (a bond lost, or partly
     burned, every cycle), and so keep the protocol in degraded mode after the incumbent is retired.
     Accepted: the block costs liveness, never funds (in degraded mode new listings and UMA
@@ -902,6 +922,51 @@ without a new consequence (a larger impact, a cheaper path, or a broken bound) a
     bids near the mark and calls `unloadVault` ends the fast cadence and earns the unload reward, and
     the heartbeat costs at most $36.50 a year, under 4% of its floor.
 
+### Identifier removal
+
+38. **This chain's copy of UMA's whitelist decides the removal rules.** The fail-closed gates,
+    early activation, the immediate discard and the listing void read the whitelist through
+    OOv3's Finder on Arbitrum, which UMA updates by relay from its mainnet governance, while a
+    dispute is voted on, or refused, against mainnet's list. In the one observed removal Arbitrum
+    followed mainnet by about seven minutes. While it trails, new listings and UMA termination
+    proposals are still accepted and an undisputed listing whose liveness spanned the removal still
+    deploys. If it ever drops an identifier before mainnet does, a dispute filed in between could
+    still be voted on, and is discarded at once all the same (`disputedAfterRemoval`). An L2-only
+    removal, or a Finder re-pointed at a fresh whitelist, reads as the removal of every identifier
+    at once. Accepted: the windows were minutes in the observed case and cost liveness only.
+39. **Proposing an asset again voids a stale listing and takes its slot.** Once the protocol is
+    back on a live identifier, `proposePairDeployment` first settles an approved but unsettled
+    listing of the same raw feed. One asserted under a removed identifier is voided there, its seed
+    credited, and the new proposal takes the slot in the same transaction. Accepted: the deployer
+    is refunded and loses only priority, and keepers can settle a listing when its liveness ends.
+40. **An undisputed termination claim that straddles an identifier's removal is still accepted.**
+    The factory voids an undisputed listing whose assertion identifier was removed before it
+    resolved; the terminator has no such rule. A claim filed just before UMA removes the
+    identifier is accepted when `TERMINATION_PROPOSAL_LIVENESS` (12 h) ends unless someone
+    disputes it, and a dispute filed after the removal blocks it but is never ruled on and locks the
+    disputer's bond, so after the removal nobody is paid to dispute. Accepted for now: the claim
+    must be filed while the identifier is live, the window is one liveness before a public UMA
+    removal vote, and an accepted claim settles positions at a signed Pyth print. The recorded
+    fix reads such a claim as one UMA never ruled on.
+41. **The two 14-day graces leave out the bridge to mainnet.** `DVM_DISPUTE_GRACE` and
+    `CLAIM_VERDICT_GRACE` are sized on mainnet VotingV2's limits, up to 12 days from a request to
+    a ruling. On Arbitrum a dispute's price request reaches VotingV2 only once someone relays it,
+    which UMA's bot normally does at once; otherwise the canonical bridge delivers it after its
+    challenge period of about 6.4 days. A dispute nobody relays whose vote then rolls can outlast
+    the grace: the factory discards the proposal, or a vote-scheduled pair settles under the
+    chain rule without the verdict it would have received. Accepted: it needs both the relay and
+    the vote to fail, it costs liveness or the price rule rather than funds, and relaying disputes
+    to mainnet closes it.
+42. **The early-activation floor can pass while a session pair's venue is shut.** Once the
+    incumbent is removed, a queued upgrade may activate `IDENTIFIER_UPGRADE_MIN_NOTICE` (4 days)
+    after approval, and approval lands whenever anyone settles the assertion after liveness. Four
+    days outlast a single holiday next to a weekend, but a longer closure, such as Easter on a
+    venue that shuts both Good Friday and Easter Monday or a week-long holiday, can cover all of
+    it and leave that pair's traders no session in which to exit before the new identifier
+    governs. Accepted: while UMA whitelists one successor, the name and live-whitelist checks
+    leave it the only candidate, and listings and UMA termination proposals stay refused until
+    activation.
+
 ## 10. Prior review
 
 The codebase has been through eight rounds of internal security review. The later rounds split the
@@ -915,8 +980,12 @@ has had one focused internal review: what it found is fixed or listed in section
 20 and 21). The insurance fee rates moved toward takers after them as well: makers pay a flat
 0.25 bp and takers a 0.75–4.25 bp base, the same total per fill at the base rate as before. The fee
 mechanism is unchanged, and the review reports quote the earlier rates (a 0.5 bp maker rate and a
-0.5–4 bp taker base). The test suite holds 1,805 test
-functions in 113 files under `test/unit` and `test/integration` at the time of writing, including
+0.5–4 bp taker base). The identifier-upgrade hardening came after them as well: the 7-day
+timelock, early activation once UMA removes the incumbent identifier, the immediate discard of a
+proposal disputed after its identifier's removal, and the void of an undisputed listing approved
+under a removed identifier. It has had one focused internal review by two independent reviewers,
+and what it found is fixed or listed in section 9 (items 25 and 38 to 42). The test suite holds
+1,837 test functions in 115 files under `test/unit` and `test/integration` at the time of writing, including
 fuzz tests, fixed zero-sum scenarios and the handler-based invariant suite. **The protocol has not
 had a professional audit.** The internal review reports can be shared with the selected auditor on
 request.
