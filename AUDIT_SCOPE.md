@@ -38,8 +38,8 @@ the disagreement as a finding.
 | Item | Value |
 |---|---|
 | Repository | https://github.com/liberta-labs/bazaar |
-| Tag | `v1.0.0-rc7` |
-| Commit | `342e629989adbe98bd0a865ef5374d1bbf4324cf` |
+| Tag | `v1.0.0-rc8` |
+| Commit | `4d4e8a699e0ba09cf5e19df06c6929dfb37632e4` |
 | Target chain | Arbitrum One (chain id 42161) |
 | Compiler | solc 0.8.34 |
 | Optimizer | on, `optimizer_runs = 150` for every contract |
@@ -94,14 +94,14 @@ Counts are non-blank, non-comment lines (natspec included in "comment"), compute
 tokenizer that skips `//` comments and `/* */` blocks and does not mistake `//` inside a string
 literal for a comment.
 
-### Tier 1 — full scope (22 files, 9,496 lines)
+### Tier 1 — full scope (22 files, 9,555 lines)
 
 | File | Lines | Role |
 |---|---:|---|
-| `src/BazaarPair.sol` | 1,219 | Market contract: entry points, price resolution, vault-health verdict, termination glue |
-| `src/BazaarPairTerminator.sol` | 923 | UMA, insurer-vote, scheduled and stale-oracle termination paths |
+| `src/BazaarPair.sol` | 1,243 | Market contract: entry points, price resolution, vault-health verdict, termination glue |
+| `src/BazaarPairTerminator.sol` | 926 | UMA, insurer-vote, scheduled and stale-oracle termination paths |
 | `src/BazaarFactory.sol` | 614 | UMA-gated listing, identifier governance, clone deployment |
-| `src/BazaarOracle.sol` | 374 | Pyth Pro adapter: update verification, composite feeds, confidence and freshness rules, settlement proofs |
+| `src/BazaarOracle.sol` | 406 | Pyth Pro adapter: update verification, composite feeds, confidence and freshness rules, the latest-price proof for liquidations, settlement proofs |
 | `src/libraries/MatchingEngineLib.sol` | 1,435 | Arrival walk, trigger execution, vault unload (one bucket per walk), per-fill margin checks, fees |
 | `src/libraries/RiskParamsLib.sol` | 791 | Margin curve, insurance target, reserve, the two-bucket read model and netting gate, unload planner, fund-ledger helpers, bounties |
 | `src/libraries/AdlLib.sol` | 690 | ADL batches over the two buckets: on-chain ranking, losing leg first, paired and fallback sizing, winner closes, executor rewards |
@@ -120,14 +120,14 @@ literal for a comment.
 | `src/libraries/BazaarMathLib.sol` | 62 | Fixed point, exponent conversion |
 | `src/libraries/VaultHealthLib.sol` | 43 | Liquidation-exposure (ADL gate) check over both buckets |
 | `src/libraries/FeeEscrowLib.sol` | 36 | Claimable-balance escrow for every third-party payout |
-| **Total** | **9,496** | |
+| **Total** | **9,555** | |
 
-### Tier 2 — riskiest subset for a competition (12 files, 6,187 lines)
+### Tier 2 — riskiest subset for a competition (12 files, 6,190 lines)
 
 | File | Lines |
 |---|---:|
 | `src/libraries/MatchingEngineLib.sol` | 1,435 |
-| `src/BazaarPairTerminator.sol` | 923 |
+| `src/BazaarPairTerminator.sol` | 926 |
 | `src/libraries/RiskParamsLib.sol` | 791 |
 | `src/libraries/AdlLib.sol` | 690 |
 | `src/libraries/OrderManagementLib.sol` | 669 |
@@ -138,7 +138,7 @@ literal for a comment.
 | `src/libraries/TerminationLib.sol` | 109 |
 | `src/libraries/BucketLib.sol` | 99 |
 | `src/libraries/VaultHealthLib.sol` | 43 |
-| **Total** | **6,187** |
+| **Total** | **6,190** |
 
 This covers the matching engine and order management, liquidation and ADL, the insurance vault, the
 termination lifecycle, collateral accounting with the resting-order tally, and the risk library
@@ -151,18 +151,18 @@ margin curve (`calculateIMRandMMR`, `liquidationImrBp`).
 `BazaarPair`, `FundingLib` and `BazaarTypes` are required reading for it, since the tier's files are
 called from the pair.
 
-### Out of scope (10 files, 2,111 lines)
+### Out of scope (10 files, 2,125 lines)
 
 | File | Lines | Reason |
 |---|---:|---|
 | `src/BazaarPairLens.sol` | 880 | Read-only views for frontends and keepers. No contract calls it on-chain: the factory stores its address and reads `factory()` from it once in the constructor as a wiring check. Known limitation: `getMaxWithdrawable` does not reproduce the liquidation-exposure refusal a position holder's withdrawal can meet before an ADL window latches, as its natspec states. |
-| `src/libraries/ClaimTextLib.sol` | 183 | Static UMA claim text (pure functions returning bytes); its correctness as prose matters to UMA verifiers, not to the contracts' state. |
+| `src/libraries/ClaimTextLib.sol` | 190 | Static UMA claim text (pure functions returning bytes); its correctness as prose matters to UMA verifiers, not to the contracts' state. |
 | `src/interfaces/IBazaarPair.sol` | 445 | Interface |
 | `src/interfaces/IBazaarPairTerminator.sol` | 187 | Interface |
 | `src/interfaces/IBazaarFactory.sol` | 163 | Interface |
 | `src/interfaces/IBazaarPairLens.sol` | 143 | Interface |
 | `src/interfaces/IUmaOptimisticOracleV3.sol` | 55 | Interface |
-| `src/interfaces/IBazaarOracle.sol` | 46 | Interface |
+| `src/interfaces/IBazaarOracle.sol` | 53 | Interface |
 | `src/interfaces/IPythLazer.sol` | 5 | Interface |
 | `src/interfaces/IArbSys.sol` | 4 | Interface |
 
@@ -178,7 +178,7 @@ deployed oracle's ABI, since the factory decodes `getAssertion` results to decid
 and whether `IPythLazer` and `LazerPayloadLib` match the deployed PythLazer verifier and the
 payloads Pyth signs.
 
-All files: 32, 11,607 lines (9,496 in scope + 2,111 out of scope).
+All files: 32, 11,680 lines (9,555 in scope + 2,125 out of scope).
 
 ## 4. Build and test
 
@@ -195,7 +195,7 @@ git clone --recursive https://github.com/liberta-labs/bazaar.git bazaar
 ```
 
 ```bash
-git checkout v1.0.0-rc7
+git checkout v1.0.0-rc8
 ```
 
 ```bash
@@ -269,7 +269,7 @@ UMA's oracle (listed at the end).
 |---|---|---|---|
 | Trader (maker or taker) | `BazaarPair.depositCollateral`, `withdrawCollateral`, `createOrder`, `cancelOrders`, `amendOrders`, `claimFees` | Pays maker and taker fees (fees.md) | `MIN_ORDER_AMOUNT` and `MIN_COLLATERAL_AMOUNT` ($5); `MAX_ACTIVE_LIMIT_ORDERS_PER_USER` (32); `MAX_CANCELS_PER_CALL` (200); `MAX_AMENDS_PER_CALL` (32); IMR on worst-case exposure plus a cash floor while a position is open |
 | Trigger keeper | `executeTriggeredOrders` (up to `MAX_TRIGGER_EXECS_PER_CALL`, 20) | The owner-chosen bounty, escrowed from the owner's wallet at creation and paid pro rata to what an execution fills | The bounty goes to the owner when the order's own creation walk executes it, or when an execution lands in the creation block of an order the stale fallback left unarmed |
-| Liquidator | `liquidate` | `MIN_LIQUIDATOR_REWARD` ($0.05) per seized account, at most the account's equity below $5 of notional; a seizure whose arrival nets the two buckets earns max($0.05, 2 bp of the overlap netted) (`LIQUIDATION_FEE_EBP`); the inline unload pays 2 bp on what it sells beyond that | Capped at insurance free capital; a stored price older than `MAX_LIQUIDATION_PRICE_AGE` (10 minutes) needs a fresh update |
+| Liquidator | `liquidate` | `MIN_LIQUIDATOR_REWARD` ($0.05) per seized account, at most the account's equity below $5 of notional; a seizure whose arrival nets the two buckets earns max($0.05, 2 bp of the overlap netted) (`LIQUIDATION_FEE_EBP`); the inline unload pays 2 bp on what it sells beyond that | Capped at insurance free capital; on a session pair a stored price older than `MAX_PRICE_STALENESS` decides nothing: the call brings a fresh update or Pyth's latest one, no more than `MAX_LIQUIDATION_PRICE_AGE` (1 minute) old |
 | Vault unloader | `unloadVault` | 2 bp of unloaded notional, raised to `UNLOAD_BOUNTY_MIN` ($0.25) when at least `UNLOAD_BOUNTY_MIN_NOTIONAL` ($1,250) unloads or the bucket it works clears, plus 2 bp of any overlap the walk's tail nets | One bucket per call (`RiskParamsLib.unloadBucketIsLong`); capped by `RiskParamsLib.settleUnloadTail`; fills nothing and pays nothing on the stale fallback |
 | Price refresher | `refreshPrice` | `REFRESH_BOUNTY` ($0.10) for a newer stored price | At most once per `REFRESH_BOUNTY_MIN_GAP` (5 minutes) while the vault holds at least $1,250 of inventory and free capital exceeds `REFRESH_BOUNTY_FAST_MIN_INSURANCE` ($5,000), otherwise once per `REFRESH_BOUNTY_HEARTBEAT` (1 day); only while free capital exceeds `REFRESH_BOUNTY_HEARTBEAT_MIN_INSURANCE` ($1,000) |
 | ADL executor | `executeAdl(longBucketWinners, shortBucketWinners, priceUpdate)` (up to `MAX_ADL_WINNERS_PER_BATCH`, 25, per list; any order, ranked and sorted on-chain) | For every unit a leg closes, max(2 bp of its notional at the mark, `ADL_EXECUTOR_REWARD_BP` (0.1%) of the bad debt the close averts); 2 bp at the mark of the overlap the batch's closing netting retires | Capped at free capital; refuses the stale fallback |
@@ -339,7 +339,11 @@ How it is used:
   is within `MAX_PRICE_STALENESS`.
 - **Freshness.** `MAX_PRICE_STALENESS` (3 s) applies to every price-resolving entry point and is
   measured on the feed update timestamp, when Pyth generated the price, not on the update's own
-  timestamp: an update that carries an old price forward is stale. The check is two-sided, so a
+  timestamp: an update that carries an old price forward is stale. The one exception is a
+  liquidation on a pair that is not continuously traded, which reads its update through
+  `verifyAndFetchLatestPrice`: there every update's own timestamp, when Pyth issued it, must be
+  within `MAX_PRICE_STALENESS` of the block, and the price it carries may be up to
+  `MAX_LIQUIDATION_PRICE_AGE` (1 minute) old. The check is two-sided, so a
   price generated up to 3 s ahead of the block is accepted; the pair clamps future-dated
   timestamps where it computes ages.
 - **Confidence.** A live price must carry its price, exponent, confidence and feed update
@@ -352,7 +356,8 @@ How it is used:
   stored `lastPairPrice`. On the fallback, fills are banded to ±`MAX_STALE_DEVIATION_BP` (10%),
   market orders and trigger executions revert, the mark and funding are frozen, unloads fill
   nothing, position holders cannot withdraw, LP redemptions are refused, `executeAdl` refuses to
-  run, and liquidations use the stored price within `MAX_LIQUIDATION_PRICE_AGE`. Continuous pairs
+  run, and liquidations refuse it: they run on Pyth's latest price, proven by an update issued within
+  `MAX_PRICE_STALENESS` and no more than `MAX_LIQUIDATION_PRICE_AGE` (1 minute) old. Continuous pairs
   have no fallback: a priced call reverts until a fresh price lands. A session pair is on the
   fallback whenever a call brings no update and its stored price has aged out, including while its
   venue is open (section 9, item 44).
@@ -635,11 +640,14 @@ found most of their defects.
    `_isValidDescription`; `BazaarOracle.registerComposite`. Includes the spoofing and duplicate-request
    cases in section 6.
 10. **Price resolution, relayed calls and ETH refunds.** `BazaarPair._getCurrentPairPrice`,
-    `_buildAndStorePairPrice`, `_resolveUser`, `_sendWithRelayerFee`, `_refundEth`;
-    `MetaTxLib.verifyAndConsume`; `BazaarOracle.verifyAndFetchPrice`, `fetchPriceAtTick`,
-    `fetchChainedMedian`, `_requireLive`, `_pricedSince`; `LazerPayloadLib.readFeeds`. A supplied
-    update is always verified and `priceUpdate` is unsigned, so a relayer or keeper chooses which
-    fresh price a call sees. ETH
+    `_liquidationPrice`, `_buildAndStorePairPrice`, `_resolveUser`, `_sendWithRelayerFee`,
+    `_refundEth`; `MetaTxLib.verifyAndConsume`; `BazaarOracle.verifyAndFetchPrice`,
+    `verifyAndFetchLatestPrice`, `fetchPriceAtTick`, `fetchChainedMedian`, `_requireLive`,
+    `_within`, `_pricedSince`; `LazerPayloadLib.readFeeds`. A supplied update is always verified and
+    `priceUpdate` is unsigned, so a relayer or keeper chooses which fresh price a call sees. A
+    liquidation on a pair that is not continuously traded proves Pyth's latest price by when its
+    updates were issued; whether any update that passes can carry a price other than the latest one
+    Pyth had then is the question to test. ETH
     refunds go to the caller at the end of payable entry points while the transient guard is held;
     functions without the guard, such as `finalizeTermination`, stay reachable from that callback.
 
@@ -650,18 +658,22 @@ without a new consequence (a larger impact, a cheaper path, or a broken bound) a
 
 ### Oracle and pricing
 
-1. **A liquidation can run on a stored price up to 10 minutes old.** On a session pair, when the
-   caller supplies no update and the stored price has aged out, `liquidate` judges accounts against
-   the stored mark if it is within `MAX_LIQUIDATION_PRICE_AGE` (10 minutes); a 24/7 pair has no stale
-   fallback and reverts instead. Accepted: the mark was fresh when stored, the owner can
-   top up or store a newer price inside the window, the caller earns only the standard reward, and
-   the MMR lookback is anchored to the mark's own timestamp.
+1. **A liquidation can run on Pyth's latest price up to 1 minute old.** On a session pair whose
+   feed has gone quiet, `liquidate` judges accounts at the latest price Pyth's update carries, proven
+   to be the latest by the update's own timestamp (within `MAX_PRICE_STALENESS` of the block) and no
+   older than `MAX_LIQUIDATION_PRICE_AGE`; a wider price than the confidence cap is refused rather
+   than replaced by an older one, and a stored price past `MAX_PRICE_STALENESS` decides a seizure
+   only when it is newer than the update's price, so it came from an update issued after the call's
+   (a call without an update reverts on it). The caller can still pick any update issued within `MAX_PRICE_STALENESS` of the block,
+   the same latitude every live price leaves. Accepted: the price is the latest the market showed,
+   it is stored when newer so the MMR lookback is anchored to it, and the caller earns only the
+   standard reward.
 2. **A stale mark can fix the settlement price on a deficit or a cash shortfall.** The health
    verdict fixes the settlement price on any recorded deficit or books-versus-balance shortfall
    without consulting staleness, and every flow that runs it on a session pair's stale fallback can
    fix it at that mark: `refreshPrice` (with no age bound), `unloadVault` outside an ADL window, a
-   `createOrder` that fills inside the stale band, and a `liquidate` within
-   `MAX_LIQUIDATION_PRICE_AGE`. Accepted: nothing that runs on a stale mark can create either
+   `createOrder` that fills inside the stale band, and a `liquidate` judged at Pyth's latest price
+   older than `MAX_PRICE_STALENESS`. Accepted: nothing that runs on a stale mark can create either
    condition in correct code, so the check only freezes a pair a defect elsewhere has already
    broken, and an age bound would delay that freeze. A flat withdrawal reads no price; it runs the
    books-versus-balance check on its own and is refused while that fails.
@@ -994,12 +1006,15 @@ without a new consequence (a larger impact, a cheaper path, or a broken bound) a
     runs on the stored price once it is older than `MAX_PRICE_STALENESS`, including while the venue
     is open and a fresh price exists off-chain. Accepted: the stale regime's restrictions apply to
     such a call (section 6), a supplied update is always verified, and anyone can store a fresh
-    price with `refreshPrice`. The recorded hardening is to require proof that the feed is quiet
-    before the fallback applies.
+    price with `refreshPrice`. Liquidation does not use the fallback: it needs a fresh price or
+    Pyth's latest one (item 1).
 45. **A caller chooses among the prices of the last few seconds.** A live call may carry any price
     generated within `MAX_PRICE_STALENESS` of the block, and the pair stores it when it was
     generated in a later second than the stored one; within one second the first price stored
-    stands. A keeper or relayer therefore picks which recent price a liquidation, a trigger
+    stands. A liquidation on a pair that is not continuously traded is judged at its update's price
+    in the stored price's own second too (item 1), so a caller whose update was issued before the
+    stored price was generated is judged at a price less than a second older than it. A keeper or
+    relayer therefore picks which recent price a liquidation, a trigger
     execution or a fill is judged at. Accepted: it is inherent to a pull oracle, and the 3 s bound,
     the later-second rule and the limits in items 11 and 13 bound what it is worth.
 46. **After the grace, the first caller chooses between the cutoff update and the stored price.**
@@ -1045,8 +1060,13 @@ and what it found is fixed or listed in section 9 (items 25 and 38 to 42). The m
 Core to Pyth Pro came after them as well: the oracle adapter and its payload parser, price
 resolution from the caller's update, the tick and chain settlement proofs, and the rewritten UMA
 claim texts. It has had two focused internal reviews, and what they found is fixed or listed in
-section 9 (items 5, 28 and 43 to 48). The test suite holds
-1,898 test functions in 117 files under `test/unit` and `test/integration` at the time of writing, including
+section 9 (items 5, 28 and 43 to 48). Liquidation on Pyth's latest price came after them as
+well: a call without an update no longer liquidates on a stored price older than
+`MAX_PRICE_STALENESS`, a liquidation on a pair that is not continuously traded proves Pyth's latest
+price by when its update was issued, `MAX_LIQUIDATION_PRICE_AGE` fell from ten minutes to one, and
+the termination claim states the chain rule's last resort. It has had one focused internal review,
+and what it found is fixed or listed in section 9 (item 1). The test suite holds
+1,933 test functions in 118 files under `test/unit` and `test/integration` at the time of writing, including
 fuzz tests, fixed zero-sum scenarios and the handler-based invariant suite. **The protocol has not
 had a professional audit.** The internal review reports can be shared with the selected auditor on
 request.
