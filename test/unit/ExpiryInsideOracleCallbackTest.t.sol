@@ -16,7 +16,6 @@ import {
 } from "../../src/interfaces/IUmaOptimisticOracleV3.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {MockOptimisticOracleV3} from "../mocks/MockOptimisticOracleV3.sol";
-import {PythSeed} from "../PythSeed.sol";
 
 /// @dev Settles an assertion of its own on the oracle and, from inside the resolve callback that
 ///      settlement fires, calls one of the factory's expiry functions. The oracle holds its
@@ -56,7 +55,7 @@ contract CallbackExpirer is IOptimisticOracleV3CallbackRecipient {
 ///         settlement they attempt first cannot succeed. An undisputed proposal past liveness must
 ///         come out approved, exactly as a settlement would have left it, and never discarded.
 contract ExpiryInsideOracleCallbackTest is Test {
-    bytes32 constant ETH_USD_FEED_ID = 0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace;
+    bytes32 constant ETH_USD_FEED_ID = bytes32(uint256(2));
 
     uint256 constant PROPOSAL_TOTAL = 5_000e18;
     uint256 constant PROPOSAL_TOTAL_USDC = 5_000e6;
@@ -85,8 +84,6 @@ contract ExpiryInsideOracleCallbackTest is Test {
         usdc = MockUSDC(usdcContract);
         mockOOv3 = MockOptimisticOracleV3(oo3);
         expirer = new CallbackExpirer(mockOOv3, factory);
-
-        PythSeed.seed(address(factory.oracle().pyth()), ETH_USD_FEED_ID);
 
         bondUsdc = factory.DEPLOYMENT_BOND_USDC();
         seedUsdc = PROPOSAL_TOTAL_USDC - bondUsdc;

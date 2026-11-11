@@ -11,8 +11,8 @@ import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 import {OrderView} from "../OrderView.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {MockArbSys} from "../mocks/MockArbSys.sol";
-import {MockPyth} from "@pythnetwork/pyth-sdk-solidity/MockPyth.sol";
-import {PythSeed} from "../PythSeed.sol";
+import {MockPythLazer} from "../mocks/MockPythLazer.sol";
+import {LazerUpdate} from "../LazerUpdate.sol";
 
 import {VaultStore} from "../VaultStore.sol";
 
@@ -37,7 +37,7 @@ import {VaultStore} from "../VaultStore.sol";
 ///         doesn't reach insurance all break this equality immediately.
 contract ZeroSumInvariantTest is Test {
     // -------------------- Constants --------------------
-    bytes32 constant BTC_USD_FEED_ID = 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43;
+    bytes32 constant BTC_USD_FEED_ID = bytes32(uint256(1));
 
     uint256 constant BAZAAR_SCALE = 1e18;
     uint256 constant USDC_SCALE = 1e6;
@@ -57,7 +57,7 @@ contract ZeroSumInvariantTest is Test {
     BazaarOracle public oracle;
     BazaarPair public pair;
     MockUSDC public usdc;
-    MockPyth public mockPyth;
+    MockPythLazer public mockPyth;
 
     address public deployer;
     address public alice;
@@ -104,8 +104,7 @@ contract ZeroSumInvariantTest is Test {
         (, address usdcAddr,,) = helperConfig.activeNetworkConfig();
         usdc = MockUSDC(usdcAddr);
         oracle = factory.oracle();
-        mockPyth = MockPyth(address(oracle.pyth()));
-        PythSeed.seed(address(mockPyth), BTC_USD_FEED_ID);
+        mockPyth = MockPythLazer(address(oracle.pythLazer()));
 
         usdc.mint(deployer, INITIAL_USER_BALANCE);
         usdc.mint(alice, INITIAL_USER_BALANCE);
@@ -236,16 +235,7 @@ contract ZeroSumInvariantTest is Test {
     function _priceUpdate(uint256 priceUsd, uint64 publishTime) internal view returns (bytes[] memory pu) {
         int64 pythPrice = int64(int256(priceUsd * 1e8));
         uint64 conf = uint64(priceUsd * 1e8 / 1000);
-        bytes memory data = mockPyth.createPriceFeedUpdateData(
-            BTC_USD_FEED_ID,
-            pythPrice,
-            conf,
-            BTC_PYTH_EXPO,
-            pythPrice,
-            conf,
-            publishTime,
-            publishTime > 0 ? publishTime - 1 : 0
-        );
+        bytes memory data = LazerUpdate.live(BTC_USD_FEED_ID, pythPrice, conf, int16(BTC_PYTH_EXPO), publishTime);
         pu = new bytes[](1);
         pu[0] = data;
     }
@@ -286,8 +276,8 @@ contract ZeroSumInvariantTest is Test {
         internal
         returns (uint256)
     {
-        // +4s: past MAX_PRICE_STALENESS, so the pair consumes the supplied price rather than a
-        // fresh-enough cache from a previous (possibly differently-priced) step.
+        // +4s: a later second than the stored price, so the pair stores the supplied price rather
+        // than keep the one a previous (possibly differently-priced) step stored.
         _advance(4);
         bytes[] memory pu = _pu(priceUsd);
         BazaarTypes.OrderSpec memory spec;

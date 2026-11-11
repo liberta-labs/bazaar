@@ -42,7 +42,7 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
     uint8 public constant CATEGORY_ORACLE_DECOMMISSION = 1;
     uint8 public constant CATEGORY_ASSET_CESSATION = 2;
     uint8 public constant CATEGORY_STRUCTURAL_CHANGE = 3;
-    uint8 public constant CATEGORY_PYTH_CONTRACT_MIGRATION = 4;
+    uint8 public constant CATEGORY_PYTH_VERIFIER_MIGRATION = 4;
 
     /// @notice Bound on the proposer-supplied reason embedded in the UMA claim; the charset
     ///         restriction lives in _validateReason.
@@ -236,33 +236,34 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
 
     /// @dev Claim-text fragment describing the pair's price feed(s). Composite feed IDs are
     ///      resolved to their underlying Pyth legs so UMA verifiers can check them against the
-    ///      Pyth registry (a composite ID itself does not exist on Pyth).
+    ///      Pyth Pro registry (a composite ID itself does not exist on Pyth). Raw feed IDs are
+    ///      written in decimal, the form that registry lists them in; a composite ID in hex.
     function _feedIdSection(IBazaarPair p) internal view returns (bytes memory) {
         bytes32 feedId = p.baseFeedId();
         (bytes32 legBaseId, bytes32 legQuoteId, bool legInvertQuote) = BazaarOracle(p.oracle()).composites(feedId);
 
         if (legBaseId == bytes32(0)) {
-            return abi.encodePacked(". Base feed ID: ", Strings.toHexString(uint256(feedId)));
+            return abi.encodePacked(". Base feed ID (Pyth Pro): ", Strings.toString(uint256(feedId)));
         }
         return abi.encodePacked(
             ". Composite feed ID (USD price = base leg ",
             legInvertQuote ? "DIVIDED by" : "MULTIPLIED by",
             " quote leg): ",
             Strings.toHexString(uint256(feedId)),
-            ". Base leg feed ID: ",
-            Strings.toHexString(uint256(legBaseId)),
-            ". Quote leg feed ID (FX): ",
-            Strings.toHexString(uint256(legQuoteId))
+            ". Base leg feed ID (Pyth Pro): ",
+            Strings.toString(uint256(legBaseId)),
+            ". Quote leg feed ID (Pyth Pro, FX): ",
+            Strings.toString(uint256(legQuoteId))
         );
     }
 
     /// @dev The claim's name for a declared category. proposeTermination has already rejected
-    ///      anything outside CATEGORY_ORACLE_DECOMMISSION..CATEGORY_PYTH_CONTRACT_MIGRATION.
+    ///      anything outside CATEGORY_ORACLE_DECOMMISSION..CATEGORY_PYTH_VERIFIER_MIGRATION.
     function _categoryName(uint8 category) internal pure returns (string memory) {
         if (category == CATEGORY_ORACLE_DECOMMISSION) return "ORACLE DECOMMISSION";
         if (category == CATEGORY_ASSET_CESSATION) return "ASSET CESSATION";
         if (category == CATEGORY_STRUCTURAL_CHANGE) return "STRUCTURAL CHANGE";
-        return "PYTH CONTRACT MIGRATION";
+        return "PYTH VERIFIER MIGRATION";
     }
 
     /// @dev The contract-written opening of the claim: the pair's identity, the declared category
@@ -274,8 +275,8 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
             " on Arbitrum (chain ID ",
             Strings.toString(block.chainid),
             ").",
-            " Pyth oracle: ",
-            Strings.toHexString(address(BazaarOracle(p.oracle()).pyth())),
+            " Pyth Pro verifier contract: ",
+            Strings.toHexString(address(BazaarOracle(p.oracle()).pythLazer())),
             _feedIdSection(p),
             ". Declared reason category: (",
             Strings.toString(category),
@@ -293,7 +294,6 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
         uint256 liveness = TERMINATION_PROPOSAL_LIVENESS / 1 hours;
         uint256 voteLead = INSURER_TERMINATION_MIN_LEAD / 1 hours;
         uint256 halt = BazaarTypes.LIMBO_LEAD;
-        uint256 window = BazaarTypes.MAX_PRICE_STALENESS;
         uint256 lead = BazaarTypes.MIN_CUTOFF_LEAD;
         uint256 grace = SCHEDULED_TERMINATION_GRACE / 1 hours;
         uint256 verdictGrace = CLAIM_VERDICT_GRACE / 1 days;
@@ -303,7 +303,6 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
             liveness,
             voteLead,
             halt,
-            window,
             lead,
             grace,
             verdictGrace,
@@ -330,7 +329,7 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
     ///      (_handleTerminationResolution).
     /// @param pair The registered pair to terminate
     /// @param category The reason category claimed, CATEGORY_ORACLE_DECOMMISSION through
-    ///        CATEGORY_PYTH_CONTRACT_MIGRATION; the claim text defines each one
+    ///        CATEGORY_PYTH_VERIFIER_MIGRATION; the claim text defines each one
     /// @param lastTradingTs The proposed cutoff, at least INSURER_TERMINATION_MIN_LEAD from now and
     ///        earlier than the UMA cutoff in force, if any
     /// @param reason The grounds and evidence, 1 to MAX_REASON_LENGTH bytes in the charset
@@ -351,7 +350,7 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
         if (umaCutoffSet && lastTradingTs >= umaCutoff) {
             revert BazaarPairTerminator__CutoffNotEarlier(lastTradingTs, umaCutoff);
         }
-        if (category == 0 || category > CATEGORY_PYTH_CONTRACT_MIGRATION) {
+        if (category == 0 || category > CATEGORY_PYTH_VERIFIER_MIGRATION) {
             revert BazaarPairTerminator__InvalidCategory(category);
         }
         // A cutoff this near is met only through the vote, whose latch is price-blind (see the
@@ -423,7 +422,7 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
     uint256 internal constant ORACLE_DEAD_THRESHOLD = 21 days;
     /// @notice How long ONLY the precise tick settles a pair under UMA's rule, counted from
     ///         scheduledTs or, for a pair a vote halted, from when its claim's verdict became known
-    ///         if that is later (_windowGraceEnd). After it elapses, terminateScheduledPair falls
+    ///         if that is later (_tickGraceEnd). After it elapses, terminateScheduledPair falls
     ///         back to the pair's last stored price if no valid tick is supplied.
     /// @dev Sized to match TERMINATION_PROPOSAL_LIVENESS, because the two answer the same
     ///      question: how long an interested party needs to notice a termination and act on it.
@@ -436,26 +435,26 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
     ///      price is fixed, so the ceiling is how long the book can sit frozen, not how long an
     ///      inattentive keeper might take. The tick cannot settle a pair a vote halted before the
     ///      verdict on its claim, so the grace starts no earlier than that verdict is known
-    ///      (_windowGraceEnd). Supplying the tick ends limbo as soon as the rule applies, so the
+    ///      (_tickGraceEnd). Supplying the tick ends limbo as soon as the rule applies, so the
     ///      length only ever delays the fallback — never the accurate settlement it exists to
     ///      protect.
     uint256 internal constant SCHEDULED_TERMINATION_GRACE = 12 hours;
 
-    /// @notice How many prints settle a pair under the chain rule, the rule of every insurer-vote
+    /// @notice How many samples settle a pair under the chain rule, the rule of every insurer-vote
     ///         schedule whose claim UMA has not upheld: the median of this many samples chained
     ///         from the cutoff (BazaarOracle.fetchChainedMedian). Odd, so the median is a sample
     ///         and moving it means moving more than half of them.
     uint256 public constant SETTLEMENT_SAMPLE_COUNT = 5;
-    /// @notice How far after one chain sample's publish time the next sample's target lies. The
-    ///         last of SETTLEMENT_SAMPLE_COUNT samples is therefore published at least
-    ///         (SETTLEMENT_SAMPLE_COUNT - 1) times this after the first, so one print cannot be the
-    ///         whole set, and a cutoff placed at a session's close is settled on prints from the
-    ///         reopen's first stretch rather than on its opening print alone.
+    /// @notice How far after one chain sample's tick the next sample's target lies. The last of
+    ///         SETTLEMENT_SAMPLE_COUNT samples is therefore stamped at least
+    ///         (SETTLEMENT_SAMPLE_COUNT - 1) times this after the first, so one price cannot be the
+    ///         whole set, and a cutoff placed at a session's close is settled on prices from the
+    ///         reopen's first stretch rather than on its opening price alone.
     uint256 public constant SETTLEMENT_SAMPLE_SPACING = 10 minutes;
 
     /// @notice settlementRule's answers: what terminateScheduledPair needs to settle a pair.
     uint8 public constant SETTLE_NOTHING = 0;
-    uint8 public constant SETTLE_WINDOW = 1;
+    uint8 public constant SETTLE_TICK = 1;
     uint8 public constant SETTLE_CHAIN = 2;
     uint8 public constant SETTLE_AWAIT_VERDICT = 3;
 
@@ -463,8 +462,9 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
     ///         fixSettlementPrice accepts. See _lastStoredPrice.
     uint256 internal constant NEVER_PRICED_SETTLEMENT_PRICE = 1;
 
-    /// @notice Emitted when terminateStalePair settles a pair whose feed is dead, just before the
-    ///         SettlementPriceFixed that every governed path emits.
+    /// @notice Emitted when terminateStalePair settles a pair that stored no price for longer than
+    ///         ORACLE_DEAD_THRESHOLD, just before the SettlementPriceFixed that every governed path
+    ///         emits.
     /// @param pair The pair
     /// @param terminationPrice The settlement price: the pair's last stored spot price, or
     ///        NEVER_PRICED_SETTLEMENT_PRICE when it never stored one
@@ -489,16 +489,17 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
     /// @notice Stage 1 of a scheduled termination: pin the settlement price for the scheduled
     ///         cutoff. Anyone can call this once scheduledTs has passed. A pair scheduled by a
     ///         UMA acceptance, or by a vote whose claim UMA upheld, settles under UMA's rule: the
-    ///         first Pyth tick published in [scheduledTs - MAX_PRICE_STALENESS, scheduledTs], the
-    ///         window the pair's limbo already covers, supplied via priceUpdate and verified
-    ///         on-chain, and its stored price once SCHEDULED_TERMINATION_GRACE has passed without
-    ///         one, counted from scheduledTs or, for a vote, from when its claim's verdict became
-    ///         known if that is later. A pair scheduled by any other vote settles under the
-    ///         chain rule: the median of SETTLEMENT_SAMPLE_COUNT prints chained from scheduledTs,
-    ///         each the first print at least SETTLEMENT_SAMPLE_SPACING after the one before
-    ///         (BazaarOracle.fetchChainedMedian), every one published no later than the UMA cutoff
-    ///         the schedule met, if any (umaCutoffCap). settlementRule reports which rule applies
-    ///         and what to fetch. Fixing the price opens the pair's terminal sweep window
+    ///         price Pyth's one-second channel carried at scheduledTs, the feed's most recent price
+    ///         as of that second, supplied via priceUpdate and verified on-chain; its stored price
+    ///         once SCHEDULED_TERMINATION_GRACE has passed without that update, counted from
+    ///         scheduledTs or, for a vote, from when its claim's verdict became known if that is
+    ///         later. A pair
+    ///         scheduled by any other vote settles under the chain rule: the median of
+    ///         SETTLEMENT_SAMPLE_COUNT prices chained from scheduledTs, each the earliest
+    ///         one-second tick carrying a price generated at least SETTLEMENT_SAMPLE_SPACING after
+    ///         the tick before (BazaarOracle.fetchChainedMedian), every one no later than the UMA
+    ///         cutoff the schedule met, if any (umaCutoffCap). settlementRule reports which rule
+    ///         applies and what to fetch. Fixing the price opens the pair's terminal sweep window
     ///         (liquidations at the fixed price only); after it elapses anyone may call
     ///         BazaarPair.finalizeTermination to settle.
     /// @dev A vote-scheduled pair first has its outcome stamped (_stampInsurerOutcome). For a
@@ -511,44 +512,46 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
     ///      could never make the traders whole whom that print shortchanged if the claim proved
     ///      false.
     ///
-    ///      The chain rule reads only prints published at or after the cutoff. The cutoff was
+    ///      The chain rule reads only prices generated at or after the cutoff. The cutoff was
     ///      latched at least INSURER_TERMINATION_LATCH_LEAD before it arrived and trading halts
     ///      LIMBO_LEAD before it, so none of them is a price anyone could have traded
-    ///      against, and Pyth proves each supplied sample is the first print at or after its own
-    ///      target, so whoever settles cannot choose which prints count
-    ///      (BazaarOracle.fetchChainedMedian). Taking the median of several prints rather than the
-    ///      first one alone makes the settlement cost several prints to move instead of one, which
-    ///      matters on a thin feed whose proposer picked the cutoff. The rule has no grace and,
-    ///      until its last resort opens (_insurerSettlementBounds: ORACLE_DEAD_THRESHOLD after the
-    ///      cutoff, or SCHEDULED_TERMINATION_GRACE after a capping UMA cutoff when that is sooner),
-    ///      no stored-price fallback. A prompt fallback would hand
+    ///      against, and each supplied sample is proven to be the earliest tick carrying a price
+    ///      generated at or after its own target, so whoever settles cannot choose which prices
+    ///      count (BazaarOracle.fetchChainedMedian). Taking the median of several prices rather
+    ///      than the first one alone makes the settlement cost several prices to move instead of
+    ///      one, which matters on a thin feed whose proposer picked the cutoff. The rule has no
+    ///      grace and, until its last resort opens (_insurerSettlementBounds: ORACLE_DEAD_THRESHOLD
+    ///      after the cutoff, or SCHEDULED_TERMINATION_GRACE after a capping UMA cutoff when that
+    ///      is sooner), no stored-price fallback. A prompt fallback would hand
     ///      the fund the very choice the cutoff denies it: pick a cutoff inside a closed session,
     ///      wait out a grace, settle at the last close after news that moved the market. So a
-    ///      cutoff that falls while the feed is quiet settles on prints from the reopen, unless UMA
+    ///      cutoff that falls while the feed is quiet settles on prices from the reopen, unless UMA
     ///      has judged the event real. Once the last resort opens, a call that brings no valid
     ///      chain, an empty one included, settles at the stored price: whoever calls first then
     ///      chooses between a chain and the stored price, but by then anyone who wanted the chain
     ///      has had that long to post it, and without the fallback a sample that can no longer be
-    ///      verified on-chain (an expired Wormhole guardian set, an archival gap) or a feed that
-    ///      went dark before printing them all would freeze every balance on the pair for good;
-    ///      terminateStalePair cannot be relied on, since Pyth's cache stays fresh for as long as
-    ///      anyone keeps pushing updates to it.
+    ///      verified on-chain (signed by a signer Pyth has since retired, or no longer served by
+    ///      Pyth) or a feed that went dark before producing them all would freeze every balance on
+    ///      the pair for good; terminateStalePair does not stand in, since it refuses a pair whose
+    ///      vote-set cutoff has passed.
     ///
     ///      A UMA cutoff the schedule met bounds every sample (_insurerSettlementBounds): each must
-    ///      be published no later than it, and once it is SCHEDULED_TERMINATION_GRACE old a call
+    ///      be no later than it, and once it is SCHEDULED_TERMINATION_GRACE old a call
     ///      that brings no such chain settles at the stored price, as it would have at UMA's own
-    ///      cutoff. UMA has verified an event the market can see coming, so a reopen print
-    ///      published after that cutoff can carry a move whose direction was public when the
+    ///      cutoff. UMA has verified an event the market can see coming, so a reopen price
+    ///      generated after that cutoff can carry a move whose direction was public when the
     ///      insurer cutoff was voted; capped, the earlier cutoff only moves the halt, never the
     ///      settlement past the cutoff UMA verified.
     ///
-    ///      Under UMA's rule, Pyth proves the supplied tick is the window's first print, so the
-    ///      settlement price is the same whoever calls: a later print inside the window is refused
-    ///      like one outside it, and for a composite each leg is pinned on its own. Until the grace
-    ///      ends (_windowGraceEnd) that precise tick is the ONLY acceptable price: if it isn't
-    ///      supplied the call reverts (no last-price fallback). This gives anyone who wants the
+    ///      Under UMA's rule there is one update per feed for the cutoff's tick and Pyth signed
+    ///      it, so the settlement price is the same whoever calls: the price that tick carries,
+    ///      which is the feed's last price before the cutoff when the feed produced none on it.
+    ///      The pair's own stored price is not consulted, so nothing stored around the cutoff can
+    ///      change the outcome. Until the grace ends (_tickGraceEnd) that update is the ONLY
+    ///      thing that settles the pair: if it isn't supplied, or carries no price, the call
+    ///      reverts (no last-price fallback). This gives anyone who wants the
     ///      accurate price a window to post it, and crucially means bad/empty data can't be used
-    ///      to force a fallback while a real tick may exist. The grace can never be pre-elapsed
+    ///      to force a fallback while a real price may exist. The grace can never be pre-elapsed
     ///      when an acceptance starts it: a proposal accepted after its cutoff (a disputed one
     ///      resolving late at the DVM) is scheduled MIN_CUTOFF_LEAD past the acceptance instant, so
     ///      scheduledTs is never in the past when it is set. A vote sets its cutoff before the
@@ -562,19 +565,21 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
     ///      revert takes the recording with it: nobody can record such a verdict and fall back in
     ///      one transaction.
     ///
-    ///      After the grace elapses, the precise tick is still preferred, but if the precise fetch
-    ///      reverts (no tick in the window, or no/invalid data supplied) the pair settles at
-    ///      its last stored price instead: capped at scheduledTs, confidence-checked, and frozen
-    ///      since matching is halted in limbo, so it's non-manipulable. This guarantees a scheduled
+    ///      After the grace elapses, the tick is still preferred, but if it cannot be read
+    ///      (no/invalid data supplied, or an update that no longer verifies) the pair settles at
+    ///      its last stored price instead: generated no later than the cutoff's second,
+    ///      confidence-checked when it was stored, and long fixed by then, since nothing generated
+    ///      that early is still fresh enough to store. This guarantees a scheduled
     ///      termination always completes rather than stranding the pair (and the funds backing its
-    ///      open positions) indefinitely when the feed had no tick in the settlement window (or the
-    ///      archived tick's Wormhole guardian set has expired and can no longer verify on-chain).
+    ///      open positions) indefinitely when the tick can no longer be shown (Pyth no longer
+    ///      serves it, or has retired the signer that signed it).
     ///      On both paths a pair that never stored a price settles at
     ///      NEVER_PRICED_SETTLEMENT_PRICE instead (see _lastStoredPrice).
     /// @param pair The pair whose cutoff has passed
-    /// @param priceUpdate Under UMA's rule, the window's first print, one update per leg; under the
-    ///        chain rule, the sample set, one update per leg for each sample in turn; empty for
-    ///        the stored-price fallback once it is open
+    /// @param priceUpdate Under UMA's rule, the cutoff tick's update, one carrying every leg or
+    ///        one per leg; under the chain rule, the sample set in the order
+    ///        BazaarOracle.fetchChainedMedian reads it; empty for the stored-price fallback once
+    ///        it is open
     function terminateScheduledPair(address pair, bytes[] calldata priceUpdate) external payable nonReentrant {
         if (!_registeredPairs.contains(pair)) revert BazaarPairTerminator__PairNotRegistered();
         IBazaarPair p = IBazaarPair(pair);
@@ -598,38 +603,66 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
 
         BazaarOracle oracleContract = BazaarOracle(p.oracle());
         bytes32 feedId = p.baseFeedId();
-        uint256 refundAmount;
+
+        // Only query the fee when update data is supplied: getUpdateFee is a call into Pyth's
+        // contract OUTSIDE the try/catch below, so an unconditional call would make even the
+        // empty-calldata fallback path revert if that contract itself is bricked/migrated —
+        // stranding the pair in limbo instead of settling it after the grace.
+        uint256 fee = priceUpdate.length > 0 ? oracleContract.getUpdateFee(priceUpdate.length) : 0;
+        if (msg.value < fee) revert BazaarPairTerminator__InsufficientPythFee(msg.value, fee);
+        uint256 refundAmount = msg.value - fee;
 
         if (chainRule) {
-            refundAmount = _settleByChain(p, pair, oracleContract, feedId, priceUpdate, scheduledTs);
-        } else {
-            // Only query the fee when update data is supplied: getUpdateFee is a call into the Pyth
-            // contract OUTSIDE the try/catch below, so an unconditional call would make even the
-            // empty-calldata fallback path revert if the Pyth contract itself is bricked/migrated —
-            // stranding the pair until the 21-day stale path instead of settling after the grace.
-            uint256 fee = priceUpdate.length > 0 ? oracleContract.getUpdateFee(priceUpdate) : 0;
-
-            // Read after the stamp, so a verdict the stamp has just recorded counts.
-            if (block.timestamp <= _windowGraceEnd(scheduleId, scheduledTs)) {
-                // Within grace: precise price only, revert on any failure.
-                uint256 terminationPrice = oracleContract.fetchFirstPriceAtOrAfter{value: fee}(
-                    feedId, priceUpdate, uint64(scheduledTs - BazaarTypes.MAX_PRICE_STALENESS), uint64(scheduledTs)
+            (uint64 latestPublishTs, uint256 lastResortTs) = _insurerSettlementBounds(pair, scheduledTs);
+            if (block.timestamp <= lastResortTs) {
+                // Before the last resort: a complete chain only, revert on any failure.
+                _fixSettlement(
+                    p,
+                    pair,
+                    oracleContract.fetchChainedMedian{value: fee}(
+                        feedId,
+                        priceUpdate,
+                        uint64(scheduledTs),
+                        latestPublishTs,
+                        uint64(SETTLEMENT_SAMPLE_SPACING),
+                        SETTLEMENT_SAMPLE_COUNT
+                    )
                 );
-                _fixSettlement(p, pair, terminationPrice);
-                refundAmount = msg.value - fee;
             } else {
-                // After grace: prefer precise, fall back to the last stored price on revert.
-                try oracleContract.fetchFirstPriceAtOrAfter{value: fee}(
-                    feedId, priceUpdate, uint64(scheduledTs - BazaarTypes.MAX_PRICE_STALENESS), uint64(scheduledTs)
+                // From the last resort on: prefer the chain, fall back to the stored price when it
+                // cannot be read (no data, a short set, a sample that will not verify).
+                try oracleContract.fetchChainedMedian{value: fee}(
+                    feedId,
+                    priceUpdate,
+                    uint64(scheduledTs),
+                    latestPublishTs,
+                    uint64(SETTLEMENT_SAMPLE_SPACING),
+                    SETTLEMENT_SAMPLE_COUNT
                 ) returns (
-                    uint256 terminationPrice
+                    uint256 settlementPrice
                 ) {
-                    _fixSettlement(p, pair, terminationPrice);
-                    refundAmount = msg.value - fee;
+                    _fixSettlement(p, pair, settlementPrice);
                 } catch {
-                    (uint256 lastPrice,) = _lastStoredPrice(p);
-                    _fixSettlement(p, pair, lastPrice);
-                    refundAmount = msg.value; // precise fetch reverted → no Pyth fee consumed
+                    _fixSettlement(p, pair, _storedSettlementPrice(p));
+                    refundAmount = msg.value; // the fetch reverted, so no Pyth fee was spent
+                }
+            }
+        } else {
+            // Read after the stamp, so a verdict the stamp has just recorded counts.
+            if (block.timestamp <= _tickGraceEnd(scheduleId, scheduledTs)) {
+                // Within grace: the cutoff's tick only, revert on any failure.
+                _fixSettlement(
+                    p, pair, oracleContract.fetchPriceAtTick{value: fee}(feedId, priceUpdate, uint64(scheduledTs))
+                );
+            } else {
+                // After grace: prefer the tick, fall back to the last stored price on revert.
+                try oracleContract.fetchPriceAtTick{value: fee}(feedId, priceUpdate, uint64(scheduledTs)) returns (
+                    uint256 tickPrice
+                ) {
+                    _fixSettlement(p, pair, tickPrice);
+                } catch {
+                    _fixSettlement(p, pair, _storedSettlementPrice(p));
+                    refundAmount = msg.value; // the fetch reverted, so no Pyth fee was spent
                 }
             }
         }
@@ -640,68 +673,24 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
         }
     }
 
-    /// @dev The chain rule's settlement of `pair`, whose cutoff is `scheduledTs`; returns the ETH
-    ///      to refund. Until the last resort opens only a complete chain fixes the price, and any
-    ///      failure reverts. From then on the chain is still preferred, and when it cannot be
-    ///      fetched (no data, a short set, a sample that will not verify) the stored price stands
-    ///      in. The fee is queried only when update data is supplied, for the same reason as on
-    ///      UMA's rule: it is a call into Pyth outside the try/catch.
-    function _settleByChain(
-        IBazaarPair p,
-        address pair,
-        BazaarOracle oracleContract,
-        bytes32 feedId,
-        bytes[] calldata priceUpdate,
-        uint256 scheduledTs
-    ) private returns (uint256 refundAmount) {
-        uint256 setFee = priceUpdate.length > 0 ? oracleContract.getSampleSetFee(feedId, priceUpdate) : 0;
-        if (msg.value < setFee) revert BazaarPairTerminator__InsufficientPythFee(msg.value, setFee);
-        (uint64 latestPublishTs, uint256 lastResortTs) = _insurerSettlementBounds(pair, scheduledTs);
-        if (block.timestamp <= lastResortTs) {
-            _fixSettlement(
-                p,
-                pair,
-                oracleContract.fetchChainedMedian{value: setFee}(
-                    feedId,
-                    priceUpdate,
-                    uint64(scheduledTs),
-                    latestPublishTs,
-                    uint64(SETTLEMENT_SAMPLE_SPACING),
-                    SETTLEMENT_SAMPLE_COUNT
-                )
-            );
-            return msg.value - setFee;
-        }
-        try oracleContract.fetchChainedMedian{value: setFee}(
-            feedId,
-            priceUpdate,
-            uint64(scheduledTs),
-            latestPublishTs,
-            uint64(SETTLEMENT_SAMPLE_SPACING),
-            SETTLEMENT_SAMPLE_COUNT
-        ) returns (
-            uint256 settlementPrice
-        ) {
-            _fixSettlement(p, pair, settlementPrice);
-            refundAmount = msg.value - setFee;
-        } catch {
-            (uint256 lastPrice,) = _lastStoredPrice(p);
-            _fixSettlement(p, pair, lastPrice);
-            refundAmount = msg.value; // the fetch reverted, so no Pyth fee was spent
-        }
+    /// @dev The price the stored-price fallbacks of terminateScheduledPair settle at.
+    function _storedSettlementPrice(IBazaarPair p) private view returns (uint256 price) {
+        (price,) = _lastStoredPrice(p);
     }
 
     /// @notice How terminateScheduledPair settles `pair` if called now, so a keeper knows what to
     ///         fetch. `rule` is one of:
     ///         - SETTLE_NOTHING: the pair carries no cutoff, or its price is already fixed.
-    ///         - SETTLE_WINDOW: UMA's rule, one print per leg: the first published at or after
-    ///           `firstTarget`, which must be published no later than `latestPublishTs`, the cutoff.
-    ///           Its grace counts from the cutoff or, for a vote, from when the verdict on its claim
-    ///           became known if that is later, and `lastResortTs` is where it ends.
-    ///         - SETTLE_CHAIN: the chain rule, SETTLEMENT_SAMPLE_COUNT samples: the first print at
-    ///           or after `firstTarget`, the cutoff, then each the first print at or after
-    ///           SETTLEMENT_SAMPLE_SPACING past the sample before, every one published no later
-    ///           than `latestPublishTs` (BazaarOracle.fetchChainedMedian).
+    ///         - SETTLE_TICK: UMA's rule, the one-second tick stamped at the cutoff, carrying
+    ///           every leg: the price it carries settles the pair (BazaarOracle.fetchPriceAtTick).
+    ///           `firstTarget` and `latestPublishTs` are both the cutoff. Its grace counts from the
+    ///           cutoff or, for a vote, from when the verdict on its claim became known if that is
+    ///           later, and `lastResortTs` is where it ends.
+    ///         - SETTLE_CHAIN: the chain rule, SETTLEMENT_SAMPLE_COUNT samples: the earliest
+    ///           one-second tick carrying a price generated at or after `firstTarget`, the cutoff,
+    ///           then each the earliest carrying one generated at or after
+    ///           SETTLEMENT_SAMPLE_SPACING past the tick before, every tick no later than
+    ///           `latestPublishTs` (BazaarOracle.fetchChainedMedian).
     ///         - SETTLE_AWAIT_VERDICT: the vote that set the cutoff waits for the verdict on its
     ///           claim, and settlement reverts until UMA resolves the claim or `verdictDeadline`
     ///           passes, whichever comes first.
@@ -710,16 +699,18 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
     ///         terminateScheduledPair records it and settles under it, UMA's rule for TRUE. For a
     ///         claim-backed vote, call settleTerminationProposal first: it records a verdict UMA
     ///         can give, and this view then reports the rule that will apply.
-    ///         Under SETTLE_WINDOW and SETTLE_CHAIN a call with no price data settles at the
+    ///         Under SETTLE_TICK and SETTLE_CHAIN a call with no price data settles at the
     ///         stored price once `lastResortTs` has passed.
     /// @dev Reads the state terminateScheduledPair branches on, with the verdict peeked rather
     ///      than settled (_peekVerdict); the call itself also requires the cutoff to have passed.
     /// @param pair The pair
-    /// @return rule SETTLE_NOTHING, SETTLE_WINDOW, SETTLE_CHAIN or SETTLE_AWAIT_VERDICT
-    /// @return firstTarget The first (or only) print's target; zero unless WINDOW or CHAIN
-    /// @return latestPublishTs The latest publish time any print may carry; zero unless WINDOW or CHAIN
+    /// @return rule SETTLE_NOTHING, SETTLE_TICK, SETTLE_CHAIN or SETTLE_AWAIT_VERDICT
+    /// @return firstTarget The cutoff: the tick to supply under TICK, the first sample's target
+    ///         under CHAIN; zero otherwise
+    /// @return latestPublishTs The cutoff under TICK, the latest tick any sample may carry under
+    ///         CHAIN; zero otherwise
     /// @return lastResortTs The instant after which an empty call settles at the stored price;
-    ///         zero unless WINDOW or CHAIN, and the uint256 maximum when that lies past the uint256
+    ///         zero unless TICK or CHAIN, and the uint256 maximum when that lies past the uint256
     ///         range
     /// @return verdictDeadline When a pending verdict stops being waited for; zero unless AWAIT_VERDICT
     function settlementRule(address pair)
@@ -751,22 +742,28 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
             (uint64 latest, uint256 lastResort) = _insurerSettlementBounds(pair, scheduledTs);
             return (SETTLE_CHAIN, scheduledTs, latest, lastResort, 0);
         }
-        return (
-            SETTLE_WINDOW,
-            scheduledTs - BazaarTypes.MAX_PRICE_STALENESS,
-            scheduledTs,
-            _windowGraceEnd(id, scheduledTs),
-            0
-        );
+        return (SETTLE_TICK, scheduledTs, scheduledTs, _tickGraceEnd(id, scheduledTs), 0);
     }
 
-    /// @notice Terminate a pair whose oracle has been stale for more than ORACLE_DEAD_THRESHOLD
-    ///         (21 days). This is the ONLY condition under which this method terminates — staleness
-    ///         is objective on-chain proof and needs no UMA proposal. It must never terminate for
-    ///         any other reason (e.g. a transient oracle revert or non-positive price); for those,
-    ///         use the UMA termination flow. A pair whose vote-set cutoff has already passed is
-    ///         refused: terminateScheduledPair settles it, with the vote's outcome stamped.
-    /// @dev Anyone can call this.
+    /// @notice Terminate a pair that has stored no price for more than ORACLE_DEAD_THRESHOLD
+    ///         (21 days). This is the ONLY condition under which this method terminates — the age
+    ///         of the stored price is objective on-chain and needs no UMA proposal. It must never
+    ///         terminate for any other reason (e.g. a transient oracle revert or non-positive
+    ///         price); for those, use the UMA termination flow. A pair whose vote-set cutoff has
+    ///         already passed is refused: terminateScheduledPair settles it, with the vote's
+    ///         outcome stamped.
+    /// @dev Anyone can call this. Pyth Pro keeps no price on-chain to probe, so the pair's own
+    ///      stored price is the evidence. A pair stores a price whenever a call lands on it with a
+    ///      fresh update, and refreshPrice lets anyone make such a call, so a stored price older
+    ///      than the threshold means that for the whole of it nobody showed the pair a price
+    ///      fresh enough to store: the feed produced none, or nobody with a stake in the pair
+    ///      brought one. One refreshPrice call resets the clock.
+    ///
+    ///      Settlement uses that same stored price (or, for a pair that never stored one,
+    ///      NEVER_PRICED_SETTLEMENT_PRICE): lastPairPrice can only ever hold a mark that cleared
+    ///      both the freshness gate and the confidence cap at the moment it was recorded. A pair
+    ///      that never stored a price is aged from its creation instead (_lastStoredPrice), so a
+    ///      new listing cannot be terminated before it has had the threshold to be priced.
     function terminateStalePair(address pair) external nonReentrant {
         if (!_registeredPairs.contains(pair)) revert BazaarPairTerminator__PairNotRegistered();
         IBazaarPair p = IBazaarPair(pair);
@@ -781,47 +778,10 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
             revert BazaarPairTerminator__InsurerScheduleSettlesPair();
         }
 
-        BazaarOracle oracleContract = BazaarOracle(p.oracle());
-        bytes32 feedId = p.baseFeedId();
-
-        // The oracle read is a liveness probe, not a price source. tryReadStalePrice returns the
-        // latest confidence-cleared tick (spot when every leg is within the 2% cap, else the
-        // smoothed EMA) regardless of age; it returns found=false when no rung clears the cap, and
-        // reverts only if the oracle contract itself is dead/migrated. Its publishTime is the
-        // strictest available proof that the feed is dead, because Pyth's cache can never be older
-        // than the pair's own stored price — recording one requires reading a fresh tick through
-        // Pyth first. Any tick newer than ORACLE_DEAD_THRESHOLD therefore blocks termination
-        // outright, so this method can only ever terminate a genuinely dead oracle.
-        //
-        // Settlement itself always uses the pair's last stored price (or, for a pair that never
-        // stored one, NEVER_PRICED_SETTLEMENT_PRICE). Pyth's cache is permissionlessly writable
-        // to any published tick, so settling at it would let whoever calls this pick the
-        // book-wide settlement price out of the ticks published before the feed went quiet.
-        // lastPairPrice can only ever hold a mark that cleared both the freshness gate and the
-        // confidence cap at the moment it was recorded.
-        try oracleContract.tryReadStalePrice(feedId) returns (
-            bool found, uint256, uint256, uint256, uint256 publishTime
-        ) {
-            if (found && block.timestamp - publishTime <= ORACLE_DEAD_THRESHOLD) {
-                revert BazaarPairTerminator__OracleNotStaleEnough(publishTime, ORACLE_DEAD_THRESHOLD);
-            }
-            _terminateAtLastStoredPrice(pair, p);
-        } catch {
-            // Oracle read reverted (dead/migrated Pyth contract). Same stored-price settlement.
-            _terminateAtLastStoredPrice(pair, p);
-        }
-    }
-
-    /// @dev Fallback termination at the pair's last stored (confidence-checked-when-recorded)
-    ///      price, still gated on 21-day staleness using that price's recorded age. Shared by the
-    ///      "no confident oracle rung" and "oracle read reverted" branches of terminateStalePair,
-    ///      so a transient revert / wide-confidence read on a recently-active pair cannot be used
-    ///      as a side door to terminate it. A pair that never stored a price is aged from its
-    ///      creation instead, which shuts the same door on a new listing: the oracle probe alone
-    ///      would pass at once for a feed whose cached tick was already old when the pair listed.
-    function _terminateAtLastStoredPrice(address pair, IBazaarPair p) private {
+        // Compared by adding the threshold rather than subtracting the stamp: a stored price may
+        // be stamped slightly ahead of the block, and a future-dated price is not an old one.
         (uint256 price, uint256 asOfTs) = _lastStoredPrice(p);
-        if (block.timestamp - asOfTs <= ORACLE_DEAD_THRESHOLD) {
+        if (block.timestamp <= asOfTs + ORACLE_DEAD_THRESHOLD) {
             revert BazaarPairTerminator__OracleNotStaleEnough(asOfTs, ORACLE_DEAD_THRESHOLD);
         }
         emit StalePairTerminated(pair, price, asOfTs);
@@ -829,7 +789,7 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
     }
 
     /// @dev The chain rule's limits for an insurer-scheduled pair whose cutoff is `scheduledTs`.
-    ///      `latestPublishTs` is the latest publish time any of its samples may carry: the UMA
+    ///      `latestPublishTs` is the latest tick any of its samples may carry: the UMA
     ///      cutoff the schedule met (umaCutoffCap), or no limit when it met none. `lastResortTs`
     ///      is the instant after which the stored price stands in for a chain that cannot be
     ///      fetched: ORACLE_DEAD_THRESHOLD after the insurer cutoff, or
@@ -860,7 +820,7 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
     ///      reading one would revert outside _verdictKnownTs's catch, since a call to an address
     ///      with no code returns nothing to decode. An accepted UMA cutoff has no upper bound, so
     ///      the end saturates rather than overflowing.
-    function _windowGraceEnd(bytes32 scheduleId, uint256 scheduledTs) private view returns (uint256) {
+    function _tickGraceEnd(bytes32 scheduleId, uint256 scheduledTs) private view returns (uint256) {
         uint256 start = scheduledTs;
         if (scheduleId != bytes32(0)) {
             uint256 knownTs = _verdictKnownTs(scheduleId);
@@ -988,8 +948,8 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
             return;
         }
         // The cutoff the pair will store: a proposed cutoff sooner than MIN_CUTOFF_LEAD from now
-        // lands that far out, since the market traded at live prices while the window's print
-        // was public, or a trade sequenced ahead of this call could see it (see
+        // lands that far out, since the market traded at live prices while the price at that
+        // cutoff was public, or a trade sequenced ahead of this call could see it (see
         // BazaarPair.setScheduledTermination, which applies the same floor).
         uint256 earliest = block.timestamp + BazaarTypes.MIN_CUTOFF_LEAD;
         uint256 cutoffTs = proposal.lastTradingTs > earliest ? proposal.lastTradingTs : earliest;
@@ -1027,9 +987,9 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
             }
             // A verified cutoff at or after an insurer schedule leaves that schedule in place,
             // since the pair never moves a cutoff later, and caps its chain instead
-            // (umaCutoffCap): every sample must be published no later than the cutoff UMA
+            // (umaCutoffCap): every sample must be stamped no later than the cutoff UMA
             // verified. Without the cap, a coalition that voted its cutoff in while the UMA
-            // proposal sat in liveness would settle the pair at prints published after the cutoff
+            // proposal sat in liveness would settle the pair at prices generated after the cutoff
             // UMA verified. The cap is the proposed cutoff itself, not MIN_CUTOFF_LEAD past a late
             // acceptance: the pair has not traded since the insurer cutoff, so the floor that
             // keeps a late acceptance from halting the pair in the past protects nothing here, and
@@ -1177,13 +1137,13 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
     /// @notice pair => the proposal whose vote holds the pair's cutoff, zero while no vote does.
     ///         While set, terminateScheduledPair stamps that proposal's outcome and settles under
     ///         it: a claim UMA upheld settles under UMA's own rule at the cutoff, anything else
-    ///         under the chain rule, every sample published no later than umaCutoffCap when that
+    ///         under the chain rule, every sample stamped no later than umaCutoffCap when that
     ///         is set, with the stored price as a last resort only once the cutoff is
     ///         ORACLE_DEAD_THRESHOLD old or the capping UMA cutoff is SCHEDULED_TERMINATION_GRACE
     ///         old. Cleared when a verified UMA cutoff pulls the schedule earlier, since that
     ///         cutoff settles under UMA's rules.
     mapping(address => bytes32) public insurerScheduleId;
-    /// @notice The latest publish time any sample of a chain-rule settlement may carry: the cutoff
+    /// @notice The latest tick any sample of a chain-rule settlement may carry: the cutoff
     ///         of a UMA termination accepted for the pair. It is recorded where
     ///         the two schedules meet, whichever comes second: a vote that pulls a UMA schedule
     ///         earlier records that schedule, and a UMA acceptance at or after an insurer schedule

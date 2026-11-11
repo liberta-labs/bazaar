@@ -308,8 +308,7 @@ contract InsuranceGuardsTest is IntegrationBase {
         // Warm the AAPL mark so the stale fallback has a price to resolve.
         bytes[] memory warm = _priceUpdateFor(AAPL_USD_FEED_ID, 150, uint64(vm.getBlockTimestamp()));
         vm.deal(address(this), 1 ether);
-        mockPyth.updatePriceFeeds{value: mockPyth.getUpdateFee(warm)}(warm);
-        aaplPair.refreshPrice(new bytes[](0));
+        aaplPair.refreshPrice(warm);
 
         vm.startPrank(carol);
         usdc.approve(address(aaplPair), 1_000 * USDC_SCALE);
@@ -317,7 +316,7 @@ contract InsuranceGuardsTest is IntegrationBase {
         uint256 shares = aaplPair.insuranceShares(carol); // the first store's bounty moved the share price
         aaplPair.requestInsuranceWithdrawal(200 * BAZAAR_SCALE, 0, 0, 0, "", "");
         vm.stopPrank();
-        // Ages the cache past MAX_PRICE_STALENESS: empty calldata now resolves the stale fallback.
+        // Ages the stored price past MAX_PRICE_STALENESS: empty calldata now resolves the stale fallback.
         vm.warp(vm.getBlockTimestamp() + InsuranceVaultLib.INSURANCE_WITHDRAWAL_COOLDOWN + 1);
 
         vm.prank(carol);

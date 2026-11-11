@@ -28,7 +28,7 @@ cast rpc anvil_setCode 0x0000000000000000000000000000000000000064 \
 
 cat > "$E2E_WORK/addresses.json" <<EOF
 {"factory":"$(get "BazaarFactory:")","oracle":"$(get "BazaarOracle:")","lens":"$(get "BazaarPairLens:")",
- "terminator":"$(get "BazaarPairTerminator:")","usdc":"$(get "  USDC:")","pyth":"$(get "  Pyth:")",
+ "terminator":"$(get "BazaarPairTerminator:")","usdc":"$(get "  USDC:")","pythLazer":"$(get "  Pyth Pro verifier:")",
  "oov3":"$(get "OptimisticOracleV3:")"}
 EOF
 rm -f "$E2E_WORK/state.json"

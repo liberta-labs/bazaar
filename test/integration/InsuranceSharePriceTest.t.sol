@@ -224,7 +224,7 @@ contract InsuranceSharePriceTest is IntegrationBase {
     // ============================ deposits, price handling ============================
 
     /// @notice With no inventory held the basis is free capital and no mark is read: an empty
-    ///         price update works even when the pair's cached price has long aged out.
+    ///         price update works even when the pair holds no fresh stored price.
     function test_deposit_noInventory_needsNoPrice() public {
         _depositInsurance(carol, 30_000 * BAZAAR_SCALE);
         vm.warp(vm.getBlockTimestamp() + InsuranceVaultLib.INSURANCE_WITHDRAWAL_COOLDOWN + 1);
@@ -237,12 +237,15 @@ contract InsuranceSharePriceTest is IntegrationBase {
     }
 
     /// @notice While the vault holds inventory a deposit resolves a price like every other priced
-    ///         entry point: on a continuously traded pair with an aged cache and no update it
-    ///         reverts rather than price the inventory blind.
+    ///         entry point: on a continuously traded pair whose stored price has aged past
+    ///         MAX_PRICE_STALENESS, with no update, it reverts rather than price the inventory blind.
     function test_deposit_heldInventory_continuousPair_requiresPrice() public {
+        pair.refreshPrice(_freshPrice());
         _depositInsurance(carol, 30_000 * BAZAAR_SCALE);
         _stageHeldInventory(60_000 * BAZAAR_SCALE, _insuranceBalance() / 2);
         vm.warp(vm.getBlockTimestamp() + 4);
+        (uint256 stored,,,,) = pair.lastPairPrice();
+        assertGt(stored, 0, "the pair holds a stored price, now aged");
 
         vm.startPrank(dave);
         usdc.approve(address(pair), 1_000 * USDC_SCALE);
@@ -255,8 +258,7 @@ contract InsuranceSharePriceTest is IntegrationBase {
     function _warmAapl() internal {
         bytes[] memory warm = _priceUpdateFor(AAPL_USD_FEED_ID, 150, uint64(vm.getBlockTimestamp()));
         vm.deal(address(this), 1 ether);
-        mockPyth.updatePriceFeeds{value: mockPyth.getUpdateFee(warm)}(warm);
-        aaplPair.refreshPrice(new bytes[](0));
+        aaplPair.refreshPrice(warm);
     }
 
     /// @notice On a closed venue a deposit that would have to price held inventory refuses the
@@ -269,7 +271,7 @@ contract InsuranceSharePriceTest is IntegrationBase {
         _depositWith(aaplPair, carol, 1_000 * BAZAAR_SCALE, new bytes[](0));
         uint256 seized = 200 * BAZAAR_SCALE;
         uint256 entry = _stageNet(aaplPair, AAPL_MARK, seized, -50 * int256(BAZAAR_SCALE));
-        // Ages the cache past MAX_PRICE_STALENESS: empty calldata now resolves the stale fallback.
+        // Ages the stored price past MAX_PRICE_STALENESS: empty calldata now resolves the stale fallback.
         vm.warp(vm.getBlockTimestamp() + InsuranceVaultLib.INSURANCE_WITHDRAWAL_COOLDOWN + 1);
 
         uint256 amount = 500 * BAZAAR_SCALE;

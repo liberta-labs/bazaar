@@ -25,7 +25,7 @@ contract FreshArrivalGuardsTest is IntegrationBase {
         vm.stopPrank();
     }
 
-    /// @dev Push a fresh price so every subsequent same-timestamp call rides the oracle cache
+    /// @dev Store a fresh price so every subsequent same-timestamp call runs on the stored price
     ///      (no per-call update needed, and the margin curve stays put between calls).
     function _refreshAt(uint256 priceUsd) internal {
         vm.warp(vm.getBlockTimestamp() + 4);
@@ -33,7 +33,7 @@ contract FreshArrivalGuardsTest is IntegrationBase {
         aaplPair.refreshPrice{value: 0}(pu);
     }
 
-    /// @dev Place an AAPL limit with no price update — consumes the fresh cache seeded above.
+    /// @dev Place an AAPL limit with no price update: it runs on the fresh price _refreshAt stored.
     function _place(address user, bool isLong, uint256 size, uint256 limitPriceBz, bool postOnly)
         internal
         returns (uint256)

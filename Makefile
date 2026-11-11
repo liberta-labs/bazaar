@@ -8,12 +8,12 @@ help:
 	@echo "Available commands:"
 	@echo "  make anvil                    - Start Anvil with tracing enabled"
 	@echo "  make deploy-anvil             - Deploy Bazaar to local Anvil"
-	@echo "  make deploy-pair-anvil        - Deploy a pair (FEED_ID=0x... CONTINUOUS=true|false DESC=... [PRICE=2000])"
+	@echo "  make deploy-pair-anvil        - Deploy a pair (FEED_ID=2 CONTINUOUS=true|false DESC=... [PRICE=2000])"
 	@echo "  make deploy-libs-arb-sepolia  - Step 1/2: deploy libraries to Arbitrum Sepolia"
 	@echo "  make deploy-arb-sepolia       - Step 2/2: deploy Bazaar to Arbitrum Sepolia"
 	@echo "  make deploy-libs-arb-mainnet  - Step 1/2: deploy libraries to Arbitrum Mainnet"
 	@echo "  make deploy-arb-mainnet       - Step 2/2: deploy Bazaar to Arbitrum Mainnet"
-	@echo "  make set-price-anvil          - Set mock price (FEED_ID=0x... PRICE=2000)"
+	@echo "  make set-price-anvil          - Store a test price on a pair (PAIR=0x... PRICE=2000)"
 	@echo "  make deposit-anvil            - Deposit collateral into a pair (PAIR=0x... AMOUNT=1000)"
 	@echo "  make create-order-anvil       - Create limit order (PAIR=0x... LIMIT_PRICE=2000 SIZE=0.01 IS_LONG=true)"
 	@echo "  make warp-anvil SECONDS=N     - Warp Anvil forward N seconds"
@@ -122,38 +122,30 @@ balance-usdc:
 	@. ./.anvil-addresses && \
 	cast call $$USDC "balanceOf(address)(uint256)" $(or $(ADDR),$(ANVIL_WALLET)) --rpc-url $(ANVIL_RPC_URL)
 
-# Set mock Pyth price on Anvil
-# Usage: make set-price-anvil FEED_ID=0x... PRICE=2000 (USD price as integer)
-# Sets both the base feed and USDC/USD feed (at $1.00). Anvil mines a block only when a transaction
-# arrives, so the latest block's timestamp can be long past; the update is stamped one second after
-# it and the block carrying it is pinned to that second, so the price is fresh when it lands.
-USDC_FEED_ID=0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a
+# Store a test price on a pair on Anvil
+# Usage: make set-price-anvil PAIR=0x... PRICE=2000 (USD price as integer)
+# Pyth Pro keeps no price on-chain, so a price is set on a pair: this signs an update for the pair's
+# feed with the test key the local MockPythLazer trusts (script/dev-update.sh) and has the pair store
+# it through refreshPrice. A composite pair needs both legs in the update and is not covered. Anvil
+# mines a block only when a transaction arrives, so the latest block's timestamp can be long past;
+# the update is stamped one second after it and the block carrying it is pinned to that second, so
+# the price is fresh when it lands.
 .PHONY: set-price-anvil
 set-price-anvil:
-	@if [ -z "$(FEED_ID)" ] || [ -z "$(PRICE)" ]; then echo "Usage: make set-price-anvil FEED_ID=0x... PRICE=2000"; exit 1; fi
-	@. ./.anvil-addresses && \
-	PYTH=$$(cast call $$ORACLE "pyth()(address)" --rpc-url $(ANVIL_RPC_URL)) && \
+	@if [ -z "$(PAIR)" ] || [ -z "$(PRICE)" ]; then echo "Usage: make set-price-anvil PAIR=0x... PRICE=2000"; exit 1; fi
+	@BASE_FEED=$$(cast call $(PAIR) "baseFeedId()(bytes32)" --rpc-url $(ANVIL_RPC_URL)) && \
 	TIMESTAMP=$$(( $$(cast block latest --rpc-url $(ANVIL_RPC_URL) --json | jq -r '.timestamp' | xargs printf "%d") + 1 )) && \
-	echo "=== Setting base price: $(PRICE) USD ===" && \
-	BASE_UPDATE=$$(cast call $$PYTH \
-		"createPriceFeedUpdateData(bytes32,int64,uint64,int32,int64,uint64,uint64,uint64)(bytes)" \
-		$(FEED_ID) $(PRICE)00000000 0 -8 $(PRICE)00000000 0 $$TIMESTAMP $$((TIMESTAMP - 1)) \
-		--rpc-url $(ANVIL_RPC_URL)) && \
-	echo "=== Setting USDC price: 1.00 USD ===" && \
-	USDC_UPDATE=$$(cast call $$PYTH \
-		"createPriceFeedUpdateData(bytes32,int64,uint64,int32,int64,uint64,uint64,uint64)(bytes)" \
-		$(USDC_FEED_ID) 100000000 0 -8 100000000 0 $$TIMESTAMP $$((TIMESTAMP - 1)) \
-		--rpc-url $(ANVIL_RPC_URL)) && \
-	echo "=== Updating MockPyth ===" && \
+	echo "=== Storing price: $(PRICE) USD ===" && \
+	UPDATE=$$(bash script/dev-update.sh $$BASE_FEED $(PRICE)00000000 $$TIMESTAMP) && \
 	cast rpc evm_setNextBlockTimestamp $$TIMESTAMP --rpc-url $(ANVIL_RPC_URL) > /dev/null && \
-	cast send $$PYTH \
-		"updatePriceFeeds(bytes[])" "[$$BASE_UPDATE,$$USDC_UPDATE]" \
+	cast send $(PAIR) \
+		"refreshPrice(bytes[])" "[$$UPDATE]" \
 		--rpc-url $(ANVIL_RPC_URL) \
 		--private-key $(ANVIL_PRIVATE_KEY) > /dev/null && \
 	echo "Done. Price set to $(PRICE) USD" && \
 	echo "" && \
-	echo "=== Price update data for Remix (pass as priceUpdate) ===" && \
-	echo "[\"$$BASE_UPDATE\",\"$$USDC_UPDATE\"]"
+	echo "=== Price update data for Remix (pass as priceUpdate within 3 s of that timestamp) ===" && \
+	echo "[\"$$UPDATE\"]"
 
 # Deposit collateral into a pair on Anvil
 # Usage: make deposit-anvil PAIR=0x... AMOUNT=1000 (USD, whole dollars; at least 5)
@@ -178,25 +170,17 @@ deposit-anvil:
 # LIMIT_PRICE is in USD (integer), SIZE is in units of the asset (e.g. 0.01 ETH). The order is
 # margined against collateral already in the pair (make deposit-anvil). It is a GTC limit that
 # expires 100,000 blocks from now; the pair accepts lifetimes from 240 blocks to ~1 year. The price
-# update carries the limit price as the oracle price and is stamped with the timestamp the order's
-# block is pinned to, since the pair refuses an update more than 3 s old.
+# update carries the limit price as the oracle price, signed with the local test key
+# (script/dev-update.sh), and is stamped with the timestamp the order's block is pinned to, since
+# the pair refuses an update more than 3 s old.
 .PHONY: create-order-anvil
 create-order-anvil:
 	@if [ -z "$(PAIR)" ] || [ -z "$(LIMIT_PRICE)" ] || [ -z "$(SIZE)" ]; then \
 		echo "Usage: make create-order-anvil PAIR=0x... LIMIT_PRICE=2000 SIZE=0.01 IS_LONG=true"; exit 1; fi
-	@. ./.anvil-addresses && \
-	PYTH=$$(cast call $$ORACLE "pyth()(address)" --rpc-url $(ANVIL_RPC_URL)) && \
-	BASE_FEED=$$(cast call $(PAIR) "baseFeedId()(bytes32)" --rpc-url $(ANVIL_RPC_URL)) && \
+	@BASE_FEED=$$(cast call $(PAIR) "baseFeedId()(bytes32)" --rpc-url $(ANVIL_RPC_URL)) && \
 	TIMESTAMP=$$(( $$(cast block latest --rpc-url $(ANVIL_RPC_URL) --json | jq -r '.timestamp' | xargs printf "%d") + 1 )) && \
 	EXPIRATION=$$(( $$(cast block-number --rpc-url $(ANVIL_RPC_URL)) + 100000 )) && \
-	BASE_UPDATE=$$(cast call $$PYTH \
-		"createPriceFeedUpdateData(bytes32,int64,uint64,int32,int64,uint64,uint64,uint64)(bytes)" \
-		$$BASE_FEED $(LIMIT_PRICE)00000000 0 -8 $(LIMIT_PRICE)00000000 0 $$TIMESTAMP $$((TIMESTAMP - 1)) \
-		--rpc-url $(ANVIL_RPC_URL)) && \
-	USDC_UPDATE=$$(cast call $$PYTH \
-		"createPriceFeedUpdateData(bytes32,int64,uint64,int32,int64,uint64,uint64,uint64)(bytes)" \
-		$(USDC_FEED_ID) 100000000 0 -8 100000000 0 $$TIMESTAMP $$((TIMESTAMP - 1)) \
-		--rpc-url $(ANVIL_RPC_URL)) && \
+	BASE_UPDATE=$$(bash script/dev-update.sh $$BASE_FEED $(LIMIT_PRICE)00000000 $$TIMESTAMP) && \
 	SIZE_WEI=$$(cast to-wei $(SIZE)) && \
 	LIMIT_WEI=$$(cast to-wei $(LIMIT_PRICE)) && \
 	echo "=== Creating limit order ===" && \
@@ -209,28 +193,21 @@ create-order-anvil:
 		"createOrder((uint8,bool,bool,uint8,uint256,uint256,uint256,uint256,uint64,address),(uint64,uint64,uint64,uint64,uint32),bytes[],uint256,uint256,uint256,bytes,bytes)" \
 		"(1,$(or $(IS_LONG),true),false,0,$$SIZE_WEI,0,$$LIMIT_WEI,0,$$EXPIRATION,0x0000000000000000000000000000000000000000)" \
 		"(0,0,0,0,0)" \
-		"[$$BASE_UPDATE,$$USDC_UPDATE]" 0 0 0 0x 0x \
+		"[$$BASE_UPDATE]" 0 0 0 0x 0x \
 		--rpc-url $(ANVIL_RPC_URL) \
 		--private-key $(ANVIL_PRIVATE_KEY) \
 		--gas-limit 5000000 && \
 	echo "=== Order created ==="
 
 # Deploy a pair on Anvil
-# Usage: make deploy-pair-anvil FEED_ID=0xff61... CONTINUOUS=true DESC="ETH/USD" [PRICE=2000]
-# The factory lists a raw feed only once Pyth holds a price for it, so a feed the mock has never
-# seen is seeded through set-price-anvil first; PRICE is required only in that case.
+# Usage: make deploy-pair-anvil FEED_ID=2 CONTINUOUS=true DESC="ETH/USD" [PRICE=2000]
+# FEED_ID is the Pyth Pro feed ID, a number (2 is ETH/USD); the factory takes it as a bytes32. With
+# PRICE the new pair is given that price once it is deployed (set-price-anvil).
 .PHONY: deploy-pair-anvil
 deploy-pair-anvil:
-	@if [ -z "$(FEED_ID)" ]; then echo "Usage: make deploy-pair-anvil FEED_ID=0x... CONTINUOUS=true|false DESC=\"ETH/USD\" [PRICE=2000]"; exit 1; fi
+	@if [ -z "$(FEED_ID)" ]; then echo "Usage: make deploy-pair-anvil FEED_ID=2 CONTINUOUS=true|false DESC=\"ETH/USD\" [PRICE=2000]"; exit 1; fi
 	@set -e && . ./.anvil-addresses && \
-	PYTH=$$(cast call $$ORACLE "pyth()(address)" --rpc-url $(ANVIL_RPC_URL)) && \
-	if [ "$$(cast call $$PYTH "priceFeedExists(bytes32)(bool)" $(FEED_ID) --rpc-url $(ANVIL_RPC_URL))" != "true" ]; then \
-		if [ -z "$(PRICE)" ]; then \
-			echo "ERROR: MockPyth holds no price for $(FEED_ID); the factory lists a feed only once Pyth has priced it. Pass PRICE=<usd> or run make set-price-anvil first."; exit 1; \
-		fi; \
-		echo "=== Step 0: Seeding MockPyth with $(PRICE) USD for the feed ===" && \
-		$(MAKE) --no-print-directory set-price-anvil FEED_ID=$(FEED_ID) PRICE=$(PRICE) > /dev/null; \
-	fi && \
+	FEED=$$(cast to-uint256 $(FEED_ID)) && \
 	AMOUNT=5000000000000000000000 && \
 	AMOUNT_USDC=5000000000 && \
 	echo "=== Step 1: Approving 5000 USDC for Factory ===" && \
@@ -240,7 +217,7 @@ deploy-pair-anvil:
 	echo "=== Step 2: Proposing Pair Deployment ===" && \
 	PROPOSE_JSON=$$(cast send $$FACTORY \
 		"proposePairDeployment(bytes32,bool,uint256,string)" \
-		$(FEED_ID) $(or $(CONTINUOUS),true) $$AMOUNT "$(or $(DESC),Pair)" \
+		$$FEED $(or $(CONTINUOUS),true) $$AMOUNT "$(or $(DESC),Pair)" \
 		--rpc-url $(ANVIL_RPC_URL) \
 		--private-key $(ANVIL_PRIVATE_KEY) --json) && \
 	TX_HASH=$$(echo "$$PROPOSE_JSON" | jq -r '.transactionHash') && \
@@ -256,7 +233,7 @@ deploy-pair-anvil:
 		--rpc-url $(ANVIL_RPC_URL) \
 		--private-key $(ANVIL_PRIVATE_KEY) \
 		--gas-limit 5000000 2>/dev/null; \
-	PAIR_ADDR=$$(cast call $$FACTORY "getPairAddress(bytes32)(address)" $(FEED_ID) --rpc-url $(ANVIL_RPC_URL)) && \
+	PAIR_ADDR=$$(cast call $$FACTORY "getPairAddress(bytes32)(address)" $$FEED --rpc-url $(ANVIL_RPC_URL)) && \
 	if [ "$$PAIR_ADDR" = "0x0000000000000000000000000000000000000000" ]; then \
 		echo "ERROR: Pair deployment failed!" && exit 1; \
 	fi && \
@@ -266,7 +243,10 @@ deploy-pair-anvil:
 	echo "  Continuous:   $(or $(CONTINUOUS),true)" && \
 	echo "  Description:  $(or $(DESC),Pair)" && \
 	echo "  Assertion ID: $$ASSERTION_ID" && \
-	echo "  Pair Address: $$PAIR_ADDR"
+	echo "  Pair Address: $$PAIR_ADDR" && \
+	if [ -n "$(PRICE)" ]; then \
+		$(MAKE) --no-print-directory set-price-anvil PAIR=$$PAIR_ADDR PRICE=$(PRICE); \
+	fi
 
 # ---------- Two-step deployment ----------
 # The core contracts link twelve external libraries by address (eleven in BazaarPair, ClaimTextLib in

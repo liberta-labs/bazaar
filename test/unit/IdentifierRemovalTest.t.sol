@@ -9,7 +9,6 @@ import {BazaarOracle} from "../../src/BazaarOracle.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {MockOptimisticOracleV3} from "../mocks/MockOptimisticOracleV3.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {PythSeed} from "../PythSeed.sol";
 
 /// @notice What the factory does once UMA removes an identifier from its live whitelist: a queued
 ///         upgrade may activate early, a proposal disputed after the removal is discarded at once,
@@ -17,7 +16,7 @@ import {PythSeed} from "../PythSeed.sol";
 ///         the identifier the assertion was made under, and a whitelist lookup that fails or
 ///         replies with garbage is never read as a removal.
 contract IdentifierRemovalTest is Test {
-    bytes32 constant ETH_USD_FEED_ID = 0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace;
+    bytes32 constant ETH_USD_FEED_ID = bytes32(uint256(2));
     uint256 constant USDC_SCALE = 1e6;
     uint256 constant PROPOSAL_TOTAL = 5_000 * 1e18;
     uint256 constant PROPOSAL_TOTAL_USDC = 5_000 * USDC_SCALE;
@@ -48,7 +47,6 @@ contract IdentifierRemovalTest is Test {
         mockOOv3 = MockOptimisticOracleV3(optimisticOracleV3);
 
         BazaarOracle oracle = factory.oracle();
-        PythSeed.seed(address(oracle.pyth()), ETH_USD_FEED_ID);
 
         incumbent = factory.umaIdentifier();
         bondUsdc = factory.DEPLOYMENT_BOND_USDC();

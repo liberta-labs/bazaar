@@ -19,7 +19,7 @@ import {OrderView} from "../OrderView.sol";
 ///
 ///         Both cases share one setup: a fresh fill sets the mark, an hour of quiet decays it onto
 ///         the index, a keeper stores the unchanged price, and ten minutes later the venue's
-///         off-chain price has moved while the on-chain cache is past MAX_PRICE_STALENESS.
+///         off-chain price has moved while the pair's stored price is past MAX_PRICE_STALENESS.
 ///
 ///         Every fill here is against an ask resting below the index for a full exposure window,
 ///         the kind of print the mark is built from. In the first the ask linked against a fresh
@@ -50,16 +50,15 @@ contract StaleFillMarkGateTest is IntegrationBase {
         return _priceUpdateFor(AAPL_USD_FEED_ID, priceUsd, uint64(vm.getBlockTimestamp()));
     }
 
-    /// @dev Push `priceUsd` into Pyth's cache and store it as the pair's price, stamped now.
+    /// @dev Store `priceUsd`, stamped now, as the AAPL pair's price.
     function _storeAapl(uint256 priceUsd) internal {
         bytes[] memory pu = _aaplPu(priceUsd);
         vm.deal(address(this), 1 ether);
-        mockPyth.updatePriceFeeds{value: mockPyth.getUpdateFee(pu)}(pu);
-        aaplPair.refreshPrice(new bytes[](0));
+        aaplPair.refreshPrice(pu);
     }
 
-    /// @dev Rest or cross a Limit order on the AAPL pair. An empty `pu` runs it against whatever
-    ///      the Pyth cache holds: the fresh path while the cache is inside MAX_PRICE_STALENESS,
+    /// @dev Rest or cross a Limit order on the AAPL pair. An empty `pu` runs it against the
+    ///      pair's stored price: the fresh path while that price is inside MAX_PRICE_STALENESS,
     ///      the stale fallback once it is older.
     function _placeAapl(address user, bool isLong, uint256 size, uint256 limitPrice, bytes[] memory pu)
         internal
@@ -91,7 +90,7 @@ contract StaleFillMarkGateTest is IntegrationBase {
         _depositAapl(alice, 20_000 * BAZAAR_SCALE);
         _depositAapl(bob, 20_000 * BAZAAR_SCALE);
 
-        // A fresh fill forms the mark: the cache was stored this second, so an empty update still
+        // A fresh fill forms the mark: the price was stored this second, so an empty update still
         // runs both orders on the fresh path. Bob's ask rests a dollar under the index for a full
         // window before Alice lifts it, so the print enters at full weight; its $9,900 dwarfs the
         // $200 floor its own open interest sets, and the single-call cap admits a quarter of that
@@ -114,7 +113,7 @@ contract StaleFillMarkGateTest is IntegrationBase {
         _storeAapl(100);
         assertEq(aaplPair.currentFundingIndex(), fundingBefore, "setup: a spent mark accrues no funding");
 
-        // Ten minutes later the cache is stale; nothing has been stored since.
+        // Ten minutes later the stored price is stale; nothing has been stored since.
         vm.warp(vm.getBlockTimestamp() + LAG);
     }
 

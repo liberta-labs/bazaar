@@ -32,7 +32,7 @@ contract InsuranceIntegrationTest is IntegrationBase {
         // Executing before the cooldown elapses reverts.
         {
             bytes[] memory pu = _freshPrice();
-            uint256 fee = oracle.getUpdateFee(pu);
+            uint256 fee = oracle.getUpdateFee(pu.length);
             vm.deal(carol, fee);
             vm.prank(carol);
             vm.expectRevert();
@@ -73,7 +73,7 @@ contract InsuranceIntegrationTest is IntegrationBase {
                 + InsuranceVaultLib.INSURANCE_WITHDRAWAL_WINDOW_CONTINUOUS + 1
         );
         bytes[] memory pu = _freshPrice();
-        uint256 fee = oracle.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         vm.deal(carol, fee);
         vm.prank(carol);
         vm.expectRevert(InsuranceVaultLib.InsuranceVaultLib__WithdrawalWindowExpired.selector);

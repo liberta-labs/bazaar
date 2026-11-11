@@ -69,7 +69,7 @@ contract TradingAccountTest is IntegrationBase {
     ///         carries the Pyth update and its fee; the two after it read the price it stored.
     function test_batch_fundDepositAndRestThreeOrders() public {
         bytes[] memory pu = _freshPrice();
-        uint256 fee = oracle.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         BazaarTradingAccount.Call[2] memory fund = _approveAndDeposit();
 
         BazaarTradingAccount.Call[] memory calls = new BazaarTradingAccount.Call[](5);
@@ -91,7 +91,7 @@ contract TradingAccountTest is IntegrationBase {
     ///         later batch can send it on to the owner.
     function test_batch_unusedEthIsRefundedToTheAccount() public {
         bytes[] memory pu = _freshPrice();
-        uint256 fee = oracle.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         BazaarTradingAccount.Call[2] memory fund = _approveAndDeposit();
         BazaarTradingAccount.Call[] memory calls = new BazaarTradingAccount.Call[](3);
         calls[0] = fund[0];
@@ -111,7 +111,7 @@ contract TradingAccountTest is IntegrationBase {
     ///         fill. The later order is cancelled as a self-match and the earlier one keeps resting.
     function test_batch_ownOrdersThatCrossCancelTheLaterOne() public {
         bytes[] memory pu = _freshPrice();
-        uint256 fee = oracle.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         BazaarTradingAccount.Call[2] memory fund = _approveAndDeposit();
         BazaarTradingAccount.Call[] memory calls = new BazaarTradingAccount.Call[](4);
         calls[0] = fund[0];
@@ -128,7 +128,7 @@ contract TradingAccountTest is IntegrationBase {
     ///         pair's own error, and the orders before it are not left behind.
     function test_batch_revertsWholeWithThePairsError() public {
         bytes[] memory pu = _freshPrice();
-        uint256 fee = oracle.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         BazaarTradingAccount.Call[2] memory fund = _approveAndDeposit();
         BazaarTypes.OrderSpec memory fok = _limitSpec(true, BTC / 10, 50_000 * BAZAAR_SCALE);
         fok.tif = BazaarTypes.TimeInForce.FOK;
@@ -169,7 +169,7 @@ contract TradingAccountTest is IntegrationBase {
         _execute(calls, 0);
 
         bytes[] memory pu = _freshPrice();
-        uint256 fee = oracle.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         uint256 usdcAmount = DEPOSIT * USDC_SCALE / BAZAAR_SCALE;
         BazaarTradingAccount.Call[] memory exit = new BazaarTradingAccount.Call[](2);
         exit[0] = _call(address(pair), fee, abi.encodeCall(pair.withdrawCollateral, (DEPOSIT, pu, 0, 0, 0, "")));
@@ -187,7 +187,7 @@ contract TradingAccountTest is IntegrationBase {
     function test_gas_fourOrders_directVersusBatched() public {
         _deposit(alice, DEPOSIT);
         bytes[] memory pu = _freshPrice();
-        uint256 fee = oracle.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         vm.deal(alice, 1 ether);
         BazaarTypes.OrderSpec[4] memory specs = [
             _limitSpec(true, BTC / 10, 49_000 * BAZAAR_SCALE),

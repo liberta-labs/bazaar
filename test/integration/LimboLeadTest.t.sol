@@ -6,13 +6,14 @@ import {BazaarPair} from "../../src/BazaarPair.sol";
 import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 import {CollateralLib} from "../../src/libraries/CollateralLib.sol";
 import {InsuranceVaultLib} from "../../src/libraries/InsuranceVaultLib.sol";
-import {PythErrors} from "@pythnetwork/pyth-sdk-solidity/PythErrors.sol";
+import {BazaarOracle} from "../../src/BazaarOracle.sol";
 
 /// @notice Limbo opens LIMBO_LEAD before a scheduled cutoff, on every entry point at once, so the
-///         last block that trades is stamped a window and a second before UMA's settlement window
-///         opens. That block cannot store a print from the window, and a Pyth clock running a
-///         second or two ahead of the block timestamp does not put the settlement print within
-///         its reach.
+///         last block that trades is stamped two freshness windows and a second before the
+///         cutoff. UMA's rule settles at the price Pyth carries at the cutoff, and that block can
+///         store no price generated later than a window and a second before it, so a Pyth clock
+///         running a second or two ahead of the block timestamp does not put the settlement
+///         price within its reach.
 contract LimboLeadTest is IntegrationBase {
     uint256 internal cutoff;
 
@@ -55,7 +56,7 @@ contract LimboLeadTest is IntegrationBase {
     /// @notice The block a lead and a second before the cutoff trades and takes deposits; the next
     ///         second refuses all of them.
     function test_limboOpensALeadBeforeTheCutoff() public {
-        assertEq(BazaarTypes.LIMBO_LEAD, 2 * BazaarTypes.MAX_PRICE_STALENESS, "two settlement windows");
+        assertEq(BazaarTypes.LIMBO_LEAD, 2 * BazaarTypes.MAX_PRICE_STALENESS, "two freshness windows");
         _schedule(vm.getBlockTimestamp() + 1 days);
 
         vm.warp(cutoff - BazaarTypes.LIMBO_LEAD - 1);
@@ -68,22 +69,28 @@ contract LimboLeadTest is IntegrationBase {
         _expectAllRefused();
     }
 
-    /// @notice A second before the settlement window opens is already limbo, so no block that
-    ///         trades sits within a second of the window's first print.
-    function test_secondBeforeTheWindow_isLimbo() public {
+    /// @notice The block a freshness window and a second before the cutoff, which could carry a
+    ///         price generated a second before it, is already limbo.
+    function test_windowAndASecondBeforeTheCutoff_isLimbo() public {
         _schedule(vm.getBlockTimestamp() + 1 days);
         vm.warp(cutoff - BazaarTypes.MAX_PRICE_STALENESS - 1);
         _expectAllRefused();
     }
 
-    /// @notice The last block that trades refuses a print stamped when the settlement window
-    ///         opens: it lies a window and a second ahead, past the freshness bound.
-    function test_lastTradingBlock_refusesTheWindowsFirstPrint() public {
+    /// @notice The last block that trades refuses a price generated a freshness window before the
+    ///         cutoff: it lies a window and a second ahead of the block, past the freshness bound.
+    function test_lastTradingBlock_refusesAPriceAWindowBeforeTheCutoff() public {
         _schedule(vm.getBlockTimestamp() + 1 days);
         vm.warp(cutoff - BazaarTypes.LIMBO_LEAD - 1);
-        bytes[] memory windowPrint = _priceUpdate(50_000, uint64(cutoff - BazaarTypes.MAX_PRICE_STALENESS));
-        vm.expectRevert(PythErrors.StalePrice.selector);
-        pair.refreshPrice(windowPrint);
+        bytes[] memory nearCutoff = _priceUpdate(50_000, uint64(cutoff - BazaarTypes.MAX_PRICE_STALENESS));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                BazaarOracle.BazaarOracle__StalePrice.selector,
+                BTC_USD_FEED_ID,
+                cutoff - BazaarTypes.MAX_PRICE_STALENESS
+            )
+        );
+        pair.refreshPrice(nearCutoff);
     }
 
     /// @notice An insurance redemption inside its window locks a lead and a second before the

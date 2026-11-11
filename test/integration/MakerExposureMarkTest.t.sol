@@ -308,7 +308,8 @@ contract MakerExposureMarkTest is IntegrationBase {
     function test_stopLimit_exposureStartsWhenItArms() public {
         // A buy stop just above the oracle waits outside the book until a fresh tick reaches its
         // trigger, then rests its limit above the new index. Every later fill reads that index:
-        // the pair serves a fresh Pyth cache ahead of any update a caller attaches.
+        // the placements' own $50k updates are generated in the same second as the price stored
+        // at arming, so they store nothing.
         uint256 index = 50_200 * BAZAAR_SCALE;
         uint256 id = _placeStopLimit(alice, true, 2 * PRINT, 50_100 * BAZAAR_SCALE, 51_000 * BAZAAR_SCALE);
         uint64 createdAt = uint64(vm.getBlockNumber());

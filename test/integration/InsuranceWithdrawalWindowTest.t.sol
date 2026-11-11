@@ -23,12 +23,12 @@ contract InsuranceWithdrawalWindowTest is IntegrationBase {
 
     // ---------------------------------------------------------------- fixtures
 
-    /// @dev A keeper stores a fresh print on `p` four seconds on, past the cache's staleness
+    /// @dev A keeper stores a fresh print on `p` four seconds on, past the stored price's staleness
     ///      bound, forwarding the Pyth fee.
     function _refresh(BazaarPair p, bytes32 feedId, uint256 priceUsd) internal {
         vm.warp(vm.getBlockTimestamp() + 4);
         bytes[] memory pu = _priceUpdateFor(feedId, priceUsd, uint64(vm.getBlockTimestamp()));
-        uint256 fee = oracle.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         vm.deal(keeper, fee);
         vm.prank(keeper);
         p.refreshPrice{value: fee}(pu);
@@ -68,7 +68,7 @@ contract InsuranceWithdrawalWindowTest is IntegrationBase {
 
     /// @dev One call by `user` on `p` carrying `pu`, expected to revert with `revertData`.
     function _expectRedemptionRevert(BazaarPair p, address user, bytes[] memory pu, bytes memory revertData) internal {
-        uint256 fee = oracle.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         vm.deal(user, fee);
         vm.prank(user);
         vm.expectRevert(revertData);

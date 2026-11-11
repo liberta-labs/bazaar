@@ -36,7 +36,7 @@ contract SubMinimumRewardTest is IntegrationBase {
         // Keep initial margin on the $1 position plus $0.01, and withdraw the rest.
         (uint256 imrBp,,,) = pair.marginRequirements();
         uint256 kept = imrBp * BAZAAR_SCALE / 10_000 + BAZAAR_SCALE / 100;
-        bytes[] memory pu = _freshPrice(); // built before the prank: the Pyth call would consume it
+        bytes[] memory pu = _freshPrice();
         vm.prank(alice);
         pair.withdrawCollateral(collateral - kept, pu, 0, 0, 0, "");
 

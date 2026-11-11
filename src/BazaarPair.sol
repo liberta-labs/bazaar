@@ -34,7 +34,7 @@ import {IArbSys} from "./interfaces/IArbSys.sol";
  * @notice A single trading pair: users take leveraged long/short perpetual positions on an asset
  *         price against the Vault, collateralized in USDC.
  * @dev Deployed as a minimal clone, one instance per asset pair with its own configuration and
- *      state. Prices come from the Pyth oracle via BazaarOracle. Covers order creation and
+ *      state. Prices come from Pyth Pro via BazaarOracle. Covers order creation and
  *      matching, position and collateral management, funding, liquidation, ADL, the insurance
  *      vault, and termination settlement. The reentrancy guard keeps its flag in transient
  *      storage: a clone runs no constructor, so a storage flag would start at zero and every
@@ -91,7 +91,7 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
 
     // -------------------- Pair Config (set in initialize) --------------------
     bytes32 public pairId;
-    bytes32 public baseFeedId; // Pyth base (e.g. AAPL/USD) or BazaarOracle composite ID (non-USD-quoted assets)
+    bytes32 public baseFeedId; // Pyth Pro feed ID (e.g. AAPL/USD) or BazaarOracle composite ID (non-USD-quoted assets)
     IERC20 public usdc;
     BazaarOracle public oracle;
     bool public isContinuouslyTraded; // if false, IMR is 2x the larger of the vol curve and the observed reopen gap (jumps across non-trading hours)
@@ -363,14 +363,13 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     ///         BazaarPairTerminator when UMA accepts a termination proposal and when an insurer
     ///         proposal reaches its threshold.
     /// @dev A cutoff is scheduled no sooner than MIN_CUTOFF_LEAD after this block. Nothing halts
-    ///      the market before acceptance, so a cutoff already past, or inside the settlement
-    ///      window of this block, has had the book trading at live prices while the window's
-    ///      print was public, or while a trade sequenced ahead of this call in the same block
-    ///      could see it: settling there would price every position opened since against a known
-    ///      answer. At the shortest lead, limbo opens one second after this block and the window
-    ///      a window and a second after it, the margin LIMBO_LEAD gives every last trading block,
-    ///      so the pair settles at a tick nobody could have traded against while the two clocks
-    ///      agree within that margin. A later cutoff never
+    ///      the market before acceptance, so a cutoff already past, or nearer than the lead, has
+    ///      had the book trading at live prices while the price at that cutoff was public, or
+    ///      while a trade sequenced ahead of this call in the same block could see it: settling
+    ///      there would price every position opened since against a known answer. At the shortest
+    ///      lead, limbo opens one second after this block, the margin LIMBO_LEAD gives every last
+    ///      trading block: none acts on a price generated later than a MAX_PRICE_STALENESS window
+    ///      and a second before the cutoff. A later cutoff never
     ///      replaces an earlier one: every limbo guard keys on this stamp, so moving it later
     ///      would reopen a halted market.
     /// @param lastTradingTs The cutoff; raised to MIN_CUTOFF_LEAD from now when sooner, and must
@@ -1245,13 +1244,15 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     ///      (see adlTerminationTs) — so waiting cannot cost the pair its chance to deleverage.
     /// @param longBucketWinners Candidate shorts to close the long bucket against, in any order:
     ///        the batch scores every candidate at the price this call resolves and sorts them
-    ///        itself. That price is the Pyth cache's whenever the cache is within
-    ///        MAX_PRICE_STALENESS, and only otherwise the one in priceUpdate. Preview a score with
-    ///        BazaarPairLens.getAdlScore. Either list may be empty; not both.
+    ///        itself. That price is the one in priceUpdate when it was generated in a later
+    ///        second than the pair's stored price, and the stored price otherwise, so a keeper can
+    ///        bring a newer price but cannot rank against one from an earlier second than the pair
+    ///        already holds. Preview a score with BazaarPairLens.getAdlScore. Either list may be
+    ///        empty; not both.
     /// @param shortBucketWinners Candidate longs to close the short bucket against, likewise
-    /// @param priceUpdate Signed Pyth price update messages. May be empty only when the on-chain
-    ///        Pyth cache is already fresh within MAX_PRICE_STALENESS; otherwise the call reverts
-    ///        rather than falling back to the pair's stored price.
+    /// @param priceUpdate Signed Pyth Pro updates. May be empty only while the pair's stored price
+    ///        is within MAX_PRICE_STALENESS; otherwise the call reverts rather than falling back to
+    ///        the stored price at any age.
     function executeAdl(
         address[] calldata longBucketWinners,
         address[] calldata shortBucketWinners,
@@ -1358,7 +1359,7 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     /// @param hints Execution aids — insertion predecessors and the walk's node budget. Outside
     ///        the signature (like priceUpdate): a relayer attaches fresh ones at submission, and
     ///        every hint is verified on-chain against the actual neighbors before linking.
-    /// @param priceUpdate Pyth update data; may be empty when the on-chain price is fresh.
+    /// @param priceUpdate Pyth Pro update data; may be empty while the pair's stored price is fresh.
     /// @param nonce The signer's meta-tx nonce (ignored for a self-submitted call).
     /// @param deadline Signature expiry timestamp (ignored for a self-submitted call).
     /// @param relayerFee USDC owed to msg.sender for a relayed call (ignored when unsigned).
@@ -1563,7 +1564,7 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     ///        exceed it). The hints and the flag are signed with the rest, so a relayer can neither
     ///        refresh the one nor set or clear the other; BazaarPairLens.amendIdWord and
     ///        bestEffortAmendIdWord pack one.
-    /// @param priceUpdate Pyth update data; may be empty when the on-chain price is fresh.
+    /// @param priceUpdate Pyth Pro update data; may be empty while the pair's stored price is fresh.
     /// @param nonce The signer's meta-tx nonce (ignored for a self-submitted call).
     /// @param deadline Signature expiry timestamp (ignored for a self-submitted call).
     /// @param relayerFee USDC owed to msg.sender for a relayed call (ignored when unsigned).
@@ -1928,8 +1929,8 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
         // admits exactly those.
         //
         // The gate keys on the reference's age rather than on the caller's staleness flag. The
-        // two coincide — the fallback is taken only once the Pyth cache, which the stored price
-        // never postdates, is past MAX_PRICE_STALENESS — but the age cannot be argued with:
+        // two coincide — the fallback is taken only once the stored price is past
+        // MAX_PRICE_STALENESS (_getCurrentPairPrice) — but the age cannot be argued with:
         // updateTs can only be advanced, never aged, so the sole way past this gate is to make
         // the reference fresh. Withholding the update keeps a caller's own print out of the mark,
         // which moves nothing; moving the mark takes a print against the live index.
@@ -2093,12 +2094,11 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
 
     /// @dev Limbo: a cutoff is scheduled and the block is within LIMBO_LEAD of it. From here
     ///      until the price is fixed nothing trades, liquidates, deposits or withdraws, and no
-    ///      health check runs. The lead matters on the UMA path, which settles at the first print
-    ///      in the MAX_PRICE_STALENESS window ending at the cutoff: the last block that trades is
-    ///      stamped a window and a second before that window opens, so no fill is taken against
-    ///      the settlement price unless Pyth's clock runs further ahead of the block timestamp
-    ///      than a window plus a print's delivery time (see LIMBO_LEAD). Added rather than
-    ///      subtracted so a cutoff smaller than the lead cannot underflow.
+    ///      health check runs. The lead matters on the UMA path, which settles at the price Pyth
+    ///      carries at the cutoff: the last block that trades is stamped more than the lead before
+    ///      it and can act on no price generated later than a MAX_PRICE_STALENESS window and a
+    ///      second before the cutoff (see LIMBO_LEAD). Added rather than subtracted so a cutoff
+    ///      smaller than the lead cannot underflow.
     function _pastTradingCutoff() internal view returns (bool) {
         return scheduledTerminationTs != 0 && block.timestamp + BazaarTypes.LIMBO_LEAD >= scheduledTerminationTs;
     }
@@ -2337,9 +2337,9 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
 
     // -------------------- Functions --------------------
 
-    /// @notice Permissionless price + margin-curve + vault-health refresher. Pushes the supplied
-    ///         Pyth update (or relies on Pyth's on-chain cache), writes the result to
-    ///         lastPairPrice, recomputes IMR/MMR and records a 24h-lagged MMR ring sample from
+    /// @notice Permissionless price + margin-curve + vault-health refresher. Verifies the supplied
+    ///         Pyth Pro update (or, given none, reads the pair's stored price), stores a newer
+    ///         result as lastPairPrice, recomputes IMR/MMR and records a 24h-lagged MMR ring sample from
     ///         it, then judges vault health against the refreshed price. A caller whose refresh
     ///         ends a stale gap on an active pair may earn a small insurance-funded bounty
     ///         (RiskParamsLib.payRefreshBounty holds the gates and amount).
@@ -2382,18 +2382,30 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
         _refundEth(unusedEth);
     }
 
-    /// @notice Fetches the current pair price, paying for a Pyth update only when the on-chain
-    ///         cache cannot serve a fresh, confidence-checked price.
-    /// @dev Resolution order: (1) Pyth on-chain cache → (2) caller-supplied priceUpdate →
-    ///      (3) the pair's last stored price (non-continuously-traded pairs only) → revert. Steps 1
-    ///      and 2 store the result in lastPairPrice; step 3 only reads it. Both freshness gates use
-    ///      MAX_PRICE_STALENESS whoever submits, so a caller that cannot land an update inside
-    ///      that window must either ride a cache someone else already refreshed or sign a
-    ///      meta-transaction: priceUpdate sits outside every EIP-712 payload, so a relayer can
-    ///      attach a fresh one to a signature minted much earlier. Does NOT refund ETH — the
-    ///      caller must handle the returned unusedEth.
-    /// @param priceUpdate The signed Pyth price update messages (may be empty)
-    /// @param ethBudget The ETH available to pay the Pyth update fee
+    /// @notice Resolves the current pair price: the one in the caller's update when it supplies
+    ///         one, otherwise the pair's own stored price.
+    /// @dev Resolution order: (1) caller-supplied priceUpdate → (2) the pair's stored price while
+    ///      it is within MAX_PRICE_STALENESS → (3) the stored price at any age
+    ///      (non-continuously-traded pairs only) → revert. Step 1 stores the result in
+    ///      lastPairPrice when it is newer than the stored price; steps 2 and 3 only read it.
+    ///
+    ///      Pyth Pro keeps no price on-chain, so the stored price is the only one a call without
+    ///      an update can use, and it is fresh only while some priced call landed on this pair
+    ///      within the window. An update is verified whenever one is supplied, and a failure
+    ///      there (a bad signature, a price older than the window, confidence above the cap)
+    ///      reverts the call rather than falling through to the stored price. An update replaces
+    ///      the stored price only when it was generated in a later second (for a composite, when
+    ///      its older leg was), so a caller can move the mark forward but cannot have a call
+    ///      judged at a price from an earlier second than the stored one. Within one second the
+    ///      first price stored stands.
+    ///
+    ///      Both freshness gates use MAX_PRICE_STALENESS whoever submits, so a caller that cannot
+    ///      land an update inside that window must either ride a price someone else stored within
+    ///      it or sign a meta-transaction: priceUpdate sits outside every EIP-712 payload, so a
+    ///      relayer can attach a fresh one to a signature minted much earlier. Does NOT refund
+    ///      ETH — the caller must handle the returned unusedEth.
+    /// @param priceUpdate The signed Pyth Pro updates (may be empty)
+    /// @param ethBudget The ETH available to pay Pyth's verification fee
     /// @return priceStruct The resolved pair price
     /// @return unusedEth The ETH not spent on the oracle update, for the caller to refund
     /// @return isStale True when the price came from the step-3 stale fallback
@@ -2403,48 +2415,43 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     {
         uint256 budget = ethBudget;
 
-        // Step 1: Pyth on-chain cache — fresh AND confidence-checked (free read).
-        // tryReadFreshPrice enforces both freshness (≤ MAX_PRICE_STALENESS) and the 2%
-        // confidence cap (per-leg for composites). A fresh, in-confidence price is used directly.
-        // A stale price returns found=false; a fresh-but-over-confidence (or invalid) price
-        // reverts inside and is caught here — both fall through to the user-update / stale paths,
-        // so the confidence cap is never bypassed on the fresh hot path (fills, liquidation, ADL).
-        try oracle.tryReadFreshPrice(baseFeedId, BazaarTypes.MAX_PRICE_STALENESS) returns (
-            bool found, uint256 spot, uint256 low, uint256 high, uint256 pubTime
-        ) {
-            if (found) {
-                (priceStruct,) = _buildAndStorePairPrice(spot, low, high, pubTime, 0);
-                return (priceStruct, budget, false);
-            }
-        } catch {}
-
-        // Step 2: Try user-provided priceData (updateAndFetchPrice is confidence-checked).
+        // Step 1: the caller's update. verifyAndFetchPrice enforces freshness
+        // (≤ MAX_PRICE_STALENESS) and the 2% confidence cap (per leg and on the composed bracket
+        // for composites), so the cap is never bypassed on the fresh hot path (fills,
+        // liquidation, ADL).
         if (priceUpdate.length > 0) {
-            uint256 fee = oracle.getUpdateFee(priceUpdate);
+            uint256 fee = oracle.getUpdateFee(priceUpdate.length);
             if (fee > budget) revert BazaarPair__InsufficientPythFee();
 
             (uint256 spotPrice, uint256 lowPrice, uint256 highPrice, uint256 publishTime) =
-                oracle.updateAndFetchPrice{value: fee}(baseFeedId, priceUpdate, BazaarTypes.MAX_PRICE_STALENESS);
+                oracle.verifyAndFetchPrice{value: fee}(baseFeedId, priceUpdate, BazaarTypes.MAX_PRICE_STALENESS);
             budget -= fee;
 
             (priceStruct,) = _buildAndStorePairPrice(spotPrice, lowPrice, highPrice, publishTime, 0);
             return (priceStruct, budget, false);
         }
 
-        // Step 3: No fresh price and no caller update — fall back to the pair's own last stored
-        // price, for non-continuously traded pairs only. lastPairPrice is written only by steps 1
-        // and 2, so whatever it holds cleared both the freshness gate and the 2% confidence cap at
-        // the moment it was recorded: the fallback ages, but it is never a mark nobody validated.
-        //
-        // Pyth's own cache is deliberately not read here even though it may carry a more recent
-        // tick. That cache is permissionlessly writable to any published update, so consulting it
-        // would let whoever submits the call select which historical mark their liquidation, ADL
-        // or valuation is judged against — the price would become an attacker input on exactly the
-        // paths that move the most value. Reading only lastPairPrice removes the choice: the sole
-        // way to advance this mark is refreshPrice (or any priced entry point), and those can only
-        // ever store a price that is fresh at the time they run.
-        if (!isContinuouslyTraded && lastPairPrice.spotPrice > 0) {
-            return (lastPairPrice, budget, true);
+        priceStruct = lastPairPrice;
+        if (priceStruct.spotPrice > 0) {
+            // Step 2: no caller update — the stored price while it is still fresh. Compared by
+            // adding the period rather than subtracting the stamp: updateTs may sit slightly ahead
+            // of the block, and a future-dated price is not an old one. _updateMarkPrice gates on
+            // the same comparison, so a price this step serves is one that gate admits.
+            if (priceStruct.updateTs + BazaarTypes.MAX_PRICE_STALENESS >= block.timestamp) {
+                return (priceStruct, budget, false);
+            }
+
+            // Step 3: the stored price has aged out and there is no caller update — fall back to
+            // it anyway, for non-continuously traded pairs only. lastPairPrice is written only by
+            // step 1, so whatever it holds cleared both the freshness gate and the 2% confidence
+            // cap at the moment it was recorded: the fallback ages, but it is never a mark nobody
+            // validated. Nor can whoever submits the call choose which old mark their liquidation
+            // or valuation is judged against: the sole way to advance this one is refreshPrice (or
+            // any priced entry point), and those can only ever store a price that is fresh at the
+            // time they run.
+            if (!isContinuouslyTraded) {
+                return (priceStruct, budget, true);
+            }
         }
 
         // Step 4: No fresh data available — revert

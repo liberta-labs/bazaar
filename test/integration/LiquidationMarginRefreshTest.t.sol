@@ -35,8 +35,8 @@ contract LiquidationMarginRefreshTest is IntegrationBase {
             .checked_write(RiskParamsLib.WARMUP_PRICE_UPDATE_THRESHOLD);
     }
 
-    /// @dev Permissionless store at `priceUsd` after aging the cache past MAX_PRICE_STALENESS and
-    ///      the curve past IMR_UPDATE_COOLDOWN, so the store recomputes the rate.
+    /// @dev Permissionless store at `priceUsd` after warping past IMR_UPDATE_COOLDOWN, so the update
+    ///      is newer than the stored price and the store recomputes the rate.
     function _refreshAt(uint256 priceUsd) internal {
         vm.warp(vm.getBlockTimestamp() + RiskParamsLib.IMR_UPDATE_COOLDOWN + 1);
         bytes[] memory pu = _priceAt(priceUsd);

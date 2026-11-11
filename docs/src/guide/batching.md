@@ -55,9 +55,9 @@ account.execute{value: pythFee}(calls);
 
 Notes on the pieces:
 
-- **Price update once.** A pair reads Pyth's on-chain price first and only parses `priceUpdate`
-  when that price is older than 3 seconds or outside the confidence cap. The first call in the batch stores a fresh price; later
-  calls in the same transaction find it and skip the update, so give them an empty array. The
+- **Price update once.** A pair verifies the `priceUpdate` a call carries and stores its price;
+  a call without one runs on the pair's stored price while that is at most 3 seconds old. The first call in the batch stores a fresh price; later
+  calls in the same transaction find it, so give them an empty array and pay Pyth's fee once. The
   ETH for the update rides on that first call's `value`; whatever the pair does not spend is
   refunded to the account, and a later batch can forward it (`Call(owner, amount, "")`).
 - **Hints per order.** `MatchHints` are not signed, so compute them off-chain against the live
@@ -101,8 +101,9 @@ Three things, none of them specific to the sample contract:
   1.32M as one batch through the example account, with the batch also carrying the USDC approval
   and the deposit. The same four orders as four direct calls inside one transaction cost about
   1.38M, so nearly all of the saving is the warm storage, not the contract.
-- **One price store per transaction**, which the cache-first rule gives every caller in the same
-  block anyway.
+- **One price store per transaction**: the pair stores a price only when it was generated in a later
+  second than the one it holds, so the first call stores the update and the rest read it, as
+  separate calls in the same second would.
 
 What it does not save: the work each `createOrder` does on its own — the margin gate, the order
 and position writes, the walk, the health check. A batch entry point in the pair would trim some

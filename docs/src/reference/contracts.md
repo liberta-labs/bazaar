@@ -18,7 +18,7 @@ One EIP-1167 clone per market. Initialized once by the factory.
 | `liquidate(users[], …)` | anyone | full liquidation of insolvent buckets — and, once a settlement price is fixed, the terminal-settlement entry point (no price update, no ETH, no solvency threshold; a tip of up to $0.05 per position settled for someone else) |
 | `executeAdl(longBucketWinners[], shortBucketWinners[], …)` | anyone | Dutch-auction deleveraging — the first list is shorts closed against the vault's long bucket, the second longs closed against its short bucket ([two buckets, one batch](../protocol/adl.md#two-buckets-one-batch)); any order, repeats dropped; either list may be empty, not both |
 | `depositToInsurance` / `requestInsuranceWithdrawal` / `executeInsuranceWithdrawal` | anyone / meta-tx | insurance LP flows; the deposit and the execute both carry a `priceUpdate` and price shares at the mark — the execute needs a fresh one on a live pair (none once terminated), the deposit only while the vault holds liquidated inventory (empty update and no ETH otherwise); the deposit is refused while an ADL window is pending or would open at the price it carries. On a live pair the execute takes at least two calls: the first locks the requested shares' value and pays nothing, the next pays the lower of that and their value once its claim opens (`getInsuranceWithdrawalLock`), held to the fund's headroom while the vault holds inventory, with any rest left requested for a later call; a terminated pair pays in one. A relayed lock pulls its relayer fee from the wallet, with an optional `permitData`; the paying call's fee comes out of the payout |
-| `refreshPrice` | anyone | push a Pyth update, roll funding/margin state and judge vault health (what opens an ADL window on a book too thin to trade); may pay the caller the refresh bounty |
+| `refreshPrice` | anyone | bring a Pyth Pro update, roll funding/margin state and judge vault health (what opens an ADL window on a book too thin to trade); may pay the caller the refresh bounty |
 | `claimFees` | anyone (pays only the caller's own balance) | withdraw every payout the pair owes the caller — keeper rewards, integrator fees, the bug-bounty tax, relayer fees, the UMA proposer reward, refunded trigger bounties — see [Fees](../protocol/fees.md#how-payouts-are-paid); open in every pair state; the balance owed is read through the lens's `claimableFees(pair, who)` |
 | `creditInsurance` | wired (terminator) | books forfeited insurer bonds |
 | `setScheduledTermination` / `fixSettlementPrice` | wired (terminator) | lifecycle transitions (`finalizeTermination` is public once every position is settled at the fixed price, or 14 days after the fix; settling runs through `liquidate`) |
@@ -46,8 +46,8 @@ Key views: `book` (list heads and counts), `positionBuckets`, `orders` (includin
 | Function | Access |
 |---|---|
 | `registerComposite` | anyone (idempotent) |
-| `updateAndFetchPrice` / `fetchFirstPriceAtOrAfter` / `fetchChainedMedian` | anyone, payable (Pyth fee) |
-| `tryReadFreshPrice` / `tryReadStalePrice` / `getUpdateFee` / `getSampleSetFee` / `getCompositeId` | view |
+| `verifyAndFetchPrice` / `fetchPriceAtTick` / `fetchChainedMedian` | anyone, payable (Pyth fee) |
+| `getUpdateFee` / `isRawFeedId` / `getCompositeId` | view |
 
 ## BazaarPairTerminator — `src/BazaarPairTerminator.sol`
 
@@ -69,7 +69,7 @@ Read-only views (its only state is the immutable `factory` it was deployed again
 
 | Dependency | Used for |
 |---|---|
-| Pyth (`IPyth`) | all pricing |
+| Pyth Pro verifier (`PythLazer`) | verifying every price update |
 | UMA Optimistic Oracle V3 | listings, identifier upgrades, terminations (address immutable) |
 | USDC (ERC-20 + ERC-2612) | sole collateral |
 | Arbitrum `ArbSys` (`0x64`) | L2 block numbers |

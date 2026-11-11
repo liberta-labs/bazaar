@@ -22,7 +22,7 @@ External dependencies on Arbitrum One:
 
 | Contract | Address |
 |---|---|
-| Pyth Core | `0xff1a0f4744e8582DF1aE09D5611b887B6a12925C` |
+| Pyth Pro verifier (`PythLazer`) | `0xACeA761c27A909d4D3895128EBe6370FDE2dF481` |
 | USDC (native) | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` |
 | UMA Optimistic Oracle V3 | `0xa6147867264374F324524E30C02C331cF28aa879` |
 
@@ -44,12 +44,12 @@ External dependencies on Arbitrum Sepolia:
 
 | Contract | Address |
 |---|---|
-| Pyth Core | `0x4374e5a8b9C22271E9EB878A2AA31DE97DF15DAF` |
+| Pyth Pro verifier (`PythLazer`) | `0xACeA761c27A909d4D3895128EBe6370FDE2dF481` |
 | USDC (testnet) | By default a **`TestnetUSDC`** deployed by the script and owned by the deploying account, so the testnet has enough USDC to list pairs and trade: anyone can call `claim()` for 10,000 USDC once every 24 hours per address, and the owner mints any amount. Like USDC it has 6 decimals and an ERC-2612 permit. With `SEPOLIA_OFFICIAL_USDC=true` the script uses Circle's test USDC, `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`, instead, to rehearse the mainnet deployment against the real token; Circle's faucet pays out only small amounts |
 | UMA OOv3 | **mock** (`OwnedMockOptimisticOracleV3`), deployed by the script and owned by the deploying account, which alone can force-settle assertions, resolve disputes, and set the identifier whitelist and minimum bond (Bazaar's assertions set their own liveness periods). UMA's own Arbitrum Sepolia OOv3 is not used: it does not accept Circle's test USDC as bond collateral, and its stand-in DVM lets anyone resolve a dispute |
 
 ## Anvil (31337)
 
-`make deploy-anvil` deploys `MockPyth`, `MockUSDC` (mints 10,000 to your wallet), and `MockOptimisticOracleV3` (Bazaar's assertions set their own liveness periods), and etches `MockArbSys` at the `ArbSys` precompile address (`0x64`). Forge deploys the twelve libraries itself in the same run, so no `libraries.args` record is kept for anvil. The Bazaar protocol addresses, with the `MockUSDC` and `MockOptimisticOracleV3` addresses, are written to `.anvil-addresses`, which the other anvil make targets read.
+`make deploy-anvil` deploys `MockPythLazer` (which trusts a public test signing key, so anyone on the chain can sign a price), `MockUSDC` (mints 10,000 to your wallet), and `MockOptimisticOracleV3` (Bazaar's assertions set their own liveness periods), and etches `MockArbSys` at the `ArbSys` precompile address (`0x64`). Forge deploys the twelve libraries itself in the same run, so no `libraries.args` record is kept for anvil. The Bazaar protocol addresses, with the `MockUSDC` and `MockOptimisticOracleV3` addresses, are written to `.anvil-addresses`, which the other anvil make targets read.
 
 External-dependency configuration for every network lives in `script/HelperConfig.s.sol`.

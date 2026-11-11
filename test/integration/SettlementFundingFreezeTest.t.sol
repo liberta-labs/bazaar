@@ -26,7 +26,7 @@ contract SettlementFundingFreezeTest is IntegrationBase {
 
     function _refreshAt(uint256 priceUsd, uint64 publishTime) internal {
         bytes[] memory pu = _priceUpdate(priceUsd, publishTime);
-        uint256 fee = oracle.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         vm.deal(address(this), fee);
         pair.refreshPrice{value: fee}(pu);
     }
@@ -68,9 +68,9 @@ contract SettlementFundingFreezeTest is IntegrationBase {
     }
 
     function _fixAtCutoffTick(uint256 cutoff) internal {
-        // The window's first print: the feed's previous print came before the window opened.
-        bytes[] memory tick = _priceUpdateFor(BTC_USD_FEED_ID, 48_000, uint64(cutoff), uint64(cutoff) - 4);
-        uint256 fee = oracle.getUpdateFee(tick);
+        // The cutoff's tick, its price generated on the tick.
+        bytes[] memory tick = _tickUpdateFor(BTC_USD_FEED_ID, 48_000, uint64(cutoff), uint64(cutoff));
+        uint256 fee = oracle.getUpdateFee(tick.length);
         vm.deal(address(this), fee);
         terminator.terminateScheduledPair{value: fee}(address(pair), tick);
         assertGt(pair.settlementPriceFixedTs(), 0, "setup: settlement price fixed");

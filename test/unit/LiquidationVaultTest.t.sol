@@ -17,7 +17,6 @@ import {DeployBazaar} from "../../script/DeployBazaar.s.sol";
 import {HelperConfig} from "../../script/HelperConfig.s.sol";
 import {MockArbSys} from "../mocks/MockArbSys.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
-import {PythSeed} from "../PythSeed.sol";
 
 // ==================== liquidator reward ====================
 
@@ -2344,7 +2343,7 @@ contract Phase3VaultHealthTest is Test {
 ///         return `false` silently instead of reverting — the non-standard-token case a bare
 ///         `.call` would read as success. Every such transfer must revert instead.
 contract Phase1TransferSafetyTest is Test {
-    bytes32 constant BTC_USD_FEED_ID = 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43;
+    bytes32 constant BTC_USD_FEED_ID = bytes32(uint256(1));
     uint256 constant USDC_SCALE = 1e6;
     uint256 constant BAZAAR_SCALE = 1e18;
     uint256 constant PROPOSAL_TOTAL = 5_000 * BAZAAR_SCALE;
@@ -2367,7 +2366,6 @@ contract Phase1TransferSafetyTest is Test {
         (, address usdcAddr,,) = helperConfig.activeNetworkConfig();
         usdc = MockUSDC(usdcAddr);
 
-        PythSeed.seed(address(factory.oracle().pyth()), BTC_USD_FEED_ID);
         address deployer = makeAddr("deployer");
         usdc.mint(deployer, PROPOSAL_TOTAL_USDC);
         vm.startPrank(deployer);

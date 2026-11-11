@@ -204,11 +204,11 @@ interface IBazaarPairTerminator {
     function CATEGORY_ORACLE_DECOMMISSION() external view returns (uint8);
     function CATEGORY_ASSET_CESSATION() external view returns (uint8);
     function CATEGORY_STRUCTURAL_CHANGE() external view returns (uint8);
-    function CATEGORY_PYTH_CONTRACT_MIGRATION() external view returns (uint8);
+    function CATEGORY_PYTH_VERIFIER_MIGRATION() external view returns (uint8);
     function SETTLEMENT_SAMPLE_COUNT() external view returns (uint256);
     function SETTLEMENT_SAMPLE_SPACING() external view returns (uint256);
     function SETTLE_NOTHING() external view returns (uint8);
-    function SETTLE_WINDOW() external view returns (uint8);
+    function SETTLE_TICK() external view returns (uint8);
     function SETTLE_CHAIN() external view returns (uint8);
     function SETTLE_AWAIT_VERDICT() external view returns (uint8);
     function VERDICT_PENDING() external view returns (uint8);

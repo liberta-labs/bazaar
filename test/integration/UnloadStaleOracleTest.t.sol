@@ -38,12 +38,11 @@ contract UnloadStaleOracleTest is IntegrationBase {
         return _priceUpdateFor(AAPL_USD_FEED_ID, priceUsd, uint64(vm.getBlockTimestamp()));
     }
 
-    /// @dev Push `priceUsd` into Pyth's cache and store it as the pair's mark, stamped now.
+    /// @dev Store `priceUsd`, stamped now, as the AAPL pair's price.
     function _warmAapl(uint256 priceUsd) internal {
         bytes[] memory pu = _aaplPu(priceUsd);
         vm.deal(address(this), 1 ether);
-        mockPyth.updatePriceFeeds{value: mockPyth.getUpdateFee(pu)}(pu);
-        aaplPair.refreshPrice(new bytes[](0));
+        aaplPair.refreshPrice(pu);
     }
 
     /// @dev Rest a Limit buy on the AAPL pair. An empty `pu` places it against the stale fallback.

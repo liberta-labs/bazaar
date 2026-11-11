@@ -62,12 +62,11 @@ contract AdlStaleTriggerTest is IntegrationBase {
         (,,, c,,,) = aaplPair.positionBuckets(user);
     }
 
-    /// @dev Warm the AAPL Pyth cache AND lastPairPrice to `priceUsd`, stamped now.
+    /// @dev Store `priceUsd`, stamped now, as the AAPL pair's price.
     function _warmAapl(uint256 priceUsd) internal {
         bytes[] memory pu = _priceUpdateFor(AAPL_USD_FEED_ID, priceUsd, uint64(vm.getBlockTimestamp()));
         vm.deal(address(this), 1 ether);
-        mockPyth.updatePriceFeeds{value: mockPyth.getUpdateFee(pu)}(pu);
-        aaplPair.refreshPrice(new bytes[](0));
+        aaplPair.refreshPrice(pu);
     }
 
     function _depositAapl(address user, uint256 amount) internal {
@@ -115,8 +114,8 @@ contract AdlStaleTriggerTest is IntegrationBase {
         count = aaplPair.liquidate{value: 0.01 ether}(_arr1(user), freshPu);
     }
 
-    /// @dev Liquidate `user` as bob on the stale fallback: empty calldata against a cache the
-    ///      caller has aged past MAX_PRICE_STALENESS.
+    /// @dev Liquidate `user` as bob on the stale fallback: empty calldata against a stored price
+    ///      the caller has aged past MAX_PRICE_STALENESS.
     function _liquidateStale(address user) internal returns (uint256 count) {
         vm.prank(bob);
         count = aaplPair.liquidate(_arr1(user), new bytes[](0));
@@ -132,7 +131,7 @@ contract AdlStaleTriggerTest is IntegrationBase {
         // be the freshness gate and not an undersized fixture.
         assertGt(expectedLoss, _aaplInsurance(), "fixture clears the whole fund, let alone the fund above its reserve");
 
-        // Age the cache past MAX_PRICE_STALENESS so empty calldata resolves the stale fallback.
+        // Age the stored price past MAX_PRICE_STALENESS so empty calldata resolves the stale fallback.
         vm.warp(vm.getBlockTimestamp() + 30);
 
         assertEq(_liquidateStale(dave), 1, "liquidation commits on the stale mark");
@@ -239,15 +238,11 @@ contract AdlStaleTriggerTest is IntegrationBase {
         _openWindowThenExpireClock();
 
         uint256 armedAt = vm.getBlockTimestamp();
-        // Warmed inline rather than through _warmAapl so expectEmit sits against the pair's own
-        // call and not against MockPyth's PriceFeedUpdate.
         bytes[] memory pu = _priceUpdateFor(AAPL_USD_FEED_ID, MARK, uint64(armedAt));
-        vm.deal(address(this), 1 ether);
-        mockPyth.updatePriceFeeds{value: mockPyth.getUpdateFee(pu)}(pu);
 
         vm.expectEmit(true, false, false, true, address(aaplPair));
         emit BazaarPair.AdlTerminationArmed(aaplPair.pairId(), armedAt + ADL_TERMINATION_GRACE);
-        aaplPair.refreshPrice(new bytes[](0));
+        aaplPair.refreshPrice(pu);
 
         assertEq(
             lens.adlTerminationTs(address(aaplPair)),
@@ -451,7 +446,7 @@ contract AdlStaleTriggerTest is IntegrationBase {
     // ---------------------------------------------------------------------------------------
 
     /// @dev Seizes alice into the short bucket while a window is open on dave's long, on a fresh
-    ///      mark or on the stale fallback (the caller ages the cache), and checks both buckets
+    ///      mark or on the stale fallback (the caller ages the stored price), and checks both buckets
     ///      stand under the one window. Her netting against the long cannot fit: the overlap's
     ///      loss is the gap between the two entry bases, about four times the fund, against free
     ///      capital above the reserve plus the two slices' seizure.

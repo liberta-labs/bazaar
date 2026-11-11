@@ -44,7 +44,7 @@ contract FillOrKillTest is IntegrationBase {
     }
 
     function _submit(address user, BazaarTypes.OrderSpec memory s) internal returns (uint256) {
-        bytes[] memory pu = _freshPrice(); // built before the prank: the mockPyth call would consume it
+        bytes[] memory pu = _freshPrice();
         vm.prank(user);
         pair.createOrder(s, _hintsNone(), pu, 0, 0, 0, "", "");
         return _lastCreatedOrderId(pair);

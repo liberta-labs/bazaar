@@ -17,11 +17,10 @@ import {DeployBazaar} from "../../script/DeployBazaar.s.sol";
 import {HelperConfig} from "../../script/HelperConfig.s.sol";
 import {MockArbSys} from "../mocks/MockArbSys.sol";
 import {MockOptimisticOracleV3} from "../mocks/MockOptimisticOracleV3.sol";
-import {MockPyth} from "@pythnetwork/pyth-sdk-solidity/MockPyth.sol";
-import {PythErrors} from "@pythnetwork/pyth-sdk-solidity/PythErrors.sol";
+import {MockPythLazer} from "../mocks/MockPythLazer.sol";
+import {LazerUpdate} from "../LazerUpdate.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
-import {PythSeed} from "../PythSeed.sol";
-import {PythChain} from "../PythChain.sol";
+import {LazerChain} from "../LazerChain.sol";
 
 // ==================== termination finalize ====================
 
@@ -442,7 +441,7 @@ contract TerminationFinalizeTest is Test {
 ///         disqualifies shares minted inside the maturity window before a proposal from voting on
 ///         it. Withdrawals are gated on mature shares only.
 contract Phase2InsurerVoteTest is Test {
-    bytes32 constant BTC_USD_FEED_ID = 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43;
+    bytes32 constant BTC_USD_FEED_ID = bytes32(uint256(1));
     uint256 constant USDC_SCALE = 1e6;
     uint256 constant BAZAAR_SCALE = 1e18;
     uint256 constant PROPOSAL_TOTAL = 5_000 * BAZAAR_SCALE;
@@ -452,7 +451,7 @@ contract Phase2InsurerVoteTest is Test {
     BazaarPair pair;
     BazaarPairTerminator terminator;
     MockUSDC usdc;
-    MockPyth mockPyth;
+    MockPythLazer mockPyth;
 
     address deployer;
     address whaleProposer; // proposer with substantial pre-existing stake
@@ -476,8 +475,7 @@ contract Phase2InsurerVoteTest is Test {
         (, address usdcAddr,,) = helperConfig.activeNetworkConfig();
         usdc = MockUSDC(usdcAddr);
         terminator = factory.pairTerminator();
-        mockPyth = MockPyth(address(factory.oracle().pyth()));
-        PythSeed.seed(address(mockPyth), BTC_USD_FEED_ID);
+        mockPyth = MockPythLazer(address(factory.oracle().pythLazer()));
 
         usdc.mint(deployer, PROPOSAL_TOTAL_USDC);
         vm.startPrank(deployer);
@@ -564,33 +562,18 @@ contract Phase2InsurerVoteTest is Test {
         terminator.executeInsurerTermination(address(pair), lastId[proposer]);
     }
 
-    /// @dev Build a BTC price update at `priceUsd` with an explicit predecessor publish time.
-    function _btcTick(uint256 priceUsd, uint64 publishTime, uint64 prevPublishTime)
-        internal
-        view
-        returns (bytes[] memory pu)
-    {
-        int64 pythPrice = int64(int256(priceUsd * 1e8));
-        uint64 conf = uint64(priceUsd * 1e8 / 1000);
-        bytes memory data = mockPyth.createPriceFeedUpdateData(
-            BTC_USD_FEED_ID, pythPrice, conf, -8, pythPrice, conf, publishTime, prevPublishTime
-        );
-        pu = new bytes[](1);
-        pu[0] = data;
-    }
-
-    /// @dev Build a $50,000 BTC price update whose predecessor is the previous second.
-    function _btcPriceUpdate(uint64 publishTime) internal view returns (bytes[] memory) {
-        return _btcTick(50_000, publishTime, publishTime > 0 ? publishTime - 1 : 0);
+    /// @dev Build a live $50,000 BTC price update generated in second `publishTime`.
+    function _btcPriceUpdate(uint64 publishTime) internal pure returns (bytes[] memory) {
+        return LazerUpdate.one(LazerUpdate.live(BTC_USD_FEED_ID, 50_000e8, 50e8, -8, publishTime));
     }
 
     /// @dev Stage 1 for an insurer-scheduled pair under the chain rule: warp past the last sample
-    ///      and settle at a chain of $50,000 prints whose first is published at the cutoff itself.
+    ///      and settle at a chain of $50,000 samples whose first is generated on the cutoff itself.
     function _settleAtCutoff(uint64 cutoffTs) internal {
-        uint64 lastSample = PythChain.lastPublish(cutoffTs);
+        uint64 lastSample = LazerChain.lastTick(cutoffTs);
         if (_now() <= lastSample) vm.warp(lastSample + 10);
-        bytes[] memory pu = PythChain.flat(mockPyth, BTC_USD_FEED_ID, 50_000, cutoffTs, cutoffTs - 1);
-        uint256 fee = factory.oracle().getSampleSetFee(BTC_USD_FEED_ID, pu);
+        bytes[] memory pu = LazerChain.flat(BTC_USD_FEED_ID, 50_000, cutoffTs);
+        uint256 fee = factory.oracle().getUpdateFee(pu.length);
         terminator.terminateScheduledPair{value: fee}(address(pair), pu);
     }
 
@@ -1083,15 +1066,15 @@ contract Phase2InsurerVoteTest is Test {
 
     /// @notice Settlement of an insurer-scheduled pair is the chain rule: a call at the cutoff
     ///         itself is early, a set whose first sample predates the cutoff or is not the first
-    ///         print after it is refused, no data at all is a short set refused until the last
-    ///         resort, and the valid chain settles.
+    ///         price generated after it is refused, no data at all is a short set refused until the
+    ///         last resort, and the valid chain settles.
     function test_Settlement_ChainRuleOnly() public {
         uint64 cutoffTs = _proposeInsurerTermination(whaleProposer);
         _vote(majorityVoter, whaleProposer, 20_000 * BAZAAR_SCALE);
         _execute(whaleProposer);
 
-        bytes[] memory valid = PythChain.flat(mockPyth, BTC_USD_FEED_ID, 51_000, cutoffTs + 5, cutoffTs - 1);
-        uint256 fee = factory.oracle().getSampleSetFee(BTC_USD_FEED_ID, valid);
+        bytes[] memory valid = LazerChain.flat(BTC_USD_FEED_ID, 51_000, cutoffTs, cutoffTs + 5, cutoffTs - 1);
+        uint256 fee = factory.oracle().getUpdateFee(valid.length);
 
         // At the cutoff itself the call is early.
         vm.warp(cutoffTs);
@@ -1102,24 +1085,33 @@ contract Phase2InsurerVoteTest is Test {
         );
         terminator.terminateScheduledPair{value: fee}(address(pair), valid);
 
-        vm.warp(PythChain.lastPublish(cutoffTs + 5) + 30);
+        vm.warp(LazerChain.lastTick(cutoffTs + 5) + 30);
 
-        // A chain whose first sample was published before the cutoff.
-        bytes[] memory early = PythChain.flat(mockPyth, BTC_USD_FEED_ID, 51_000, cutoffTs - 1, cutoffTs - 2);
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
+        // A chain whose first sample comes from a tick before the cutoff.
+        bytes[] memory early = LazerChain.flat(BTC_USD_FEED_ID, 51_000, cutoffTs, cutoffTs - 1, cutoffTs - 2);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                BazaarOracle.BazaarOracle__SampleNotProven.selector, BTC_USD_FEED_ID, cutoffTs, cutoffTs - 2
+            )
+        );
         terminator.terminateScheduledPair{value: fee}(address(pair), early);
 
-        // A chain whose first sample follows another print after the cutoff: not the first.
-        bytes[] memory notFirst = PythChain.flat(mockPyth, BTC_USD_FEED_ID, 51_000, cutoffTs + 5, cutoffTs + 2);
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
+        // A chain whose first sample follows another price generated after the cutoff: the tick
+        // offered as quiet carries that earlier price, so it is not the first.
+        bytes[] memory notFirst = LazerChain.flat(BTC_USD_FEED_ID, 51_000, cutoffTs, cutoffTs + 5, cutoffTs + 2);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                BazaarOracle.BazaarOracle__SampleNotProven.selector, BTC_USD_FEED_ID, cutoffTs, cutoffTs + 4
+            )
+        );
         terminator.terminateScheduledPair{value: fee}(address(pair), notFirst);
 
         // No update at all is a short set: no fallback to the stored price before the last resort.
-        vm.expectRevert(abi.encodeWithSelector(BazaarOracle.BazaarOracle__SampleCountMismatch.selector, 0, 5));
+        vm.expectRevert(abi.encodeWithSelector(BazaarOracle.BazaarOracle__SampleCountMismatch.selector, 0, 1));
         terminator.terminateScheduledPair(address(pair), new bytes[](0));
         assertEq(pair.settlementPriceFixedTs(), 0, "nothing fixed by a refused set");
 
-        // The chain whose first sample is the first print after the cutoff, five seconds later.
+        // The chain whose first sample is the first price generated after the cutoff, five seconds later.
         terminator.terminateScheduledPair{value: fee}(address(pair), valid);
         assertEq(pair.auxState().settlementPrice, 51_000 * BAZAAR_SCALE, "settled at the chain's median");
     }
@@ -1608,18 +1600,16 @@ contract Phase2InsurerVoteTest is Test {
         // 5% confidence on every sample: well past the 2% cap the live paths enforce.
         int64 pythPrice = int64(int256(uint256(49_000 * 1e8)));
         uint64 conf = uint64(49_000 * 1e8 * 5 / 100);
-        bytes[] memory pu = new bytes[](PythChain.COUNT);
-        uint64 publish = cutoffTs + 5;
-        uint64 prev = cutoffTs - 1;
-        for (uint256 k = 0; k < PythChain.COUNT; k++) {
-            pu[k] = mockPyth.createPriceFeedUpdateData(
-                BTC_USD_FEED_ID, pythPrice, conf, -8, pythPrice, conf, publish, prev
-            );
-            prev = publish + PythChain.SPACING - 1;
-            publish += PythChain.SPACING;
+        // The first sample five seconds after the cutoff, behind the quiet tick that proves it.
+        bytes[] memory pu = new bytes[](LazerChain.COUNT + 1);
+        pu[0] = LazerUpdate.tick(BTC_USD_FEED_ID, pythPrice, conf, -8, cutoffTs + 4, cutoffTs - 1);
+        uint64 at = cutoffTs + 5;
+        for (uint256 k = 0; k < LazerChain.COUNT; k++) {
+            pu[k + 1] = LazerUpdate.tick(BTC_USD_FEED_ID, pythPrice, conf, -8, at, at);
+            at += LazerChain.SPACING;
         }
-        vm.warp(PythChain.lastPublish(cutoffTs + 5) + 30);
-        uint256 fee = factory.oracle().getSampleSetFee(BTC_USD_FEED_ID, pu);
+        vm.warp(LazerChain.lastTick(cutoffTs + 5) + 30);
+        uint256 fee = factory.oracle().getUpdateFee(pu.length);
         terminator.terminateScheduledPair{value: fee}(address(pair), pu);
         assertEq(pair.auxState().settlementPrice, 49_000 * BAZAAR_SCALE, "settled at the wide samples");
     }
@@ -1786,7 +1776,7 @@ contract Phase2InsurerVoteTest is Test {
     ///         when the chain cannot be fetched; up to then, nothing but the chain.
     function test_Settlement_StoredPriceLastResortAfterDeadThreshold() public {
         bytes[] memory fresh = _btcPriceUpdate(_now());
-        pair.refreshPrice{value: factory.oracle().getUpdateFee(fresh)}(fresh);
+        pair.refreshPrice{value: factory.oracle().getUpdateFee(fresh.length)}(fresh);
         (uint256 storedPrice,,,,) = pair.lastPairPrice();
         assertGt(storedPrice, 0, "sanity: a stored price exists");
 
@@ -1795,7 +1785,7 @@ contract Phase2InsurerVoteTest is Test {
         _execute(whaleProposer);
 
         vm.warp(cutoffTs + 21 days);
-        vm.expectRevert(abi.encodeWithSelector(BazaarOracle.BazaarOracle__SampleCountMismatch.selector, 0, 5));
+        vm.expectRevert(abi.encodeWithSelector(BazaarOracle.BazaarOracle__SampleCountMismatch.selector, 0, 1));
         terminator.terminateScheduledPair(address(pair), new bytes[](0));
 
         vm.warp(cutoffTs + 21 days + 1);
@@ -2217,7 +2207,7 @@ contract Phase2InsurerVoteTest is Test {
 ///         deployer list a market, let positions build, and force-terminate it a week early on a
 ///         snapshot frozen before anyone else could deposit.
 contract SeedMaturityTest is Test {
-    bytes32 constant BTC_USD_FEED_ID = 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43;
+    bytes32 constant BTC_USD_FEED_ID = bytes32(uint256(1));
     uint256 constant USDC_SCALE = 1e6;
     uint256 constant BAZAAR_SCALE = 1e18;
     uint256 constant PROPOSAL_TOTAL = 5_000 * BAZAAR_SCALE;
@@ -2230,7 +2220,7 @@ contract SeedMaturityTest is Test {
     BazaarPair pair;
     BazaarPairTerminator terminator;
     MockUSDC usdc;
-    MockPyth mockPyth;
+    MockPythLazer mockPyth;
 
     address deployer;
     uint256 seed; // shares minted to the deployer at listing
@@ -2248,8 +2238,7 @@ contract SeedMaturityTest is Test {
         (, address usdcAddr,,) = helperConfig.activeNetworkConfig();
         usdc = MockUSDC(usdcAddr);
         terminator = factory.pairTerminator();
-        mockPyth = MockPyth(address(factory.oracle().pyth()));
-        PythSeed.seed(address(mockPyth), BTC_USD_FEED_ID);
+        mockPyth = MockPythLazer(address(factory.oracle().pythLazer()));
 
         usdc.mint(deployer, PROPOSAL_TOTAL_USDC);
         vm.startPrank(deployer);
@@ -2304,9 +2293,9 @@ contract SeedMaturityTest is Test {
         terminator.executeInsurerTermination(address(pair), id);
         assertEq(pair.scheduledTerminationTs(), cutoffTs, "the matured seed's vote scheduled the pair");
 
-        bytes[] memory pu = PythChain.flat(mockPyth, BTC_USD_FEED_ID, 50_000, cutoffTs, cutoffTs - 1);
-        vm.warp(PythChain.lastPublish(cutoffTs) + 10);
-        uint256 fee = factory.oracle().getSampleSetFee(BTC_USD_FEED_ID, pu);
+        bytes[] memory pu = LazerChain.flat(BTC_USD_FEED_ID, 50_000, cutoffTs);
+        vm.warp(LazerChain.lastTick(cutoffTs) + 10);
+        uint256 fee = factory.oracle().getUpdateFee(pu.length);
         terminator.terminateScheduledPair{value: fee}(address(pair), pu);
         assertGt(pair.settlementPriceFixedTs(), 0, "settled at the chain from the cutoff");
     }
@@ -2477,10 +2466,9 @@ contract Phase2OracleUpgradeTest is Test {
         // 1) Deployer proposes a pair -> assertion created under the ORIGINAL identifier.
         address deployer = makeAddr("deployer");
         usdc.mint(deployer, 10_000 * 1e6);
-        PythSeed.seed(address(factory.oracle().pyth()), bytes32("AAPL_FEED"));
         vm.startPrank(deployer);
         usdc.approve(address(factory), 5_000 * 1e6);
-        bytes32 depId = factory.proposePairDeployment(bytes32("AAPL_FEED"), false, 5_000 * 1e18, "AAPL on NASDAQ");
+        bytes32 depId = factory.proposePairDeployment(bytes32(uint256(922)), false, 5_000 * 1e18, "AAPL on NASDAQ");
         vm.stopPrank();
 
         // 2) Proposer proposes an identifier upgrade -> also asserted under the original identifier.
@@ -2533,7 +2521,7 @@ contract Phase4LogicTest is Test {
 ///         runs from ACCEPTANCE, so an immediate empty-calldata call can't force the
 ///         last-stored-price fallback while the genuine archived tick is still postable.
 contract TerminationProposalTest is Test {
-    bytes32 constant BTC_USD_FEED_ID = 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43;
+    bytes32 constant BTC_USD_FEED_ID = bytes32(uint256(1));
     int32 constant BTC_EXPO = -8;
     uint256 constant USDC_SCALE = 1e6;
     uint256 constant BAZAAR_SCALE = 1e18;
@@ -2545,7 +2533,7 @@ contract TerminationProposalTest is Test {
     BazaarPair pair;
     BazaarPairTerminator terminator;
     MockUSDC usdc;
-    MockPyth pyth;
+    MockPythLazer pyth;
 
     address deployer;
     address proposer;
@@ -2562,8 +2550,7 @@ contract TerminationProposalTest is Test {
         (factory,) = dep.deploy(makeAddr("bugBounty"));
         usdc = MockUSDC(factory.usdc());
         terminator = factory.pairTerminator();
-        pyth = MockPyth(address(factory.oracle().pyth()));
-        PythSeed.seed(address(pyth), BTC_USD_FEED_ID);
+        pyth = MockPythLazer(address(factory.oracle().pythLazer()));
 
         usdc.mint(deployer, PROPOSAL_TOTAL_USDC);
         vm.startPrank(deployer);
@@ -2579,26 +2566,15 @@ contract TerminationProposalTest is Test {
         usdc.mint(proposer, 10_000 * USDC_SCALE);
     }
 
-    /// @dev Push a live Pyth tick (feeds the pair's stored price via refreshPrice).
-    function _push(int64 price, uint64 conf, uint64 publishTime) internal {
-        bytes[] memory u = new bytes[](1);
-        u[0] = pyth.createPriceFeedUpdateData(
-            BTC_USD_FEED_ID, price, conf, BTC_EXPO, price, conf, publishTime, publishTime > 0 ? publishTime - 1 : 0
-        );
-        pyth.updatePriceFeeds(u);
+    /// @dev Store a live price generated in second `generatedTs` as the pair's own.
+    function _store(int64 price, uint64 conf, uint64 generatedTs) internal {
+        pair.refreshPrice(LazerUpdate.one(LazerUpdate.live(BTC_USD_FEED_ID, price, conf, int16(BTC_EXPO), generatedTs)));
     }
 
-    /// @dev Build (without submitting) a Pyth update at a specific historical publishTime, with the
-    ///      predecessor publish time Pyth's uniqueness check reads.
-    function _historicalUpdate(int64 price, uint64 conf, uint64 publishTime, uint64 prevPublishTime)
-        internal
-        view
-        returns (bytes[] memory u)
-    {
-        u = new bytes[](1);
-        u[0] = pyth.createPriceFeedUpdateData(
-            BTC_USD_FEED_ID, price, conf, BTC_EXPO, price, conf, publishTime, prevPublishTime
-        );
+    /// @dev The one-second update stamped `tickTs`, carrying a price generated in second
+    ///      `generatedTs`. UMA's rule settles on the one stamped at the cutoff.
+    function _tick(int64 price, uint64 conf, uint64 tickTs, uint64 generatedTs) internal pure returns (bytes[] memory) {
+        return LazerUpdate.one(LazerUpdate.tick(BTC_USD_FEED_ID, price, conf, int16(BTC_EXPO), tickTs, generatedTs));
     }
 
     /// @notice A settle must never consume an accepted assertion without scheduling the pair. A
@@ -2823,7 +2799,7 @@ contract TerminationProposalTest is Test {
         assertEq(
             _count(
                 claim,
-                "rendering the pair unable to fetch prices. HOW TO VALIDATE: "
+                "so the pair cannot verify prices. HOW TO VALIDATE: "
                 "Identify the pair's asset from the feed IDs listed above"
             ),
             1,
@@ -2854,7 +2830,6 @@ contract TerminationProposalTest is Test {
         string memory liveness = Strings.toString(terminator.TERMINATION_PROPOSAL_LIVENESS() / 1 hours);
         string memory voteLead = Strings.toString(uint256(2 hours) / 1 hours); // mirror of INSURER_TERMINATION_MIN_LEAD
         string memory halt = Strings.toString(BazaarTypes.LIMBO_LEAD);
-        string memory window = Strings.toString(BazaarTypes.MAX_PRICE_STALENESS);
         string memory lead = Strings.toString(BazaarTypes.MIN_CUTOFF_LEAD);
         string memory grace = Strings.toString(GRACE / 1 hours);
         assertEq(_count(claim, bytes(string.concat("(", liveness, " hours after submission)"))), 1, "liveness figure");
@@ -2873,11 +2848,13 @@ contract TerminationProposalTest is Test {
         assertEq(_count(claim, "may not redeem for 13 days after the settlement"), 1, "voter lock figure");
         assertEq(_count(claim, bytes(string.concat("halts trading ", halt, " seconds before"))), 1, "halt figure");
         assertEq(
-            _count(claim, bytes(string.concat("within the last ", window, " seconds up to it"))), 1, "window figure"
+            _count(claim, "settles at the price carried by the Pyth Pro one-second update stamped with the scheduled"),
+            1,
+            "the tick rule is stated"
         );
         assertEq(_count(claim, bytes(string.concat("moved to ", lead, " seconds after acceptance"))), 1, "lead figure");
         assertEq(
-            _count(claim, bytes(string.concat("within ", grace, " hours of the scheduled timestamp"))),
+            _count(claim, bytes(string.concat("For ", grace, " hours after the scheduled timestamp only that update"))),
             1,
             "grace figure"
         );
@@ -3077,8 +3054,8 @@ contract TerminationProposalTest is Test {
     /// @notice A late (disputed) acceptance only SCHEDULES the pair, MIN_CUTOFF_LEAD after the
     ///         acceptance instant rather than at the already-past proposed cutoff: the book traded
     ///         at live prices past that cutoff while its tick was public, and the lead puts the
-    ///         window's first print after the acceptance block. The price-dependent settlement
-    ///         runs in a separate retryable transaction, never inside the UMA callback.
+    ///         new cutoff's tick out of the acceptance block's reach. The price-dependent
+    ///         settlement runs in a separate retryable transaction, never inside the UMA callback.
     function test_LateAcceptance_SchedulesAtAcceptanceButDoesNotTerminate() public {
         uint256 acceptTs = vm.getBlockTimestamp() + 5 days;
         uint256 lastTradingTs = _proposeDisputeAcceptLate(acceptTs);
@@ -3093,16 +3070,15 @@ contract TerminationProposalTest is Test {
     }
 
     /// @notice The tick at the proposed cutoff no longer settles the pair once acceptance has
-    ///         moved the cutoff: it lies outside the window around the effective cutoff, so a
-    ///         position opened after the proposed cutoff cannot be priced against it.
+    ///         moved the cutoff: it is not the effective cutoff's tick, so a position opened after
+    ///         the proposed cutoff cannot be priced against it.
     function test_LateAcceptance_TickAtProposedCutoffRefused() public {
-        _push(50_000e8, 50e8, uint64(vm.getBlockTimestamp()));
-        pair.refreshPrice(new bytes[](0));
+        _store(50_000e8, 50e8, uint64(vm.getBlockTimestamp()));
         uint256 lastTradingTs = _proposeDisputeAcceptLate(vm.getBlockTimestamp() + 5 days);
         vm.warp(pair.scheduledTerminationTs() + 1);
 
-        bytes[] memory pu = _historicalUpdate(48_000e8, 48e8, uint64(lastTradingTs), uint64(lastTradingTs) - 4);
-        uint256 fee = BazaarOracle(pair.oracle()).getUpdateFee(pu);
+        bytes[] memory pu = _tick(48_000e8, 48e8, uint64(lastTradingTs), uint64(lastTradingTs));
+        uint256 fee = BazaarOracle(pair.oracle()).getUpdateFee(pu.length);
         vm.deal(address(this), fee);
         vm.expectRevert();
         terminator.terminateScheduledPair{value: fee}(address(pair), pu);
@@ -3113,15 +3089,14 @@ contract TerminationProposalTest is Test {
     ///         settles the pair inside the grace, and the price is that tick, not anything the
     ///         proposer typed or the pair stored before.
     function test_LateAcceptance_PreciseTickSettlesAtVerifiedPrice() public {
-        _push(50_000e8, 50e8, uint64(vm.getBlockTimestamp()));
-        pair.refreshPrice(new bytes[](0)); // stored price $50k, before the cutoff
+        _store(50_000e8, 50e8, uint64(vm.getBlockTimestamp())); // stored price $50k, before the cutoff
         _proposeDisputeAcceptLate(vm.getBlockTimestamp() + 5 days);
         uint256 cutoffTs = pair.scheduledTerminationTs();
         vm.warp(cutoffTs + 1);
 
-        // The window's first print: the feed's previous print came before the window opened.
-        bytes[] memory pu = _historicalUpdate(48_000e8, 48e8, uint64(cutoffTs), uint64(cutoffTs) - 4);
-        uint256 fee = BazaarOracle(pair.oracle()).getUpdateFee(pu);
+        // The cutoff's tick, its price generated on the tick.
+        bytes[] memory pu = _tick(48_000e8, 48e8, uint64(cutoffTs), uint64(cutoffTs));
+        uint256 fee = BazaarOracle(pair.oracle()).getUpdateFee(pu.length);
         vm.deal(address(this), fee);
         terminator.terminateScheduledPair{value: fee}(address(pair), pu);
         pair.finalizeTermination();
@@ -3135,8 +3110,7 @@ contract TerminationProposalTest is Test {
     ///         honest keeper right after a late acceptance with empty calldata, force the catch
     ///         branch, and settle at the last stored price instead of the true tick.
     function test_LateAcceptance_WithinGrace_EmptyDataReverts() public {
-        _push(50_000e8, 50e8, uint64(vm.getBlockTimestamp()));
-        pair.refreshPrice(new bytes[](0)); // stored price exists -> fallback WOULD be available
+        _store(50_000e8, 50e8, uint64(vm.getBlockTimestamp())); // stored price exists -> fallback WOULD be available
         _proposeDisputeAcceptLate(vm.getBlockTimestamp() + 5 days);
         vm.warp(pair.scheduledTerminationTs() + 1); // past the cutoff, inside the grace
 
@@ -3157,8 +3131,7 @@ contract TerminationProposalTest is Test {
     ///         (feed had no tick in the window, or the archived payload can no longer verify),
     ///         the pair settles at its frozen last stored price rather than stranding forever.
     function test_LateAcceptance_AfterGrace_FallsBackToLastStoredPrice() public {
-        _push(50_000e8, 50e8, uint64(vm.getBlockTimestamp()));
-        pair.refreshPrice(new bytes[](0)); // lastPairPrice ~$50k, frozen at/before the cutoff
+        _store(50_000e8, 50e8, uint64(vm.getBlockTimestamp())); // lastPairPrice ~$50k, frozen at/before the cutoff
         _proposeDisputeAcceptLate(vm.getBlockTimestamp() + 5 days);
 
         vm.warp(pair.scheduledTerminationTs() + GRACE + 1);
@@ -3170,15 +3143,14 @@ contract TerminationProposalTest is Test {
     }
 }
 
-/// @notice terminateStalePair must terminate ONLY for a >21-day-stale oracle — never for any
-///         other reason. tryReadStalePrice (spot if conf <=2%, else EMA) serves as the liveness
-///         probe: any rung resolving a tick newer than 21 days blocks termination outright. When
-///         no rung clears the cap (found=false) or the oracle read reverts, the 21-day requirement
-///         is instead enforced against the pair's own stored price — so a transient wide-conf /
-///         reverting read on a recently-active pair cannot be used to terminate it. Settlement
-///         always uses that stored price, never a tick read from the oracle's cache.
+/// @notice terminateStalePair must terminate ONLY a pair that has stored no price for more than
+///         21 days — never for any other reason. The pair's own stored price is the evidence:
+///         anyone can store a fresh one with refreshPrice, which resets the clock, and an update
+///         whose price is not fresh stores nothing. Settlement always uses that stored price.
+///         The second half covers the cutoff tick that settles a scheduled termination under
+///         UMA's rule.
 contract Phase4StaleTerminationTest is Test {
-    bytes32 constant BTC_USD_FEED_ID = 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43;
+    bytes32 constant BTC_USD_FEED_ID = bytes32(uint256(1));
     int32 constant BTC_EXPO = -8;
     uint256 constant USDC_SCALE = 1e6;
     uint256 constant BAZAAR_SCALE = 1e18;
@@ -3191,7 +3163,7 @@ contract Phase4StaleTerminationTest is Test {
     BazaarPair pair;
     BazaarPairTerminator terminator;
     MockUSDC usdc;
-    MockPyth pyth;
+    MockPythLazer pyth;
 
     /// @dev Receives the Pyth fee the terminator refunds when the precise fetch falls back.
     receive() external payable {}
@@ -3202,8 +3174,7 @@ contract Phase4StaleTerminationTest is Test {
         (factory,) = dep.deploy(makeAddr("bugBounty"));
         usdc = MockUSDC(factory.usdc());
         terminator = factory.pairTerminator();
-        pyth = MockPyth(address(factory.oracle().pyth()));
-        PythSeed.seed(address(pyth), BTC_USD_FEED_ID);
+        pyth = MockPythLazer(address(factory.oracle().pythLazer()));
 
         address deployer = makeAddr("deployer");
         usdc.mint(deployer, PROPOSAL_TOTAL_USDC);
@@ -3217,21 +3188,14 @@ contract Phase4StaleTerminationTest is Test {
         pair = BazaarPair(payable(factory.getPairAddress(pairId)));
     }
 
-    function _push(int64 price, uint64 conf, uint64 publishTime) internal {
-        bytes[] memory u = new bytes[](1);
-        u[0] = pyth.createPriceFeedUpdateData(
-            BTC_USD_FEED_ID, price, conf, BTC_EXPO, price, conf, publishTime, publishTime > 0 ? publishTime - 1 : 0
-        );
-        pyth.updatePriceFeeds(u);
+    /// @dev A live update generated in second `generatedTs`.
+    function _live(int64 price, uint64 conf, uint64 generatedTs) internal pure returns (bytes[] memory) {
+        return LazerUpdate.one(LazerUpdate.live(BTC_USD_FEED_ID, price, conf, int16(BTC_EXPO), generatedTs));
     }
 
-    /// @dev Push a feed with independently-set spot and EMA price/conf (to drive the stale ladder).
-    function _pushSpotEma(int64 spotP, uint64 spotC, int64 emaP, uint64 emaC, uint64 pub) internal {
-        bytes[] memory u = new bytes[](1);
-        u[0] = pyth.createPriceFeedUpdateData(
-            BTC_USD_FEED_ID, spotP, spotC, BTC_EXPO, emaP, emaC, pub, pub > 0 ? pub - 1 : 0
-        );
-        pyth.updatePriceFeeds(u);
+    /// @dev Store a price generated in second `generatedTs` as the pair's own.
+    function _store(int64 price, uint64 conf, uint64 generatedTs) internal {
+        pair.refreshPrice(_live(price, conf, generatedTs));
     }
 
     function _terminated() internal view returns (bool) {
@@ -3245,11 +3209,10 @@ contract Phase4StaleTerminationTest is Test {
         pair.finalizeTermination();
     }
 
-    /// try path: oracle returns a price stale by > 21 days -> terminates at the pair's stored price.
-    function test_StaleOracle_TerminatesAfter21Days() public {
+    /// A stored price more than 21 days old terminates the pair at that price.
+    function test_StalePair_TerminatesAfter21Days() public {
         uint64 t0 = uint64(block.timestamp);
-        _push(50_000e8, 50e8, t0);
-        pair.refreshPrice(new bytes[](0)); // records lastPairPrice at ~t0 — the settlement source
+        _store(50_000e8, 50e8, t0); // records lastPairPrice at t0 — the settlement source
         vm.warp(t0 + DEAD + 1);
         vm.expectEmit(true, false, false, true, address(terminator));
         emit BazaarPairTerminator.StalePairTerminated(address(pair), 50_000 * BAZAAR_SCALE, t0);
@@ -3258,12 +3221,37 @@ contract Phase4StaleTerminationTest is Test {
         assertTrue(_terminated(), "stale > 21 days terminates");
     }
 
-    /// A pair that never recorded a price settles at the nominal price once its feed is dead — the
-    /// oracle's cached tick is still never the settlement price — and the listing seed, which a
-    /// live pair pays out only against a fresh price, is released after finalize.
-    function test_StaleOracle_NeverPriced_SettlesAtNominalPrice() public {
+    /// A stored price stamped ahead of the block, which the freshness window allows by up to
+    /// MAX_PRICE_STALENESS, is not an old one: the stale path refuses it with its own error and
+    /// counts the threshold from the price's stamp.
+    function test_StalePair_FutureDatedStoredPrice_AgesFromItsStamp() public {
+        uint64 t0 = uint64(vm.getBlockTimestamp());
+        uint256 stamp = uint256(t0) + BazaarTypes.MAX_PRICE_STALENESS;
+        _store(50_000e8, 50e8, uint64(stamp));
+        (,, uint256 storedTs,,) = pair.lastPairPrice();
+        assertEq(storedTs, stamp, "sanity: stored ahead of the block");
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                BazaarPairTerminator.BazaarPairTerminator__OracleNotStaleEnough.selector, stamp, DEAD
+            )
+        );
+        terminator.terminateStalePair(address(pair));
+
+        vm.warp(stamp + DEAD);
+        vm.expectPartialRevert(BazaarPairTerminator.BazaarPairTerminator__OracleNotStaleEnough.selector);
+        terminator.terminateStalePair(address(pair));
+
+        vm.warp(stamp + DEAD + 1);
+        terminator.terminateStalePair(address(pair));
+        assertEq(pair.auxState().settlementPrice, 50_000 * BAZAAR_SCALE, "settled at the stored price");
+    }
+
+    /// A pair that never recorded a price settles at the nominal price once it has gone the
+    /// threshold unpriced, and the listing seed, which a live pair pays out only against a fresh
+    /// price, is released after finalize.
+    function test_StalePair_NeverPriced_SettlesAtNominalPrice() public {
         uint64 t0 = uint64(block.timestamp);
-        _push(50_000e8, 50e8, t0);
         (uint256 stored,,,,) = pair.lastPairPrice();
         assertEq(stored, 0, "sanity: the pair never stored a price");
         uint256 createdTs = pair.auxState().pairCreatedTs;
@@ -3272,7 +3260,7 @@ contract Phase4StaleTerminationTest is Test {
         vm.expectEmit(true, false, false, true, address(terminator));
         emit BazaarPairTerminator.StalePairTerminated(address(pair), 1, createdTs);
         terminator.terminateStalePair(address(pair));
-        assertEq(pair.auxState().settlementPrice, 1, "settled at the nominal price, not the cached tick");
+        assertEq(pair.auxState().settlementPrice, 1, "settled at the nominal price");
         _finalize();
         assertTrue(_terminated(), "never-priced pair terminates");
 
@@ -3289,12 +3277,10 @@ contract Phase4StaleTerminationTest is Test {
         assertEq(usdc.balanceOf(deployer) - balanceBefore, fund / 1e12, "the whole fund is paid out");
     }
 
-    /// A never-priced pair is aged from its creation, not from a stored price it lacks: an oracle
-    /// that reads too wide to clear any rung cannot end a new listing before its first trade.
-    function test_StaleOracle_NeverPriced_AgedFromCreation() public {
-        uint64 t0 = uint64(block.timestamp);
+    /// A never-priced pair is aged from its creation, not from a stored price it lacks, so a new
+    /// listing cannot be ended before it has had the threshold to be priced.
+    function test_StalePair_NeverPriced_AgedFromCreation() public {
         uint256 createdTs = pair.auxState().pairCreatedTs;
-        _push(0, 0, t0 + 1); // <=0 -> no rung clears conf -> tryReadStalePrice found=false
 
         vm.warp(createdTs + DEAD);
         vm.expectRevert(
@@ -3309,11 +3295,11 @@ contract Phase4StaleTerminationTest is Test {
         assertEq(pair.auxState().settlementPrice, 1, "past the threshold it settles at the nominal price");
     }
 
-    /// try path: oracle fresh (< 21 days) -> cannot terminate.
-    function test_FreshOracle_CannotTerminate() public {
+    /// A price stored less than 21 days ago blocks termination, up to the threshold's last second.
+    function test_RecentlyPriced_CannotTerminate() public {
         uint64 t0 = uint64(block.timestamp);
-        _push(50_000e8, 50e8, t0);
-        vm.warp(t0 + 20 days);
+        _store(50_000e8, 50e8, t0);
+        vm.warp(t0 + DEAD);
         vm.expectRevert(
             abi.encodeWithSelector(
                 BazaarPairTerminator.BazaarPairTerminator__OracleNotStaleEnough.selector, uint256(t0), DEAD
@@ -3322,79 +3308,66 @@ contract Phase4StaleTerminationTest is Test {
         terminator.terminateStalePair(address(pair));
     }
 
-    /// catch path: oracle read reverts (<=0 price) but the pair was active recently -> must NOT
-    /// terminate. This is the "no other reason" guard: a transient revert can't be a side door.
-    function test_OracleRevertsButRecent_CannotTerminate() public {
+    /// Anyone keeps a quiet pair on a live feed alive: one refreshPrice with a fresh update
+    /// restarts the 21 days from the price it stores.
+    function test_RefreshResetsTheClock() public {
         uint64 t0 = uint64(block.timestamp);
-        _push(50_000e8, 50e8, t0);
-        pair.refreshPrice(new bytes[](0)); // records lastPairPrice at ~t0
-        _push(0, 0, t0 + 1); // <=0 -> no rung clears conf -> tryReadStalePrice found=false
-        vm.warp(t0 + 10 days); // recent (< 21 days)
-        // lastPairPrice.updateTs == t0 (set by refreshPrice), so the catch's staleness guard fires.
+        _store(50_000e8, 50e8, t0);
+
+        uint64 t1 = t0 + 20 days;
+        vm.warp(t1);
+        vm.prank(makeAddr("anyone"));
+        pair.refreshPrice(_live(51_000e8, 51e8, t1));
+
+        vm.warp(t0 + DEAD + 1);
         vm.expectRevert(
             abi.encodeWithSelector(
-                BazaarPairTerminator.BazaarPairTerminator__OracleNotStaleEnough.selector, uint256(t0), DEAD
+                BazaarPairTerminator.BazaarPairTerminator__OracleNotStaleEnough.selector, uint256(t1), DEAD
             )
         );
         terminator.terminateStalePair(address(pair));
-    }
 
-    /// catch path: oracle read reverts AND the pair has been stale > 21 days -> terminates at
-    /// the last stored price (the genuine dead-oracle case the fallback is for).
-    function test_OracleDeadAndStale_TerminatesViaFallback() public {
-        uint64 t0 = uint64(block.timestamp);
-        _push(50_000e8, 50e8, t0);
-        pair.refreshPrice(new bytes[](0));
-        _push(0, 0, t0 + 1); // <=0 -> no rung clears conf -> tryReadStalePrice found=false
-        vm.warp(t0 + DEAD + 1); // stale > 21 days
+        vm.warp(t1 + DEAD + 1);
         terminator.terminateStalePair(address(pair));
-        _finalize();
-        assertTrue(_terminated(), "dead + stale terminates via lastPairPrice fallback");
+        assertEq(pair.auxState().settlementPrice, 51_000 * BAZAAR_SCALE, "settled at the refreshed price");
     }
 
-    /// stale ladder: spot conf too wide (>2%) but EMA conf tight, so the EMA rung (rung 2) is what
-    /// resolves the publish time the 21-day liveness gate is judged against — the wide spot alone
-    /// would leave found=false. Past that age the pair terminates, settling at its own stored price
-    /// rather than at either oracle rung. Warping to DEAD + 2 clears the gate against the rung's
-    /// t0 + 1 publish time, not just against the stored price's t0.
-    function test_StaleWideSpot_TerminatesViaEmaRung() public {
+    /// A feed that has stopped producing prices cannot reset the clock: Pyth keeps issuing updates
+    /// that carry its last price forward, and an update whose price was generated long ago is
+    /// refused as stale however recently it was stamped, so it stores nothing.
+    function test_CarriedForwardPriceDoesNotResetTheClock() public {
         uint64 t0 = uint64(block.timestamp);
-        _push(50_000e8, 50e8, t0); // tight -> refreshPrice records lastPairPrice at ~t0
-        pair.refreshPrice(new bytes[](0));
-        // spot: 50k +/- 5k (10% conf, wide); EMA: 48k +/- 48 (0.1% conf, tight)
-        _pushSpotEma(50_000e8, 5_000e8, 48_000e8, 48e8, t0 + 1);
-        vm.warp(t0 + DEAD + 2);
-        terminator.terminateStalePair(address(pair));
-        _finalize();
-        assertTrue(_terminated(), "wide spot but tight EMA + stale -> terminates");
-    }
+        _store(50_000e8, 50e8, t0);
 
-    /// stale ladder: both spot and EMA conf too wide -> tryReadStalePrice found=false -> falls back
-    /// to the last stored (conf-checked-when-recorded) price; still terminates because stale > 21d.
-    function test_StaleBothWide_TerminatesViaLastStored() public {
-        uint64 t0 = uint64(block.timestamp);
-        _push(50_000e8, 50e8, t0); // tight -> refreshPrice records lastPairPrice at ~t0
-        pair.refreshPrice(new bytes[](0));
-        _pushSpotEma(50_000e8, 5_000e8, 48_000e8, 4_800e8, t0 + 1); // both ~10% conf (wide)
+        uint64 t1 = t0 + 20 days;
+        vm.warp(t1);
+        bytes[] memory carried = LazerUpdate.one(
+            LazerUpdate.sign(
+                LazerUpdate.payload(
+                    t1 * LazerUpdate.MICROS,
+                    LazerUpdate.CHANNEL_REAL_TIME,
+                    LazerUpdate.feed(BTC_USD_FEED_ID, 50_000e8, 50e8, int16(BTC_EXPO), (t0 + 1) * LazerUpdate.MICROS)
+                )
+            )
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(BazaarOracle.BazaarOracle__StalePrice.selector, BTC_USD_FEED_ID, uint256(t0 + 1))
+        );
+        pair.refreshPrice(carried);
+
         vm.warp(t0 + DEAD + 1);
         terminator.terminateStalePair(address(pair));
         _finalize();
-        assertTrue(_terminated(), "both rungs wide + stale -> terminates via last stored price");
+        assertTrue(_terminated(), "a dead feed's pair terminates on schedule");
+        assertEq(pair.auxState().settlementPrice, 50_000 * BAZAAR_SCALE, "at the last price it stored");
     }
 
-    // -------------------- scheduled termination price window --------------------
+    // -------------------- scheduled termination at the cutoff tick --------------------
 
-    /// @dev Build (without submitting) a Pyth update at a specific historical publishTime, with the
-    ///      predecessor publish time Pyth's uniqueness check reads.
-    function _historicalUpdate(int64 price, uint64 conf, uint64 publishTime, uint64 prevPublishTime)
-        internal
-        view
-        returns (bytes[] memory u)
-    {
-        u = new bytes[](1);
-        u[0] = pyth.createPriceFeedUpdateData(
-            BTC_USD_FEED_ID, price, conf, BTC_EXPO, price, conf, publishTime, prevPublishTime
-        );
+    /// @dev The one-second update stamped `tickTs`, carrying a price generated in second
+    ///      `generatedTs`. UMA's rule settles on the one stamped at the cutoff.
+    function _tick(int64 price, uint64 conf, uint64 tickTs, uint64 generatedTs) internal pure returns (bytes[] memory) {
+        return LazerUpdate.one(LazerUpdate.tick(BTC_USD_FEED_ID, price, conf, int16(BTC_EXPO), tickTs, generatedTs));
     }
 
     function _schedule(uint256 lastTradingTs) internal {
@@ -3402,130 +3375,245 @@ contract Phase4StaleTerminationTest is Test {
         pair.setScheduledTermination(lastTradingTs, address(this));
     }
 
-    /// Within the grace, a precise in-window tick settles the scheduled termination.
-    function test_ScheduledTermination_WithinGrace_PreciseTickSettles() public {
-        _push(50_000e8, 50e8, uint64(block.timestamp));
-        pair.refreshPrice(new bytes[](0));
+    function _settle(bytes[] memory pu) internal {
+        uint256 fee = BazaarOracle(pair.oracle()).getUpdateFee(pu.length);
+        vm.deal(address(this), fee);
+        terminator.terminateScheduledPair{value: fee}(address(pair), pu);
+    }
+
+    /// Within the grace, the cutoff's tick settles the scheduled termination at the price it
+    /// carries.
+    function test_ScheduledTermination_WithinGrace_CutoffTickSettles() public {
+        _store(50_000e8, 50e8, uint64(block.timestamp));
 
         uint256 scheduledTs = block.timestamp + 1 hours;
         _schedule(scheduledTs);
 
-        // The window's first print: the feed's previous print came before the window opened.
-        uint64 pubT = uint64(scheduledTs) - 1;
-        bytes[] memory pu = _historicalUpdate(48_000e8, 48e8, pubT, uint64(scheduledTs) - 4);
-        uint256 fee = BazaarOracle(pair.oracle()).getUpdateFee(pu);
-
+        bytes[] memory pu = _tick(48_000e8, 48e8, uint64(scheduledTs), uint64(scheduledTs) - 1);
         vm.warp(scheduledTs + 1); // within grace
-        vm.deal(address(this), fee);
-        terminator.terminateScheduledPair{value: fee}(address(pair), pu);
+        _settle(pu);
         _finalize();
-        assertTrue(_terminated(), "precise tick settles within grace");
+        assertTrue(_terminated(), "the cutoff's tick settles within grace");
         assertEq(pair.auxState().settlementPrice, 48_000 * BAZAAR_SCALE, "price from the tick, not the stored $50k");
     }
 
-    /// Only the window's first print settles: with prints at T-3, T-2 and T, the two later ones
-    /// are refused although they lie inside [T - 3s, T], so the caller cannot pick among them.
-    function test_ScheduledTermination_OnlyTheWindowsFirstTickSettles() public {
-        _push(50_000e8, 50e8, uint64(block.timestamp));
-        pair.refreshPrice(new bytes[](0));
+    /// The tick prices a feed that produced nothing on the cutoff second at the last price it did
+    /// produce: Pyth carries that price forward under each new tick, so the pair settles at it,
+    /// inside the grace, and not at its own stored price.
+    function test_ScheduledTermination_CarriedForwardPriceSettles() public {
+        _store(50_000e8, 50e8, uint64(block.timestamp));
+
+        uint64 cutoff = uint64(vm.getBlockTimestamp() + 1 hours);
+        _schedule(cutoff);
+        bytes[] memory pu = _tick(47_000e8, 47e8, cutoff, cutoff - 30 minutes);
+        vm.warp(cutoff + 1); // within grace
+        _settle(pu);
+        assertEq(pair.auxState().settlementPrice, 47_000 * BAZAAR_SCALE, "the tick's price, not the stored one");
+    }
+
+    /// A price stored during the cutoff second does not move the settlement. The pair stores a
+    /// live price generated up to the cutoff, which can be later in that second than the tick
+    /// stamped on it, so the stored price and the tick can differ; the tick settles the pair
+    /// whatever was stored.
+    function test_ScheduledTermination_PriceStoredInTheCutoffSecondDoesNotSettle() public {
+        _store(50_000e8, 50e8, uint64(block.timestamp));
+
+        uint64 cutoff = uint64(vm.getBlockTimestamp() + 1 hours);
+        _schedule(cutoff);
+        bytes[] memory late = _live(51_000e8, 51e8, cutoff);
+        bytes[] memory pu = _tick(48_000e8, 48e8, cutoff, cutoff - 1);
+
+        vm.warp(cutoff + 1); // within grace
+        pair.refreshPrice(late);
+        (uint256 stored,, uint256 storedTs,,) = pair.lastPairPrice();
+        assertEq(stored, 51_000 * BAZAAR_SCALE, "sanity: the cutoff second's price was stored");
+        assertEq(storedTs, cutoff, "sanity: stamped at the cutoff");
+
+        _settle(pu);
+        assertEq(pair.auxState().settlementPrice, 48_000 * BAZAAR_SCALE, "settled at the tick");
+    }
+
+    /// A cutoff tick carrying no price, which is what Pyth issues for a feed that has never
+    /// produced one, cannot settle the pair: inside the grace the call reverts, and after it the
+    /// pair settles at its stored price.
+    function test_ScheduledTermination_TickWithNoPrice_RevertsThenFallsBack() public {
+        _store(50_000e8, 50e8, uint64(block.timestamp));
+
+        uint64 cutoff = uint64(vm.getBlockTimestamp() + 1 hours);
+        _schedule(cutoff);
+        bytes[] memory pu = _tick(0, 0, cutoff, 0);
+
+        vm.warp(cutoff + 1); // within grace
+        vm.expectPartialRevert(BazaarOracle.BazaarOracle__InvalidPrice.selector);
+        terminator.terminateScheduledPair(address(pair), pu);
+        assertEq(pair.settlementPriceFixedTs(), 0, "a tick with no price fixes nothing inside the grace");
+
+        vm.warp(uint256(cutoff) + GRACE + 1); // past the grace
+        _settle(pu);
+        assertEq(pair.auxState().settlementPrice, 50_000 * BAZAAR_SCALE, "the stored price");
+    }
+
+    /// Only the cutoff's own tick settles: the one-second updates either side of it, and a
+    /// real-time update stamped on the cutoff, are refused, so the caller cannot pick among them.
+    function test_ScheduledTermination_OnlyTheCutoffsTickSettles() public {
+        _store(50_000e8, 50e8, uint64(block.timestamp));
 
         uint256 scheduledTs = block.timestamp + 1 hours;
         _schedule(scheduledTs);
         uint64 t = uint64(scheduledTs);
-        bytes[] memory first = _historicalUpdate(48_000e8, 48e8, t - 3, t - 4);
-        bytes[] memory second = _historicalUpdate(47_000e8, 47e8, t - 2, t - 3);
-        bytes[] memory third = _historicalUpdate(49_000e8, 49e8, t, t - 1);
-        uint256 fee = BazaarOracle(pair.oracle()).getUpdateFee(first);
-        vm.deal(address(this), 3 * fee);
+        bytes[] memory before = _tick(47_000e8, 47e8, t - 1, t - 1);
+        bytes[] memory afterIt = _tick(49_000e8, 49e8, t + 1, t);
+        bytes[] memory realTime = _live(46_000e8, 46e8, t);
 
-        vm.warp(scheduledTs + 1); // within grace
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
-        terminator.terminateScheduledPair{value: fee}(address(pair), second);
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
-        terminator.terminateScheduledPair{value: fee}(address(pair), third);
-        assertEq(pair.settlementPriceFixedTs(), 0, "a later print in the window fixes nothing");
+        vm.warp(scheduledTs + 2); // within grace
+        vm.expectPartialRevert(BazaarOracle.BazaarOracle__WrongTick.selector);
+        terminator.terminateScheduledPair(address(pair), before);
+        vm.expectPartialRevert(BazaarOracle.BazaarOracle__WrongTick.selector);
+        terminator.terminateScheduledPair(address(pair), afterIt);
+        vm.expectPartialRevert(BazaarOracle.BazaarOracle__WrongTick.selector);
+        terminator.terminateScheduledPair(address(pair), realTime);
+        assertEq(pair.settlementPriceFixedTs(), 0, "no other update fixes anything");
 
-        terminator.terminateScheduledPair{value: fee}(address(pair), first);
-        assertEq(pair.auxState().settlementPrice, 48_000 * BAZAAR_SCALE, "settled at the window's first print");
+        _settle(_tick(48_000e8, 48e8, t, t - 1));
+        assertEq(pair.auxState().settlementPrice, 48_000 * BAZAAR_SCALE, "settled at the cutoff's tick");
     }
 
-    /// After the grace a later print in the window still cannot settle: the fetch is refused and
-    /// the pair falls back to its stored price, so the only outcomes are the first print and that
-    /// stored price.
-    function test_ScheduledTermination_AfterGrace_LaterTickFallsBackToStoredPrice() public {
-        _push(50_000e8, 50e8, uint64(block.timestamp));
-        pair.refreshPrice(new bytes[](0)); // lastPairPrice $50k, before the cutoff
+    /// After the grace an update that is not the cutoff's tick still cannot settle: the read is
+    /// refused and the pair falls back to its stored price, so the only outcomes are the cutoff's
+    /// tick and that stored price.
+    function test_ScheduledTermination_AfterGrace_OtherTickFallsBackToStoredPrice() public {
+        _store(50_000e8, 50e8, uint64(block.timestamp)); // lastPairPrice $50k, before the cutoff
 
         uint256 scheduledTs = block.timestamp + 1 hours;
         _schedule(scheduledTs);
-        bytes[] memory second = _historicalUpdate(47_000e8, 47e8, uint64(scheduledTs) - 1, uint64(scheduledTs) - 2);
-        uint256 fee = BazaarOracle(pair.oracle()).getUpdateFee(second);
-        vm.deal(address(this), fee);
+        bytes[] memory other = _tick(47_000e8, 47e8, uint64(scheduledTs) - 1, uint64(scheduledTs) - 1);
 
         vm.warp(scheduledTs + GRACE + 1); // past the grace
-        terminator.terminateScheduledPair{value: fee}(address(pair), second);
-        assertEq(pair.auxState().settlementPrice, 50_000 * BAZAAR_SCALE, "stored price, not the later print");
+        _settle(other);
+        assertEq(pair.auxState().settlementPrice, 50_000 * BAZAAR_SCALE, "stored price, not the other tick");
     }
 
-    /// The window's first print settles even when its confidence is wide: there is no second
+    /// After the grace the cutoff's tick still settles the pair when someone supplies it: the
+    /// stored price stands in for a tick nobody can produce, not for one that verifies.
+    function test_ScheduledTermination_AfterGrace_CutoffTickStillSettles() public {
+        _store(50_000e8, 50e8, uint64(block.timestamp));
+
+        uint64 cutoff = uint64(vm.getBlockTimestamp() + 1 hours);
+        _schedule(cutoff);
+        bytes[] memory pu = _tick(48_000e8, 48e8, cutoff, cutoff);
+
+        vm.warp(uint256(cutoff) + GRACE + 1); // past the grace
+        _settle(pu);
+        assertEq(pair.auxState().settlementPrice, 48_000 * BAZAAR_SCALE, "the tick, not the stored price");
+    }
+
+    /// The verification fee is the only ETH a tick settlement keeps: whatever the caller sends
+    /// beyond it comes back in the same call, and none of it rests in the terminator or the oracle.
+    function test_ScheduledTermination_TickSettlement_RefundsEthBeyondTheFee() public {
+        _store(50_000e8, 50e8, uint64(block.timestamp));
+
+        uint64 cutoff = uint64(vm.getBlockTimestamp() + 1 hours);
+        _schedule(cutoff);
+        bytes[] memory pu = _tick(48_000e8, 48e8, cutoff, cutoff);
+        pyth.setVerificationFee(7);
+
+        vm.warp(cutoff + 1); // within grace
+        vm.deal(address(this), 100);
+        terminator.terminateScheduledPair{value: 100}(address(pair), pu);
+        assertEq(pair.auxState().settlementPrice, 48_000 * BAZAAR_SCALE, "settled at the tick");
+        assertEq(address(this).balance, 93, "everything but the fee came back");
+        assertEq(address(pyth).balance, 7, "the fee reached the verifier");
+        assertEq(address(terminator).balance, 0, "nothing rests in the terminator");
+        assertEq(address(pair.oracle()).balance, 0, "nothing rests in the oracle");
+    }
+
+    /// A call that sends less than the verification fee is refused before anything is read.
+    function test_ScheduledTermination_TickSettlement_ShortFeeReverts() public {
+        _store(50_000e8, 50e8, uint64(block.timestamp));
+
+        uint64 cutoff = uint64(vm.getBlockTimestamp() + 1 hours);
+        _schedule(cutoff);
+        bytes[] memory pu = _tick(48_000e8, 48e8, cutoff, cutoff);
+        pyth.setVerificationFee(7);
+
+        vm.warp(cutoff + 1); // within grace
+        vm.deal(address(this), 6);
+        vm.expectRevert(
+            abi.encodeWithSelector(BazaarPairTerminator.BazaarPairTerminator__InsufficientPythFee.selector, 6, 7)
+        );
+        terminator.terminateScheduledPair{value: 6}(address(pair), pu);
+    }
+
+    /// When the tick cannot be read after the grace no fee is spent, so the stored-price fallback
+    /// returns everything the caller sent.
+    function test_ScheduledTermination_AfterGrace_FallbackRefundsTheWholeValue() public {
+        _store(50_000e8, 50e8, uint64(block.timestamp));
+
+        uint64 cutoff = uint64(vm.getBlockTimestamp() + 1 hours);
+        _schedule(cutoff);
+        bytes[] memory other = _tick(47_000e8, 47e8, cutoff - 1, cutoff - 1);
+        pyth.setVerificationFee(7);
+
+        vm.warp(uint256(cutoff) + GRACE + 1); // past the grace
+        vm.deal(address(this), 100);
+        terminator.terminateScheduledPair{value: 100}(address(pair), other);
+        assertEq(pair.auxState().settlementPrice, 50_000 * BAZAAR_SCALE, "the stored price");
+        assertEq(address(this).balance, 100, "the whole value came back");
+        assertEq(address(pyth).balance, 0, "no fee was spent");
+        assertEq(address(terminator).balance, 0, "nothing rests in the terminator");
+    }
+
+    /// The cutoff's tick settles even when its confidence is wide: there is no second
     /// candidate, so a confidence cap could only push the pair onto the stored-price fallback.
-    function test_ScheduledTermination_WideConfidenceFirstTickSettles() public {
-        _push(50_000e8, 50e8, uint64(block.timestamp));
-        pair.refreshPrice(new bytes[](0));
+    function test_ScheduledTermination_WideConfidenceTickSettles() public {
+        _store(50_000e8, 50e8, uint64(block.timestamp));
 
         uint256 scheduledTs = block.timestamp + 1 hours;
         _schedule(scheduledTs);
         // 5% confidence — well past the 2% cap the live paths enforce.
-        bytes[] memory pu = _historicalUpdate(49_000e8, 2_450e8, uint64(scheduledTs) - 1, uint64(scheduledTs) - 4);
-        uint256 fee = BazaarOracle(pair.oracle()).getUpdateFee(pu);
-        vm.deal(address(this), fee);
+        bytes[] memory pu = _tick(49_000e8, 2_450e8, uint64(scheduledTs), uint64(scheduledTs) - 1);
 
         vm.warp(scheduledTs + 1); // within grace
-        terminator.terminateScheduledPair{value: fee}(address(pair), pu);
-        assertEq(pair.auxState().settlementPrice, 49_000 * BAZAAR_SCALE, "settled at the wide first print");
+        _settle(pu);
+        assertEq(pair.auxState().settlementPrice, 49_000 * BAZAAR_SCALE, "settled at the wide tick");
     }
 
-    /// A tick outside [scheduledTs - 3s, scheduledTs] must not settle the pair — the window is
-    /// enforced on-chain by Pyth's parser, so a post-cutoff print (manipulated or chaotic) cannot
-    /// be passed off as the settlement tick.
-    function test_ScheduledTermination_OutOfWindowTick_Reverts() public {
-        _push(50_000e8, 50e8, uint64(block.timestamp));
-        pair.refreshPrice(new bytes[](0));
+    /// An update stamped after the cutoff must not settle the pair — the tick is enforced
+    /// on-chain, so a post-cutoff price (manipulated or chaotic) cannot be passed off as the
+    /// settlement price.
+    function test_ScheduledTermination_PostCutoffTick_Reverts() public {
+        _store(50_000e8, 50e8, uint64(block.timestamp));
 
         uint256 scheduledTs = block.timestamp + 1 hours;
         _schedule(scheduledTs);
 
-        bytes[] memory pu = _historicalUpdate(1_000e8, 1e8, uint64(scheduledTs) + 10, uint64(scheduledTs) + 9);
-        uint256 fee = BazaarOracle(pair.oracle()).getUpdateFee(pu);
+        bytes[] memory pu = _tick(1_000e8, 1e8, uint64(scheduledTs) + 10, uint64(scheduledTs) + 10);
 
-        vm.warp(scheduledTs + 1); // within grace
-        vm.deal(address(this), fee);
-        vm.expectRevert();
-        terminator.terminateScheduledPair{value: fee}(address(pair), pu);
-        assertFalse(_terminated(), "out-of-window tick rejected");
+        vm.warp(scheduledTs + 11); // within grace
+        vm.expectPartialRevert(BazaarOracle.BazaarOracle__WrongTick.selector);
+        terminator.terminateScheduledPair(address(pair), pu);
+        assertFalse(_terminated(), "post-cutoff tick rejected");
     }
 
-    /// Within the grace, missing the precise tick reverts — NO last-price fallback yet, so bad/empty
-    /// data can't force a fallback while a real tick may still be postable.
+    /// Within the grace, missing the cutoff's tick reverts — NO last-price fallback yet, so
+    /// bad/empty data can't force a fallback while the tick may still be postable.
     function test_ScheduledTermination_WithinGrace_NoTickReverts() public {
-        _push(50_000e8, 50e8, uint64(block.timestamp));
-        pair.refreshPrice(new bytes[](0));
+        _store(50_000e8, 50e8, uint64(block.timestamp));
 
         uint256 scheduledTs = block.timestamp + 1 hours;
         _schedule(scheduledTs);
         vm.warp(scheduledTs + 1); // within grace
 
         bytes[] memory empty = new bytes[](0);
-        vm.expectRevert(); // Pyth: no tick in [scheduledTs-3, scheduledTs]; no fallback in grace
+        vm.expectRevert(abi.encodeWithSelector(BazaarOracle.BazaarOracle__FeedNotInUpdate.selector, BTC_USD_FEED_ID));
         terminator.terminateScheduledPair(address(pair), empty);
         assertFalse(_terminated(), "not terminated; no fallback during grace");
     }
 
-    /// After the grace, missing the precise tick settles at the last stored price (capped at
+    /// After the grace, missing the cutoff's tick settles at the last stored price (capped at
     /// scheduledTs) so the pair can't be stranded in scheduled-but-not-terminated limbo.
     function test_ScheduledTermination_AfterGrace_FallsBackToLastPrice() public {
-        _push(50_000e8, 50e8, uint64(block.timestamp));
-        pair.refreshPrice(new bytes[](0)); // lastPairPrice ~ $50k, publishTime <= scheduledTs
+        _store(50_000e8, 50e8, uint64(block.timestamp)); // lastPairPrice ~ $50k, publishTime <= scheduledTs
 
         uint256 scheduledTs = block.timestamp + 1 hours;
         _schedule(scheduledTs);
@@ -3551,21 +3639,31 @@ contract Phase4StaleTerminationTest is Test {
         assertTrue(_terminated(), "never-priced pair terminates after the grace");
     }
 
-    /// REGRESSION: the empty-calldata fallback must survive the Pyth CONTRACT itself being
-    /// bricked/migrated (every call into it reverting) — the worst-case "oracle decommissioned"
-    /// scenario. getUpdateFee sits outside the try/catch, so querying it unconditionally would
-    /// make even the fallback revert and strand the pair.
+    /// A pair that never stored a price settles at its cutoff tick like any other: the tick's
+    /// price needs nothing from the pair's own history.
+    function test_ScheduledTermination_NeverPricedPairSettlesAtTheTick() public {
+        uint64 cutoff = uint64(vm.getBlockTimestamp() + 1 hours);
+        _schedule(cutoff);
+        bytes[] memory pu = _tick(47_000e8, 47e8, cutoff, cutoff - 60);
+        vm.warp(cutoff + 1);
+        _settle(pu);
+        assertEq(pair.auxState().settlementPrice, 47_000 * BAZAAR_SCALE, "settled at the tick");
+    }
+
+    /// The empty-calldata fallback must survive Pyth's contract itself being bricked/migrated
+    /// (every call into it reverting) — the worst-case "verifier decommissioned" scenario.
+    /// getUpdateFee sits outside the try/catch, so querying it unconditionally would make even
+    /// the fallback revert and strand the pair.
     function test_ScheduledTermination_PythContractBricked_FallbackStillSettles() public {
-        _push(50_000e8, 50e8, uint64(block.timestamp));
-        pair.refreshPrice(new bytes[](0)); // stored price frozen before the contract dies
+        _store(50_000e8, 50e8, uint64(block.timestamp)); // stored price frozen before the contract dies
 
         uint256 scheduledTs = block.timestamp + 1 hours;
         _schedule(scheduledTs);
 
-        // Brick the Pyth contract: every call (getUpdateFee, parsePriceFeedUpdates, ...) reverts.
+        // Brick Pyth's contract: every call (verification_fee, verifyUpdate, ...) reverts.
         vm.etch(address(pyth), hex"60006000fd"); // PUSH1 0 PUSH1 0 REVERT
 
-        // Within the grace nothing can settle (precise-only, and precise can't verify) …
+        // Within the grace nothing can settle (tick-only, and the tick can't be verified) …
         bytes[] memory empty = new bytes[](0);
         vm.warp(scheduledTs + 1);
         vm.expectRevert();
@@ -3580,4 +3678,3 @@ contract Phase4StaleTerminationTest is Test {
         assertEq(pair.auxState().settlementPrice, 50_000 * BAZAAR_SCALE, "settled at last stored price");
     }
 }
-

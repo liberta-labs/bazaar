@@ -24,7 +24,7 @@
 
 **Permissionless perpetual futures on anything with a price feed — no admin keys, no whitelists, no off-switch.**
 
-Bazaar is the first-ever fully permissionless perpetual-derivatives protocol, USDC-margined and built for Arbitrum. Any asset with a [Pyth](https://pyth.network) price feed — crypto, equities, FX, indices — can be listed permissionlessly through an [UMA Optimistic Oracle](https://uma.xyz) assertion and traded on an on-chain central limit order book. The book is **fully on-chain and sorted**, and orders match **on arrival**, inside their own creation transaction — price-time priority and fill prices are enforced by the contract itself, with no trusted matcher anywhere in the fill path.
+Bazaar is the first-ever fully permissionless perpetual-derivatives protocol, USDC-margined and built for Arbitrum. Any asset with a [Pyth](https://pyth.network) price feed — crypto, equities, FX, commodities — can be listed permissionlessly through an [UMA Optimistic Oracle](https://uma.xyz) assertion and traded on an on-chain central limit order book. The book is **fully on-chain and sorted**, and orders match **on arrival**, inside their own creation transaction — price-time priority and fill prices are enforced by the contract itself, with no trusted matcher anywhere in the fill path.
 
 The protocol is immutable: no owner, no pauser, no upgradeable proxies, no governance token. Every privileged action is either fully permissionless, economically bonded, or adjudicated by UMA's optimistic oracle. The single governed parameter — the UMA identifier those assertions are adjudicated under — moves only through a bonded assertion (at least $5,000), a 2-day public dispute window, and a 7-day activation timelock (4 days once UMA has removed the incumbent).
 
@@ -38,11 +38,10 @@ Everything protocol-level — architecture, matching, the risk engine, funding, 
 
 ## Development
 
-Requires [Foundry](https://book.getfoundry.sh/getting-started/installation) and Node.js (for the Pyth SDK dependency).
+Requires [Foundry](https://book.getfoundry.sh/getting-started/installation).
 
 ```bash
 git clone --recursive <repo-url> && cd bazaar
-npm install          # @pythnetwork/pyth-sdk-solidity
 forge build
 forge test
 ```
@@ -57,7 +56,7 @@ For the full local stack on Anvil — mocked Pyth/UMA/USDC, listing a pair, push
 src/
 ├── BazaarPair.sol              # Core market: orders, positions, insurance, lifecycle
 ├── BazaarFactory.sol           # UMA-gated listings, EIP-1167 cloning
-├── BazaarOracle.sol            # Pyth adapter + composite feeds
+├── BazaarOracle.sol            # Pyth Pro adapter + composite feeds
 ├── BazaarPairTerminator.sol    # Wind-down paths
 ├── BazaarPairLens.sol          # Read-only views
 ├── interfaces/                 # One MIT interface per contract (IBazaar*), checked against its ABI
@@ -87,8 +86,8 @@ subgraph/                       # The Graph subgraph (MIT)
 test/
 ├── unit/                       # Per-library and per-mechanism suites
 ├── integration/                # End-to-end suites, incl. the zero-sum invariant
-├── mocks/                      # ArbSys, USDC, UMA OOv3 (MockPyth comes from the Pyth SDK)
-└── *.sol                       # Shared harness helpers (storage probes, Pyth seeding)
+├── mocks/                      # ArbSys, USDC, UMA OOv3, Pyth Pro verifier
+└── *.sol                       # Shared harness helpers (storage probes, signed Pyth Pro updates)
 ```
 
 ## Security

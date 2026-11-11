@@ -86,7 +86,7 @@ contract RelayerFeeSolvencyTest is IntegrationBase {
 
         // The book is empty, so this limit rests without filling; the fee is the only USDC the
         // call moves.
-        bytes[] memory pu = _freshPrice(); // build BEFORE the prank (mockPyth call would consume it)
+        bytes[] memory pu = _freshPrice();
         vm.prank(relayer);
         pair.createOrder(spec, _hintsNone(), pu, nonce, deadline, fee, sig, "");
 

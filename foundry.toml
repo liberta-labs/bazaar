@@ -9,7 +9,6 @@ dynamic_test_linking = true
 solc_version = "0.8.34"
 evm_version = "cancun"
 remappings = [
-    "@pythnetwork/pyth-sdk-solidity/=node_modules/@pythnetwork/pyth-sdk-solidity",
     "@openzeppelin/=lib/openzeppelin-contracts/",
 ]
 # DeployLibraries.s.sol records each chain's library addresses under deployments/<chainid>/, and
@@ -60,6 +59,11 @@ fail_on_revert = false
 [lint]
 exclude_lints = ["unsafe-typecast"]
 ignore = ["test/**", "script/**"]
+
+# Pyth's parser is vendored unmodified for a differential test of LazerPayloadLib; formatting it
+# would make it differ from its source.
+[fmt]
+ignore = ["test/vendor/**"]
 
 # Network configurations
 [rpc_endpoints]

@@ -1,4 +1,4 @@
-"""Shared helpers for the local end-to-end run: cast wrappers, Pyth updates, GraphQL and sync waits.
+"""Shared helpers for the local end-to-end run: cast wrappers, Pyth Pro updates, GraphQL and sync waits.
 
 Paths come from the environment so the scripts run from any checkout:
   E2E_WORK  work directory shared with the shell scripts (default /tmp/bazaar-e2e)
@@ -25,8 +25,8 @@ ABI_DIR = os.path.join(WORK, "abi")
 
 # Anvil's default accounts; test keys only.
 MNEMONIC = "test test test test test test test test test test test junk"
-FEED = "0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace"  # Pyth ETH/USD
-USDC_FEED = "0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"  # Pyth USDC/USD
+FEED = "0x" + "2".rjust(64, "0")  # Pyth Pro ETH/USD (feed 2) as the bytes32 the factory takes
+DEV_UPDATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "script", "dev-update.sh")
 ZERO = "0x0000000000000000000000000000000000000000"
 E18 = 10**18
 
@@ -141,22 +141,22 @@ def send(k, to, sig, *args, gas=20_000_000, label=""):
 
 
 class Prices:
-    """Builds MockPyth update data for the base feed and USDC/USD."""
-
-    def __init__(self, pyth):
-        self.pyth = pyth
+    """Builds signed test updates for the base feed: script/dev-update.sh signs them with the key
+    the local MockPythLazer trusts."""
 
     def update(self, price_usd, ts):
-        sig = "createPriceFeedUpdateData(bytes32,int64,uint64,int32,int64,uint64,uint64,uint64)(bytes)"
-        p = int(round(price_usd * 10**8))
-        base = call(self.pyth, sig, FEED, p, 0, "-8", p, 0, ts, ts - 1)[0]
-        usdc = call(self.pyth, sig, USDC_FEED, 10**8, 0, "-8", 10**8, 0, ts, ts - 1)[0]
-        return f"[{base},{usdc}]"
+        mantissa = int(round(price_usd * 10**8))
+        env = dict(os.environ, CAST=CAST)
+        p = subprocess.run(["bash", DEV_UPDATE, FEED, str(mantissa), str(ts)], capture_output=True, text=True, env=env)
+        if p.returncode != 0:
+            raise RuntimeError(f"dev-update.sh failed: {p.stderr.strip()[:2000]}")
+        return f"[{p.stdout.strip()}]"
 
 
 def next_ts(step=4):
-    """Pins the next block's timestamp. The step is above Pyth's 3-second window, inside which a
-    newer update is ignored in favour of the cached one."""
+    """Pins the next block's timestamp. Each update is generated in its block's second, and the
+    pair stores a price only when it was generated in a later second than the one it holds, so
+    the step keeps every update storable."""
     _, ts = latest()
     t = ts + step
     rpc("evm_setNextBlockTimestamp", hex(t))

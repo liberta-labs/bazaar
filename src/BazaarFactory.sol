@@ -148,7 +148,7 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
     error Factory__SeedBelowMinimum();
     error Factory__DescriptionInvalid();
     error Factory__CompositePairMustBeNonContinuous();
-    error Factory__FeedNotOnPyth(bytes32 feedId);
+    error Factory__InvalidFeedId(bytes32 feedId);
     error Factory__IdentifierUpgradeStillPending();
     error Factory__IdentifierUpgradeNoChange();
     error Factory__InvalidIdentifier();
@@ -408,11 +408,10 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
     // -------------------- Phase 1: Propose Pair Deployment --------------------
 
     /// @notice Propose a new pair deployment. Requires minimum 4000 USDC: 1k UMA bond + 3k+ seed.
-    /// @param baseFeedId Pyth price feed ID for the base asset, or a composite feed ID registered
-    ///        on the BazaarOracle (for assets quoted in a non-USD currency). A raw ID must already
-    ///        hold a price in this chain's Pyth contract: post one update for a feed that has never
-    ///        been pulled here before proposing. No other live pair may price the same raw feed,
-    ///        directly or as a composite's base leg (see pairAddressByBaseFeed).
+    /// @param baseFeedId Pyth Pro feed ID for the base asset, a non-zero 32-bit integer held in a
+    ///        bytes32, or a composite feed ID registered on the BazaarOracle (for assets quoted in
+    ///        a non-USD currency). No other live pair may price the same raw feed, directly or as a
+    ///        composite's base leg (see pairAddressByBaseFeed).
     /// @param isContinuouslyTraded True if asset trades 24/7 (crypto), false for assets with trading hours (stocks).
     ///        Must be false for composite (non-USD-quoted) pairs — FX rates are not live 24/7.
     /// @param totalAmount Total deposit in BAZAAR_SCALE (1e18). Minimum 4000 USDC. 1k goes to UMA bond, rest is seed.
@@ -433,20 +432,18 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
         (bytes32 compositeBaseLeg,,) = oracle.composites(baseFeedId);
         if (compositeBaseLeg != bytes32(0)) {
             if (isContinuouslyTraded) revert Factory__CompositePairMustBeNonContinuous();
-        } else {
-            // An ID that is not a registered composite must be a feed Pyth has stored a price for
-            // on this chain. The composite registry is permissionless and write-once, and the pair
-            // resolves its feed ID through it on every read, so without this an unregistered
-            // composite hash would pass here as a single feed: the claim would omit the FX leg and
-            // its direction, the guard above would not run, and registering the legs after
-            // approval would turn the deployed pair into a composite market UMA never reviewed.
-            // A stored Pyth price rules that out, because a composite can only ever be registered
-            // under the hash of its legs, never under a real feed ID. The same read rejects a
-            // mistyped ID before the seed is escrowed against a pair that could never price.
-            try oracle.pyth().getPriceUnsafe(baseFeedId) {}
-            catch {
-                revert Factory__FeedNotOnPyth(baseFeedId);
-            }
+        } else if (!oracle.isRawFeedId(baseFeedId)) {
+            // An ID that is not a registered composite must have the form of a Pyth Pro feed ID.
+            // The composite registry is permissionless and write-once, and the pair resolves its
+            // feed ID through it on every read, so without this an unregistered composite hash
+            // would pass here as a single feed: the claim would omit the FX leg and its direction,
+            // the guard above would not run, and registering the legs after approval would turn
+            // the deployed pair into a composite market UMA never reviewed. The form rules that
+            // out, because a composite can only ever be registered under the hash of its legs, and
+            // a hash small enough to pass as a 32-bit integer is not something anyone can produce.
+            // Whether Pyth publishes a feed under the ID is not something this chain can see; it
+            // is the first thing the claim asks UMA to verify.
+            revert Factory__InvalidFeedId(baseFeedId);
         }
 
         // Fail closed while the protocol's identifier is off UMA's live whitelist: no dispute on a
@@ -906,8 +903,10 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
 
     /// @dev Builds the UMA claim for a pair deployment proposal. Composite feed IDs are
     ///      resolved to their underlying Pyth legs so verifiers can check them against the
-    ///      Pyth registry (a composite ID itself does not exist on Pyth). The numbered checks
-    ///      come from ClaimTextLib, so their text stays out of the factory's EIP-170 budget.
+    ///      Pyth Pro registry (a composite ID itself does not exist on Pyth). Raw feed IDs are
+    ///      written in decimal, the form that registry lists them in; the pair ID and a composite
+    ///      ID are written in hex. The numbered checks come from ClaimTextLib, so their text stays
+    ///      out of the factory's EIP-170 budget.
     function _buildDeploymentClaim(bytes32 baseFeedId, bool isContinuouslyTraded, string calldata description)
         internal
         view
@@ -917,17 +916,17 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
 
         bytes memory feedSection;
         if (legBaseId == bytes32(0)) {
-            feedSection = abi.encodePacked(". Base feed ID: ", Strings.toHexString(uint256(baseFeedId)));
+            feedSection = abi.encodePacked(". Base feed ID (Pyth Pro): ", Strings.toString(uint256(baseFeedId)));
         } else {
             feedSection = abi.encodePacked(
                 ". Composite feed ID (USD price = base leg ",
                 legInvertQuote ? "DIVIDED by" : "MULTIPLIED by",
                 " quote leg): ",
                 Strings.toHexString(uint256(baseFeedId)),
-                ". Base leg feed ID (asset in its native currency): ",
-                Strings.toHexString(uint256(legBaseId)),
-                ". Quote leg feed ID (FX conversion to USD): ",
-                Strings.toHexString(uint256(legQuoteId)),
+                ". Base leg feed ID (Pyth Pro, asset in its native currency): ",
+                Strings.toString(uint256(legBaseId)),
+                ". Quote leg feed ID (Pyth Pro, FX conversion to USD): ",
+                Strings.toString(uint256(legQuoteId)),
                 ". Quote leg inverted: ",
                 legInvertQuote ? "true" : "false"
             );
@@ -943,8 +942,8 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
                 DESCRIPTION_FENCE_CLOSE,
                 ". Pair ID: ",
                 Strings.toHexString(uint256(baseFeedId)),
-                ". Pyth Core oracle: ",
-                Strings.toHexString(address(oracle.pyth()))
+                ". Pyth Pro verifier contract: ",
+                Strings.toHexString(address(oracle.pythLazer()))
             ),
             feedSection,
             abi.encodePacked(". Continuously traded: ", isContinuouslyTraded ? "true" : "false", "."),

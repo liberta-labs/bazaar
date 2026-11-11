@@ -29,9 +29,8 @@ contract RefreshPriceHealthTest is IntegrationBase {
         _stageHeldInventory(60_000 * BAZAAR_SCALE, fund / 2);
     }
 
-    /// @dev Refresh the BTC pair at `priceUsd` as the keeper. Ages Pyth's cache past
-    ///      MAX_PRICE_STALENESS first so the supplied update, not the cached tick, is the one
-    ///      stored and judged.
+    /// @dev Refresh the BTC pair at `priceUsd` as the keeper. Warps first: only an update generated
+    ///      in a later second than the stored price is stored and judged.
     function _refreshAt(uint256 priceUsd) internal {
         vm.warp(vm.getBlockTimestamp() + 30);
         bytes[] memory pu = _priceAt(priceUsd);
@@ -83,8 +82,7 @@ contract RefreshPriceHealthTest is IntegrationBase {
         // Warm the AAPL mark so the stale fallback has a price to resolve.
         bytes[] memory warm = _priceUpdateFor(AAPL_USD_FEED_ID, 150, uint64(vm.getBlockTimestamp()));
         vm.deal(address(this), 1 ether);
-        mockPyth.updatePriceFeeds{value: mockPyth.getUpdateFee(warm)}(warm);
-        aaplPair.refreshPrice(new bytes[](0));
+        aaplPair.refreshPrice(warm);
 
         (,,,,, uint256 fund,,,,,,) = aaplPair.pairVault();
         // One unit long at an $8k entry with half the fund seized: at the $150 mark the loss
@@ -92,7 +90,7 @@ contract RefreshPriceHealthTest is IntegrationBase {
         _stageHeldInventory(aaplPair, 8_000 * BAZAAR_SCALE, fund / 2);
         assertGt(7_850 * BAZAAR_SCALE - fund / 2, fund / 2, "fixture clears the ADL trigger");
 
-        // Age the cache past MAX_PRICE_STALENESS so empty calldata resolves the stale fallback.
+        // Age the stored price past MAX_PRICE_STALENESS so empty calldata resolves the stale fallback.
         vm.warp(vm.getBlockTimestamp() + 30);
         aaplPair.refreshPrice(new bytes[](0));
         assertFalse(aaplPair.isAdlPending(), "a stale mark never opens a window");
@@ -105,8 +103,8 @@ contract RefreshPriceHealthTest is IntegrationBase {
     }
 
     /// @notice Once a settlement price is fixed the auction state must not move, so the refresh
-    ///         keeps storing prices but no longer judges health — even against inventory that
-    ///         would otherwise trip the trigger.
+    ///         stores no price and no longer judges health — even against inventory that would
+    ///         otherwise trip the trigger.
     function test_refreshPrice_afterSettlementFixed_doesNotTouchAdlState() public {
         _stageDriftingInventory();
         vm.prank(pair.umaContract());

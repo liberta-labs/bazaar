@@ -82,7 +82,7 @@ interface IBazaarFactory {
     error Factory__SeedBelowMinimum();
     error Factory__DescriptionInvalid();
     error Factory__CompositePairMustBeNonContinuous();
-    error Factory__FeedNotOnPyth(bytes32 feedId);
+    error Factory__InvalidFeedId(bytes32 feedId);
     error Factory__IdentifierUpgradeStillPending();
     error Factory__IdentifierUpgradeNoChange();
     error Factory__InvalidIdentifier();

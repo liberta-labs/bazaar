@@ -223,7 +223,7 @@ type Pair @entity(immutable: false) {
   pairId: Bytes!
   factory: Bytes!
   deployer: Account!
-  "The Pyth feed or registered composite the pair prices from."
+  "The Pyth Pro feed ID, held in a bytes32, or the registered composite the pair prices from."
   baseFeedId: Bytes!
   description: String!
   isContinuouslyTraded: Boolean!

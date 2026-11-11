@@ -47,7 +47,7 @@ contract InsuranceForwardExitTest is IntegrationBase {
     function _refresh(BazaarPair p, bytes32 feedId, uint256 priceUsd) internal {
         vm.warp(vm.getBlockTimestamp() + 4);
         bytes[] memory pu = _priceUpdateFor(feedId, priceUsd, uint64(vm.getBlockTimestamp()));
-        uint256 fee = oracle.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         vm.deal(keeper, fee);
         vm.prank(keeper);
         p.refreshPrice{value: fee}(pu);
@@ -343,9 +343,9 @@ contract InsuranceForwardExitTest is IntegrationBase {
         assertEq(storedAfter, storedTs, "the refused claim stored nothing");
 
         // A keeper stores the reopen; the claim now opens a reopen delay after it.
-        vm.deal(keeper, oracle.getUpdateFee(reopen));
+        vm.deal(keeper, oracle.getUpdateFee(reopen.length));
         vm.prank(keeper);
-        aaplPair.refreshPrice{value: oracle.getUpdateFee(reopen)}(reopen);
+        aaplPair.refreshPrice{value: oracle.getUpdateFee(reopen.length)}(reopen);
         (,,, opensTs,) = lens.getInsuranceWithdrawalLock(address(aaplPair), carol);
         assertEq(opensTs, reopenTs + REOPEN_DELAY, "the reopen pushed the claim back");
 

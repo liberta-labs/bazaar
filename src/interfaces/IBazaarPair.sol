@@ -325,7 +325,7 @@ interface IBazaarPair {
 
     // -------------------- Functions --------------------
 
-    // Every `priceUpdate` argument is Pyth update data paid for from msg.value, and the pair refunds
+    // Every `priceUpdate` argument is Pyth Pro update data paid for from msg.value, and the pair refunds
     // the caller whatever ETH the call does not spend. The trading, collateral and insurance functions
     // also take (nonce, deadline, relayerFee, signature) and can be relayed: a non-empty signature acts
     // for its EIP-712 signer and accrues the relayer fee to the caller, an empty one acts for the caller.

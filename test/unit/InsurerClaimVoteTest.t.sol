@@ -3,6 +3,7 @@ pragma solidity 0.8.34;
 
 import {Test} from "forge-std/Test.sol";
 import {BazaarFactory} from "../../src/BazaarFactory.sol";
+import {BazaarOracle} from "../../src/BazaarOracle.sol";
 import {BazaarPair} from "../../src/BazaarPair.sol";
 import {BazaarPairTerminator} from "../../src/BazaarPairTerminator.sol";
 import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
@@ -12,11 +13,10 @@ import {HelperConfig} from "../../script/HelperConfig.s.sol";
 import {MockArbSys} from "../mocks/MockArbSys.sol";
 import {MockOptimisticOracleV3} from "../mocks/MockOptimisticOracleV3.sol";
 import {IOptimisticOracleV3CallbackRecipient, IERC20Minimal} from "../../src/interfaces/IUmaOptimisticOracleV3.sol";
-import {MockPyth} from "@pythnetwork/pyth-sdk-solidity/MockPyth.sol";
-import {PythErrors} from "@pythnetwork/pyth-sdk-solidity/PythErrors.sol";
+import {MockPythLazer} from "../mocks/MockPythLazer.sol";
+import {LazerUpdate} from "../LazerUpdate.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
-import {PythSeed} from "../PythSeed.sol";
-import {PythChain} from "../PythChain.sol";
+import {LazerChain} from "../LazerChain.sol";
 
 /// @notice Every UMA termination claim opens an insurer vote on its own cutoff. The vote may latch
 ///         the cutoff before the claim resolves; the pair then waits for the verdict and settles
@@ -26,7 +26,7 @@ import {PythChain} from "../PythChain.sol";
 ///         settles the same way at the dissent-scaled rate. A cutoff nearer than the liveness is
 ///         met as proposed only through the vote; without it, the claim's late acceptance moves it.
 contract InsurerClaimVoteTest is Test {
-    bytes32 constant BTC_USD_FEED_ID = 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43;
+    bytes32 constant BTC_USD_FEED_ID = bytes32(uint256(1));
     uint256 constant BAZAAR_SCALE = 1e18;
     uint256 constant USDC_SCALE = 1e6;
     uint256 constant PROPOSAL_TOTAL = 5_000 * BAZAAR_SCALE;
@@ -45,7 +45,7 @@ contract InsurerClaimVoteTest is Test {
     BazaarPairTerminator terminator;
     MockOptimisticOracleV3 oo;
     MockUSDC usdc;
-    MockPyth mockPyth;
+    MockPythLazer mockPyth;
 
     address deployer = makeAddr("deployer");
     address insurer = makeAddr("insurer"); // a small mature stake that never votes
@@ -66,8 +66,7 @@ contract InsurerClaimVoteTest is Test {
         usdc = MockUSDC(usdcAddr);
         terminator = factory.pairTerminator();
         oo = MockOptimisticOracleV3(address(factory.oo()));
-        mockPyth = MockPyth(address(factory.oracle().pyth()));
-        PythSeed.seed(address(mockPyth), BTC_USD_FEED_ID);
+        mockPyth = MockPythLazer(address(factory.oracle().pythLazer()));
 
         usdc.mint(deployer, PROPOSAL_TOTAL / 1e12);
         vm.startPrank(deployer);
@@ -84,8 +83,8 @@ contract InsurerClaimVoteTest is Test {
         vm.warp(vm.getBlockTimestamp() + 8 days); // the shares mature
 
         // The pair's stored price: the last print before the closed session.
-        bytes[] memory pu = _tick(50_000, _now(), _now() - 1);
-        pair.refreshPrice{value: factory.oracle().getUpdateFee(pu)}(pu);
+        bytes[] memory pu = _live(50_000, _now());
+        pair.refreshPrice{value: factory.oracle().getUpdateFee(pu.length)}(pu);
         (uint256 stored,,,,) = pair.lastPairPrice();
         assertEq(stored, STORED_PRICE, "fixture: the stored price");
         umaBond = terminator.requiredTerminationBond();
@@ -111,23 +110,26 @@ contract InsurerClaimVoteTest is Test {
         vm.stopPrank();
     }
 
-    /// @dev A BTC print at `priceUsd` published at `publishTime`, whose predecessor was published at
-    ///      `prevPublishTime`: it is the first print at or after any instant in between.
-    function _tick(uint256 priceUsd, uint64 publishTime, uint64 prevPublishTime)
-        internal
-        view
-        returns (bytes[] memory pu)
-    {
+    /// @dev A live BTC update at `priceUsd`, generated in second `generatedTs`.
+    function _live(uint256 priceUsd, uint64 generatedTs) internal pure returns (bytes[] memory) {
         int64 price = int64(int256(priceUsd * 1e8));
         uint64 conf = uint64(priceUsd * 1e8 / 1000);
-        pu = new bytes[](1);
-        pu[0] = mockPyth.createPriceFeedUpdateData(
-            BTC_USD_FEED_ID, price, conf, -8, price, conf, publishTime, prevPublishTime
-        );
+        return LazerUpdate.one(LazerUpdate.live(BTC_USD_FEED_ID, price, conf, -8, generatedTs));
+    }
+
+    /// @dev The one-second update stamped at the cutoff `cutoff`, carrying BTC at `priceUsd`
+    ///      generated in second `generatedTs`: what UMA's rule settles the pair on.
+    function _tick(uint256 priceUsd, uint64 cutoff, uint64 generatedTs) internal pure returns (bytes[] memory) {
+        return LazerUpdate.one(LazerChain.tick(BTC_USD_FEED_ID, priceUsd, cutoff, generatedTs));
+    }
+
+    /// @dev The refusal of a call under UMA's rule that brings no update for the cutoff's tick.
+    function _noTick() internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(BazaarOracle.BazaarOracle__FeedNotInUpdate.selector, BTC_USD_FEED_ID);
     }
 
     function _fee(bytes[] memory pu) internal view returns (uint256) {
-        return pu.length == 0 ? 0 : factory.oracle().getUpdateFee(pu);
+        return pu.length == 0 ? 0 : factory.oracle().getUpdateFee(pu.length);
     }
 
     /// @dev The UMA proposer files a structural-change claim for `lastTradingTs`; its vote opens.
@@ -162,13 +164,18 @@ contract InsurerClaimVoteTest is Test {
         terminator.terminateScheduledPair{value: _fee(pu)}(address(pair), pu);
     }
 
-    /// @dev A chain of $`priceUsd` prints, the first published at `firstPublish` after a print at `firstPrev`.
-    function _chain(uint256 priceUsd, uint64 firstPublish, uint64 firstPrev) internal view returns (bytes[] memory) {
-        return PythChain.flat(mockPyth, BTC_USD_FEED_ID, priceUsd, firstPublish, firstPrev);
+    /// @dev A chain of $`priceUsd` samples for a cutoff at `target`, the first at `firstTick`
+    ///      after a feed quiet since `quietSince` when that tick is not the cutoff's own.
+    function _chain(uint256 priceUsd, uint64 target, uint64 firstTick, uint64 quietSince)
+        internal
+        pure
+        returns (bytes[] memory)
+    {
+        return LazerChain.flat(BTC_USD_FEED_ID, priceUsd, target, firstTick, quietSince);
     }
 
     function _chainFee(bytes[] memory pu) internal view returns (uint256) {
-        return factory.oracle().getSampleSetFee(BTC_USD_FEED_ID, pu);
+        return factory.oracle().getUpdateFee(pu.length);
     }
 
     function _settleChain(bytes[] memory pu) internal {
@@ -293,14 +300,14 @@ contract InsurerClaimVoteTest is Test {
         assertEq(terminator.getLockedShares(address(pair), majority), MAJORITY_SHARES, "locked until the cutoff");
 
         vm.warp(tCut + 10);
-        bytes[] memory windowPrint = _tick(49_000, tCut - 1, tCut - 5);
-        uint256 fee = _fee(windowPrint);
+        bytes[] memory cutoffTick = _tick(49_000, tCut, tCut - 1);
+        uint256 fee = _fee(cutoffTick);
         vm.expectRevert(
             abi.encodeWithSelector(
                 BazaarPairTerminator.BazaarPairTerminator__InsurerVerdictPending.selector, filing + VERDICT_GRACE
             )
         );
-        terminator.terminateScheduledPair{value: fee}(address(pair), windowPrint);
+        terminator.terminateScheduledPair{value: fee}(address(pair), cutoffTick);
         assertEq(pair.settlementPriceFixedTs(), 0, "nothing fixed while the verdict is pending");
 
         vm.warp(filing + LIVENESS + 1);
@@ -309,11 +316,9 @@ contract InsurerClaimVoteTest is Test {
         emit BazaarPairTerminator.TerminationProposalAccepted(address(pair), aid, tCut);
         vm.expectEmit(true, true, false, true, address(terminator));
         emit BazaarPairTerminator.InsurerTerminationOutcome(address(pair), aid, outcomeTrue, false, 0);
-        terminator.terminateScheduledPair{value: fee}(address(pair), windowPrint);
+        terminator.terminateScheduledPair{value: fee}(address(pair), cutoffTick);
 
-        assertEq(
-            _settlementPrice(), 49_000 * BAZAAR_SCALE, "settled at the first print of the window before the cutoff"
-        );
+        assertEq(_settlementPrice(), 49_000 * BAZAAR_SCALE, "settled at the price the cutoff's tick carries");
         assertEq(_verdict(aid), terminator.VERDICT_TRUE(), "verdict recorded");
         assertEq(terminator.acceptedTerminationAssertionId(address(pair)), aid, "the acceptance in force");
         assertEq(terminator.umaCutoffCap(address(pair)), tCut, "its cutoff is the cap a later claim must beat");
@@ -328,8 +333,8 @@ contract InsurerClaimVoteTest is Test {
 
     /// @notice A dispute the DVM upholds days after the cutoff: the grace counts from when the
     ///         verdict is recorded, not from the cutoff, so for SCHEDULED_TERMINATION_GRACE after
-    ///         that only the window's print settles the pair. Once it has passed with no print, the
-    ///         pair settles at its stored price, the last print before the closed session.
+    ///         that only the cutoff's tick settles the pair. Once it has passed with no tick
+    ///         supplied, the pair settles at its stored price.
     function test_ClaimVote_TrueAfterDispute_GraceRunsFromTheVerdict() public {
         uint64 filing = _now();
         uint64 tCut = filing + 3 hours;
@@ -351,11 +356,11 @@ contract InsurerClaimVoteTest is Test {
         _ruleAndSettle(aid, true);
         assertEq(_verdict(aid), terminator.VERDICT_TRUE(), "upheld");
         (uint8 rule,,, uint256 lastResortTs,) = _rule();
-        assertEq(rule, terminator.SETTLE_WINDOW(), "UMA's rule");
+        assertEq(rule, terminator.SETTLE_TICK(), "UMA's rule");
         assertEq(lastResortTs, verdictTs + GRACE, "the grace counts from the recorded verdict");
 
         vm.warp(verdictTs + GRACE);
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
+        vm.expectRevert(_noTick());
         _settle(new bytes[](0));
 
         vm.warp(verdictTs + GRACE + 1);
@@ -368,8 +373,8 @@ contract InsurerClaimVoteTest is Test {
     }
 
     /// @notice Inside the grace a late verdict opens, an empty call is still refused and the
-    ///         window's first print settles the pair, days after the cutoff it was published at.
-    function test_ClaimVote_TrueAfterDispute_WindowPrintInsideTheGrace() public {
+    ///         cutoff's tick settles the pair, days after the cutoff it is stamped with.
+    function test_ClaimVote_TrueAfterDispute_CutoffTickInsideTheGrace() public {
         uint64 filing = _now();
         uint64 tCut = filing + 3 hours;
         bytes32 aid = _proposeClaim(tCut);
@@ -382,17 +387,17 @@ contract InsurerClaimVoteTest is Test {
         _ruleAndSettle(aid, true);
 
         vm.warp(verdictTs + GRACE - 1);
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
+        vm.expectRevert(_noTick());
         _settle(new bytes[](0));
-        _settle(_tick(49_000, tCut - 1, tCut - 5));
-        assertEq(_settlementPrice(), 49_000 * BAZAAR_SCALE, "settled at the window's first print");
+        _settle(_tick(49_000, tCut, tCut - 1));
+        assertEq(_settlementPrice(), 49_000 * BAZAAR_SCALE, "settled at the cutoff's tick");
     }
 
     /// @notice A TRUE ruling nobody recorded by the verdict deadline still decides the settlement.
     ///         The view cannot see it and reports the chain rule, but a call records it and settles
     ///         under UMA's rule with the grace starting at once: a chain and an empty call both
-    ///         revert and take the recording with them, and the window's print settles the pair.
-    function test_ClaimVote_TrueRuledUnrecordedPastTheDeadline_WindowRule() public {
+    ///         revert and take the recording with them, and the cutoff's tick settles the pair.
+    function test_ClaimVote_TrueRuledUnrecordedPastTheDeadline_TickRule() public {
         uint64 filing = _now();
         uint64 tCut = filing + 3 hours;
         bytes32 aid = _proposeClaim(tCut);
@@ -405,16 +410,16 @@ contract InsurerClaimVoteTest is Test {
         (uint8 rule,,,,) = _rule();
         assertEq(rule, terminator.SETTLE_CHAIN(), "the view cannot see an unrecorded ruling");
 
-        bytes[] memory samples = _chain(44_000, tCut + 30 minutes, tCut - 1);
+        bytes[] memory samples = _chain(44_000, tCut, tCut + 30 minutes, tCut - 1);
         uint256 fee = _chainFee(samples);
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
+        vm.expectPartialRevert(BazaarOracle.BazaarOracle__WrongTick.selector);
         terminator.terminateScheduledPair{value: fee}(address(pair), samples);
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
+        vm.expectRevert(_noTick());
         _settle(new bytes[](0));
         assertEq(_verdict(aid), terminator.VERDICT_PENDING(), "both attempts took the recording with them");
 
-        _settle(_tick(49_000, tCut - 1, tCut - 5));
-        assertEq(_settlementPrice(), 49_000 * BAZAAR_SCALE, "settled at the window's first print");
+        _settle(_tick(49_000, tCut, tCut - 1));
+        assertEq(_settlementPrice(), 49_000 * BAZAAR_SCALE, "settled at the cutoff's tick");
         (bool costed, uint8 outcome,) = _outcome(aid);
         assertEq(outcome, terminator.OUTCOME_TRUE(), "upheld");
         assertFalse(costed, "not costed");
@@ -437,11 +442,11 @@ contract InsurerClaimVoteTest is Test {
 
         vm.mockCallRevert(address(oo), abi.encodeCall(MockOptimisticOracleV3.getAssertion, (aid)), "gone");
         (uint8 rule,,, uint256 lastResortTs,) = _rule();
-        assertEq(rule, terminator.SETTLE_WINDOW(), "UMA's rule");
+        assertEq(rule, terminator.SETTLE_TICK(), "UMA's rule");
         assertEq(lastResortTs, recordedTs + GRACE, "the grace counts from the recording");
 
         vm.warp(recordedTs + GRACE);
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
+        vm.expectRevert(_noTick());
         _settle(new bytes[](0));
         vm.warp(recordedTs + GRACE + 1);
         _settle(new bytes[](0));
@@ -463,7 +468,7 @@ contract InsurerClaimVoteTest is Test {
         vm.warp(tCut + 6 hours);
         terminator.settleTerminationProposal(aid);
         (uint8 rule,,, uint256 lastResortTs,) = _rule();
-        assertEq(rule, terminator.SETTLE_WINDOW(), "UMA's rule");
+        assertEq(rule, terminator.SETTLE_TICK(), "UMA's rule");
         assertEq(lastResortTs, tCut + GRACE, "the grace counts from the cutoff, not the recording");
 
         vm.warp(tCut + GRACE + 1);
@@ -498,14 +503,14 @@ contract InsurerClaimVoteTest is Test {
 
         vm.warp(tCut + 1);
         (uint8 rule,,, uint256 lastResortTs,) = _rule();
-        assertEq(rule, terminator.SETTLE_WINDOW(), "UMA's rule");
+        assertEq(rule, terminator.SETTLE_TICK(), "UMA's rule");
         assertEq(lastResortTs, tCut + GRACE, "the grace counts from the cutoff");
     }
 
     /// @notice A verdict the settlement call records itself starts the grace at once: days past
-    ///         the cutoff, a call without the window's print reverts and takes the recording with
+    ///         the cutoff, a call without the cutoff's tick reverts and takes the recording with
     ///         it, so nobody can record a late verdict and fall back to the stored price in one
-    ///         transaction. The window's print then settles the pair and records the verdict.
+    ///         transaction. The cutoff's tick then settles the pair and records the verdict.
     function test_ClaimVote_VerdictRecordedBySettlement_StartsTheGraceAtOnce() public {
         uint64 filing = _now();
         uint64 tCut = filing + 3 hours;
@@ -516,13 +521,13 @@ contract InsurerClaimVoteTest is Test {
 
         vm.warp(filing + 5 days);
         oo.mockDvmResolve(aid, true); // the DVM has ruled; nobody has recorded it
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
+        vm.expectRevert(_noTick());
         _settle(new bytes[](0));
         assertEq(_verdict(aid), terminator.VERDICT_PENDING(), "the recording reverted with the call");
         assertEq(pair.settlementPriceFixedTs(), 0, "nothing fixed");
 
-        _settle(_tick(49_000, tCut - 1, tCut - 5));
-        assertEq(_settlementPrice(), 49_000 * BAZAAR_SCALE, "settled at the window's first print");
+        _settle(_tick(49_000, tCut, tCut - 1));
+        assertEq(_settlementPrice(), 49_000 * BAZAAR_SCALE, "settled at the cutoff's tick");
         assertEq(_verdict(aid), terminator.VERDICT_TRUE(), "recorded with the fix");
     }
 
@@ -543,11 +548,11 @@ contract InsurerClaimVoteTest is Test {
 
         vm.warp(tCut + 1);
         (uint8 rule,,, uint256 lastResortTs,) = _rule();
-        assertEq(rule, terminator.SETTLE_WINDOW(), "UMA's rule");
+        assertEq(rule, terminator.SETTLE_TICK(), "UMA's rule");
         assertEq(lastResortTs, tCut + GRACE, "the grace counts from the cutoff");
 
         vm.warp(tCut + GRACE);
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
+        vm.expectRevert(_noTick());
         _settle(new bytes[](0));
 
         vm.warp(tCut + GRACE + 1);
@@ -567,13 +572,13 @@ contract InsurerClaimVoteTest is Test {
 
         vm.warp(tCut + GRACE + 1);
         (uint8 rule,,, uint256 lastResortTs,) = _rule();
-        assertEq(rule, terminator.SETTLE_WINDOW(), "upheld: UMA's rule");
+        assertEq(rule, terminator.SETTLE_TICK(), "upheld: UMA's rule");
         assertEq(lastResortTs, filing + LIVENESS + GRACE, "the grace counts from the end of the liveness");
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
+        vm.expectRevert(_noTick());
         _settle(new bytes[](0));
 
         vm.warp(filing + LIVENESS + GRACE);
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
+        vm.expectRevert(_noTick());
         _settle(new bytes[](0));
 
         vm.warp(filing + LIVENESS + GRACE + 1);
@@ -601,11 +606,11 @@ contract InsurerClaimVoteTest is Test {
         terminator.settleTerminationProposal(aid);
         assertEq(_verdict(aid), terminator.VERDICT_FALSE(), "rejected");
 
-        bytes[] memory pre = _chain(49_000, tCut - 1, tCut - 5);
+        bytes[] memory pre = _chain(49_000, tCut, tCut - 1, tCut - 5);
         uint256 preFee = _chainFee(pre);
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
+        vm.expectPartialRevert(BazaarOracle.BazaarOracle__SampleNotProven.selector);
         terminator.terminateScheduledPair{value: preFee}(address(pair), pre);
-        bytes[] memory post = _chain(44_000, tCut + 30 minutes, tCut - 1);
+        bytes[] memory post = _chain(44_000, tCut, tCut + 30 minutes, tCut - 1);
         uint256 postFee = _chainFee(post);
         uint8 outcomeFalse = terminator.OUTCOME_FALSE();
         vm.expectEmit(true, true, false, true, address(terminator));
@@ -653,7 +658,7 @@ contract InsurerClaimVoteTest is Test {
         terminator.executeInsurerTermination(address(pair), aid);
         _dispute(aid);
 
-        bytes[] memory post = _chain(44_000, tCut + 30 minutes, tCut - 1);
+        bytes[] memory post = _chain(44_000, tCut, tCut + 30 minutes, tCut - 1);
         uint256 fee = _chainFee(post);
         vm.warp(filing + VERDICT_GRACE - 1);
         vm.expectRevert(
@@ -720,7 +725,7 @@ contract InsurerClaimVoteTest is Test {
 
         vm.warp(tCut + 1);
         assertEq(terminator.getLockedShares(address(pair), majority), 0, "released at the cutoff");
-        _settle(_tick(49_000, tCut - 1, tCut - 5));
+        _settle(_tick(49_000, tCut, tCut - 1));
         assertEq(_settlementPrice(), 49_000 * BAZAAR_SCALE, "UMA's rule");
         (bool costed, uint8 outcome,) = _outcome(aid);
         assertEq(outcome, terminator.OUTCOME_NONE(), "nothing stamped: the vote did not schedule the pair");
@@ -754,8 +759,8 @@ contract InsurerClaimVoteTest is Test {
         assertEq(pair.scheduledTerminationTs(), cutoffTs, "scheduled a lead past the late acceptance");
         assertFalse(terminator.insurerScheduled(address(pair)), "a UMA schedule, not the vote's");
         (uint8 rule,, uint256 latestPublishTs,,) = _rule();
-        assertEq(rule, terminator.SETTLE_WINDOW(), "settles under UMA's rule");
-        assertEq(latestPublishTs, cutoffTs, "in the window ending at the moved cutoff");
+        assertEq(rule, terminator.SETTLE_TICK(), "settles under UMA's rule");
+        assertEq(latestPublishTs, cutoffTs, "at the tick of the moved cutoff");
     }
 
     /// @notice Once the vote has latched and its claim is upheld, the claim's cutoff is the UMA
@@ -795,7 +800,7 @@ contract InsurerClaimVoteTest is Test {
         _voteMajority(aid);
 
         vm.warp(start + InsuranceVaultLib.INSURANCE_WITHDRAWAL_COOLDOWN + 1 hours);
-        bytes[] memory pu = _tick(50_000, _now(), _now() - 1);
+        bytes[] memory pu = _live(50_000, _now());
         uint256 fee = _fee(pu);
         vm.prank(majority);
         vm.expectRevert(InsuranceVaultLib.InsuranceVaultLib__SharesLockedForVoting.selector);
@@ -828,7 +833,7 @@ contract InsurerClaimVoteTest is Test {
         assertEq(terminator.umaCutoffCap(address(pair)), 0, "no cap from a cutoff before the halt");
         assertEq(terminator.acceptedTerminationAssertionId(address(pair)), bytes32(0), "no acceptance in force");
 
-        _settleChain(_chain(44_000, tZ + 30 minutes, tZ - 1));
+        _settleChain(_chain(44_000, tZ, tZ + 30 minutes, tZ - 1));
         (bool costed,,) = _outcome(bare);
         assertTrue(costed, "the bare vote is costed");
     }
@@ -859,12 +864,12 @@ contract InsurerClaimVoteTest is Test {
         assertEq(terminator.umaCutoffCap(address(pair)), tNear, "capped at the claim's own cutoff");
 
         // A chain from half an hour past the halt publishes its last sample past the claim's cutoff.
-        bytes[] memory late = _chain(44_000, tZ + 30 minutes, tZ - 1);
+        bytes[] memory late = _chain(44_000, tZ, tZ + 30 minutes, tZ - 1);
         uint256 lateFee = _chainFee(late);
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
+        vm.expectPartialRevert(BazaarOracle.BazaarOracle__SampleTooLate.selector);
         terminator.terminateScheduledPair{value: lateFee}(address(pair), late);
 
-        _settleChain(_chain(44_000, tZ, tZ - 1));
+        _settleChain(_chain(44_000, tZ, tZ, tZ - 1));
         assertEq(_settlementPrice(), 44_000 * BAZAAR_SCALE, "the chain inside the cap settles the pair");
         (bool costed,,) = _outcome(bare);
         assertFalse(costed, "the vote met a cutoff UMA verified");
@@ -935,8 +940,8 @@ contract InsurerClaimVoteTest is Test {
     }
 
     /// @notice An undisputed claim past its liveness reads as upheld before anyone settles it, so
-    ///         the vote it backs settles under UMA's window rule.
-    function test_SettlementRule_UndisputedPastLivenessIsTheWindow() public {
+    ///         the vote it backs settles under UMA's tick rule.
+    function test_SettlementRule_UndisputedPastLivenessIsTheTick() public {
         uint64 filing = _now();
         uint64 tCut = filing + 3 hours;
         bytes32 aid = _proposeClaim(tCut);
@@ -945,24 +950,24 @@ contract InsurerClaimVoteTest is Test {
 
         vm.warp(filing + LIVENESS + 1);
         (uint8 rule, uint256 firstTarget, uint256 latestPublishTs, uint256 lastResortTs, uint256 deadline) = _rule();
-        assertEq(rule, terminator.SETTLE_WINDOW(), "upheld: UMA's rule");
-        assertEq(firstTarget, tCut - 3, "the window opens MAX_PRICE_STALENESS before the cutoff");
-        assertEq(latestPublishTs, tCut, "and closes at it");
+        assertEq(rule, terminator.SETTLE_TICK(), "upheld: UMA's rule");
+        assertEq(firstTarget, tCut, "the tick stamped at the cutoff");
+        assertEq(latestPublishTs, tCut, "and no other");
         assertEq(lastResortTs, filing + LIVENESS + GRACE, "the grace counts from the end of the liveness");
         assertEq(deadline, 0, "nothing to wait for");
     }
 
-    /// @notice A pair scheduled by UMA's own acceptance settles under the window rule.
-    function test_SettlementRule_UmaScheduleIsTheWindow() public {
+    /// @notice A pair scheduled by UMA's own acceptance settles under the tick rule.
+    function test_SettlementRule_UmaScheduleIsTheTick() public {
         uint64 tCut = _now() + 2 days;
         bytes32 aid = _proposeClaim(tCut);
         vm.warp(_now() + LIVENESS + 1);
         terminator.settleTerminationProposal(aid);
         assertFalse(terminator.insurerScheduled(address(pair)), "fixture: UMA scheduled the pair");
         (uint8 rule, uint256 firstTarget, uint256 latestPublishTs, uint256 lastResortTs,) = _rule();
-        assertEq(rule, terminator.SETTLE_WINDOW(), "UMA's rule");
-        assertEq(firstTarget, tCut - 3, "window start");
-        assertEq(latestPublishTs, tCut, "window end");
+        assertEq(rule, terminator.SETTLE_TICK(), "UMA's rule");
+        assertEq(firstTarget, tCut, "the tick stamped at the cutoff");
+        assertEq(latestPublishTs, tCut, "and no other");
         assertEq(lastResortTs, tCut + GRACE, "the grace counts from the cutoff");
     }
 
@@ -980,7 +985,7 @@ contract InsurerClaimVoteTest is Test {
         oo.mockDvmResolve(aid, false); // the DVM has ruled; nobody has settled the claim
 
         vm.warp(filing + VERDICT_GRACE + 1);
-        bytes[] memory samples = _chain(44_000, tCut + 30 minutes, tCut - 1);
+        bytes[] memory samples = _chain(44_000, tCut, tCut + 30 minutes, tCut - 1);
         OracleLockHolder holder = new OracleLockHolder(oo, terminator);
         holder.settleWhileLocked(address(pair), samples, IERC20Minimal(address(usdc)));
         assertTrue(holder.reentered(), "the call was made while OOv3 held its lock");

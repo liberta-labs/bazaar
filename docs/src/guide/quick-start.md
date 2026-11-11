@@ -5,14 +5,12 @@ This page sets up a **local development stack** — building, testing, and runni
 ## Prerequisites
 
 - [Foundry](https://book.getfoundry.sh/getting-started/installation) (forge, cast, anvil)
-- Node.js + npm (for the Pyth Solidity SDK)
 - `make`, `jq`
 
 ## Install & test
 
 ```bash
 git clone --recursive <repo-url> && cd bazaar
-npm install          # @pythnetwork/pyth-sdk-solidity
 forge build
 forge test
 ```
@@ -33,18 +31,18 @@ Then:
 
 ```bash
 make anvil           # terminal 1 — local node with tracing
-make deploy-anvil    # terminal 2 — full stack + MockPyth/MockUSDC/MockOOv3, mints 10,000 USDC
+make deploy-anvil    # terminal 2 — full stack + MockPythLazer/MockUSDC/MockOOv3, mints 10,000 USDC
 ```
 
 Deployed addresses land in `.anvil-addresses`. From there:
 
 ```bash
-# List a market (seeds a mock Pyth price for a feed the mock has never seen, proposes via
-# mock UMA, warps past liveness, settles)
-make deploy-pair-anvil FEED_ID=0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace DESC="ETH/USD" PRICE=2000
+# List a market (proposes via mock UMA, warps past liveness, settles, then stores a test price on
+# the new pair). FEED_ID is the Pyth Pro feed ID, a number: 2 is ETH/USD.
+make deploy-pair-anvil FEED_ID=2 DESC="ETH/USD" PRICE=2000
 
-# Push a fresh mock Pyth price
-make set-price-anvil FEED_ID=0xff61... PRICE=2000
+# Store a fresh test price on a pair (a signed update from script/dev-update.sh)
+make set-price-anvil PAIR=0x... PRICE=2000
 
 # Deposit collateral (USDC, whole dollars) — orders are margined against it
 make deposit-anvil PAIR=0x... AMOUNT=1000

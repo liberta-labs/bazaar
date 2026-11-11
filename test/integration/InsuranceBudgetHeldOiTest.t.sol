@@ -77,7 +77,7 @@ contract InsuranceBudgetHeldOiTest is IntegrationBase {
     /// @dev `user`'s paying call at the mark, expected to revert with `selector`.
     function _claimExpect(address user, bytes4 selector) internal {
         bytes[] memory pu = _priceAt(MARK_USD);
-        uint256 fee = oracle.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         vm.deal(user, fee);
         vm.prank(user);
         vm.expectRevert(selector);

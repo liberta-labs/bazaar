@@ -465,7 +465,7 @@ library RiskParamsLib {
     ///         REFRESH_BOUNTY_HEARTBEAT, which keeps the pair's stored price well inside
     ///         BazaarPairTerminator.ORACLE_DEAD_THRESHOLD, past which terminateStalePair could
     ///         settle the whole book at it. No fee-earning flow (fills, liquidations) has a reason
-    ///         to post Pyth updates to a quiet pair, so nothing else is paid to do either.
+    ///         to bring Pyth updates to a quiet pair, so nothing else is paid to do either.
     /// @dev Runs via DELEGATECALL in the pair's context, so msg.sender is the keeper. Only
     ///      BazaarPair.refreshPrice calls it, and only when the pair is not terminated (the
     ///      insurance fund backs settlement claims then). Every gate is a silent return, never

@@ -707,25 +707,24 @@ library BazaarTypes {
     ///      did not wait for to be settled, or for this much time beyond the escape hatch,
     ///      whichever comes first.
     uint256 internal constant INSURER_SWEEP_GRACE = 14 days;
-    /// @dev How far a Pyth publish time may sit from the block timestamp, in either direction,
-    ///      for the pair to act on the price; also the settlement window before a cutoff under
-    ///      UMA's rule. One number because the settlement print is the last print the pair would
-    ///      have accepted as current at the cutoff.
+    /// @dev How far the second a Pyth price was generated in may sit from the block timestamp, in
+    ///      either direction, for the pair to act on the price.
     uint256 internal constant MAX_PRICE_STALENESS = 3 seconds;
     /// @dev How long before a scheduled cutoff limbo begins: from then until the price is fixed
     ///      nothing trades, liquidates, deposits or withdraws. Nothing may trade once the
-    ///      settlement print can be public, and knowing it is enough: fills execute at makers'
-    ///      prices whatever print the transaction stores, so a trader who has seen the print can
-    ///      pick off every quote on the wrong side of it. With one window of lead the last trading
-    ///      block is stamped a second before the window opens, which hides the print only while
-    ///      Pyth's clock runs no further ahead of the block timestamp than a print takes to be
-    ///      delivered. Two windows stamp it a window and a second before, so it stays hidden until
-    ///      the skew passes a full window on top of that delivery time. The lead is kept that
-    ///      short because no position can be liquidated during it.
+    ///      settlement price can be public, and knowing it is enough: fills execute at makers'
+    ///      prices whatever price the transaction stores, so a trader who has seen the settlement
+    ///      price can pick off every quote on the wrong side of it. UMA's rule settles at the
+    ///      price Pyth carries at the cutoff, which a live feed generates within a moment of it. A
+    ///      call may carry a price generated up to MAX_PRICE_STALENESS ahead of its block's
+    ///      timestamp, so with one window of lead the last trading block, stamped a second before
+    ///      limbo, could act on a price generated a second before the cutoff. With two it can act
+    ///      on none generated later than a window and a second before the cutoff. The lead is kept
+    ///      that short because no position can be liquidated during it.
     uint256 internal constant LIMBO_LEAD = 2 * MAX_PRICE_STALENESS;
     /// @dev A cutoff is scheduled at least this far after the scheduling block: the limbo lead
-    ///      plus one second, so limbo begins after the block, and the settlement window opens a
-    ///      window and a second after it, the margin LIMBO_LEAD gives the last trading block.
+    ///      plus one second, so limbo begins after the block, which is then itself a last trading
+    ///      block with the margin LIMBO_LEAD gives one.
     uint256 internal constant MIN_CUTOFF_LEAD = LIMBO_LEAD + 1;
 
     // Order constants (shared between BazaarPair and OrderManagementLib)

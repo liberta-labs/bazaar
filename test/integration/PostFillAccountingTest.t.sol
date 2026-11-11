@@ -38,7 +38,7 @@ contract PostFillAccountingTest is IntegrationBase {
         internal
         returns (uint256)
     {
-        bytes[] memory pu = _freshPrice(); // build BEFORE the prank (external mockPyth call would consume it)
+        bytes[] memory pu = _freshPrice();
         BazaarTypes.OrderSpec memory s;
         s.orderType = BazaarTypes.OrderType.Limit;
         s.isLong = isLong;

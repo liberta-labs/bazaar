@@ -3,6 +3,7 @@ pragma solidity 0.8.34;
 
 import {IntegrationBase} from "./IntegrationBase.sol";
 import {StdStorage, stdStorage} from "forge-std/Test.sol";
+import {BazaarPair} from "../../src/BazaarPair.sol";
 import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 import {CollateralLib} from "../../src/libraries/CollateralLib.sol";
 import {BucketStore} from "../BucketStore.sol";
@@ -48,7 +49,7 @@ contract StaleAndRewardEdgeTest is IntegrationBase {
         (uint256[] memory ids,,,) = lens.getUserActiveLimitOrders(address(aaplPair), alice);
         assertEq(ids.length, 1, "fresh-price creation succeeds at 1x IMR");
 
-        // Cancel, stale the cache, retry with an empty update: the SAME 1x IMR still clears.
+        // Cancel, age the stored price, retry with an empty update: the SAME 1x IMR still clears.
         vm.prank(alice);
         aaplPair.cancelOrders(ids, 0, 0, 0, "", "");
         vm.warp(vm.getBlockTimestamp() + 30);
@@ -65,18 +66,17 @@ contract StaleAndRewardEdgeTest is IntegrationBase {
     ///         price convert that loss into vault deficit. The identical withdrawal clears the
     ///         moment a fresh price is supplied.
     function test_staleOracle_positionHolderWithdrawalBlocked() public {
-        // Warm the AAPL cache at $200 and give dave a healthy 1-share long with wide headroom.
+        // Store an AAPL price of $200 and give dave a healthy 1-share long with wide headroom.
         bytes[] memory pu = _priceUpdateFor(AAPL_USD_FEED_ID, 200, uint64(vm.getBlockTimestamp()));
         vm.deal(address(this), 1 ether);
-        mockPyth.updatePriceFeeds{value: mockPyth.getUpdateFee(pu)}(pu);
-        aaplPair.refreshPrice(new bytes[](0));
+        aaplPair.refreshPrice(pu);
 
         _depositAapl(dave, 200 * BAZAAR_SCALE);
         BucketStore.setIsLong(address(aaplPair), dave, true);
         BucketStore.setSize(address(aaplPair), dave, 1 * BAZAAR_SCALE); // size
         BucketStore.setEntryValue(address(aaplPair), dave, 200 * BAZAAR_SCALE); // entryValue
 
-        vm.warp(vm.getBlockTimestamp() + 30); // stale the cache (MAX_PRICE_STALENESS = 3s)
+        vm.warp(vm.getBlockTimestamp() + 30); // age the stored price out (MAX_PRICE_STALENESS = 3s)
         vm.prank(dave);
         vm.expectRevert(CollateralLib.CollateralLib__WithdrawalRequiresFreshPrice.selector);
         aaplPair.withdrawCollateral(10 * BAZAAR_SCALE, new bytes[](0), 0, 0, 0, "");
@@ -96,8 +96,7 @@ contract StaleAndRewardEdgeTest is IntegrationBase {
     function test_staleOracle_flatWithOrdersWithdrawalAllowed() public {
         bytes[] memory pu = _priceUpdateFor(AAPL_USD_FEED_ID, 200, uint64(vm.getBlockTimestamp()));
         vm.deal(address(this), 1 ether);
-        mockPyth.updatePriceFeeds{value: mockPyth.getUpdateFee(pu)}(pu);
-        aaplPair.refreshPrice(new bytes[](0));
+        aaplPair.refreshPrice(pu);
 
         // $100 collateral, one resting half-share bid at $150: order-IMR reserve = 40% x $75 = $30.
         _depositAapl(alice, 100 * BAZAAR_SCALE);
@@ -116,11 +115,10 @@ contract StaleAndRewardEdgeTest is IntegrationBase {
     /// @notice Non-continuous pairs liquidate on the stale-fallback price: bad debt is not left
     ///         hanging just because the market is closed.
     function test_staleLiquidation_nonContinuousPairProceeds() public {
-        // Warm the AAPL cache at $200, give dave a phantom insolvent long (entry $300).
+        // Store an AAPL price of $200, give dave a phantom insolvent long (entry $300).
         bytes[] memory pu = _priceUpdateFor(AAPL_USD_FEED_ID, 200, uint64(vm.getBlockTimestamp()));
         vm.deal(address(this), 1 ether);
-        mockPyth.updatePriceFeeds{value: mockPyth.getUpdateFee(pu)}(pu);
-        aaplPair.refreshPrice(new bytes[](0));
+        aaplPair.refreshPrice(pu);
 
         _depositAapl(dave, 10 * BAZAAR_SCALE);
         BucketStore.setIsLong(address(aaplPair), dave, true);
@@ -136,10 +134,11 @@ contract StaleAndRewardEdgeTest is IntegrationBase {
     /// @notice Continuous pairs REQUIRE a fresh price to liquidate — pinning the protocol posture
     ///         that BTC-style liquidations cannot run on stale data.
     function test_staleLiquidation_continuousPairRequiresFreshPrice() public {
+        pair.refreshPrice(_freshPrice());
         _setupInsolventAlice();
-        vm.warp(vm.getBlockTimestamp() + 30); // nothing fresh in the cache
+        vm.warp(vm.getBlockTimestamp() + 30); // the stored price is past MAX_PRICE_STALENESS
         vm.prank(bob);
-        vm.expectRevert();
+        vm.expectRevert(BazaarPair.BazaarPair__NoPriceUpdatesProvided.selector);
         pair.liquidate(_arr1(alice), new bytes[](0));
     }
 

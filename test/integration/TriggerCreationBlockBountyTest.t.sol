@@ -11,7 +11,7 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 /// @notice A trigger order the stale fallback left unarmed at creation pays its bounty to the
 ///         owner when it is fired in that same block, whoever fired it. On a session pair the
 ///         submitter decides whether a creation carries a price: `priceUpdate` sits outside the
-///         signed payload, and without one, once the Pyth cache is past MAX_PRICE_STALENESS, the
+///         signed payload, and without one, once the stored price is past MAX_PRICE_STALENESS, the
 ///         order runs on the stale fallback and a trigger the live price already meets does not
 ///         arm on arrival. A relayer that rests a signed stop that way and fires it itself in
 ///         the same block would otherwise collect a bounty the owner keeps when the creation
@@ -43,21 +43,20 @@ contract TriggerCreationBlockBountyTest is IntegrationBase {
         return _priceUpdateFor(AAPL_USD_FEED_ID, priceUsd, uint64(vm.getBlockTimestamp()));
     }
 
-    /// @dev Push `priceUsd` into Pyth's cache and store it as the pair's price, stamped now.
+    /// @dev Store `priceUsd`, stamped now, as the AAPL pair's price.
     function _storeAapl(uint256 priceUsd) internal {
         bytes[] memory pu = _aaplPu(priceUsd);
         vm.deal(address(this), 1 ether);
-        mockPyth.updatePriceFeeds{value: mockPyth.getUpdateFee(pu)}(pu);
-        aaplPair.refreshPrice(new bytes[](0));
+        aaplPair.refreshPrice(pu);
     }
 
-    /// @dev Age the Pyth cache past MAX_PRICE_STALENESS, so a call carrying no update runs on
+    /// @dev Age the stored price past MAX_PRICE_STALENESS, so a call carrying no update runs on
     ///      the stale fallback. The block number is untouched.
-    function _ageCache() internal {
+    function _ageStoredPrice() internal {
         vm.warp(vm.getBlockTimestamp() + BazaarTypes.MAX_PRICE_STALENESS + 1);
     }
 
-    /// @dev Rest or cross a Limit order on the AAPL pair against whatever the Pyth cache holds.
+    /// @dev Rest or cross a Limit order on the AAPL pair against the pair's stored price.
     function _placeAapl(address user, bool isLong, uint256 size, uint256 limitPrice) internal returns (uint256) {
         BazaarTypes.OrderSpec memory s;
         s.orderType = BazaarTypes.OrderType.Limit;
@@ -108,14 +107,14 @@ contract TriggerCreationBlockBountyTest is IntegrationBase {
     }
 
     /// @dev The shared setup: a $100 print stored, bob's ask of half the stop's size resting at
-    ///      $100.50 for it to fill against, the signer funded, and the cache aged past
+    ///      $100.50 for it to fill against, the signer funded, and the stored price aged past
     ///      MAX_PRICE_STALENESS so a creation without an update runs on the stale fallback.
     function _agedBookWithAsk() internal {
         _fundSigner();
         _depositAapl(bob, 20_000 * BAZAAR_SCALE);
         _storeAapl(100);
         _placeAapl(bob, false, POSITION / 2, 1005 * BAZAAR_SCALE / 10);
-        _ageCache();
+        _ageStoredPrice();
     }
 
     // ---- meta-transactions ----
@@ -152,8 +151,8 @@ contract TriggerCreationBlockBountyTest is IntegrationBase {
     }
 
     /// @dev The relayer submits `spec` under the signer's signature with no price update: the
-    ///      cache is aged, so the creation runs on the stale fallback and the order rests outside
-    ///      the book however its trigger stands against the live price.
+    ///      stored price is aged, so the creation runs on the stale fallback and the order rests
+    ///      outside the book however its trigger stands against the live price.
     function _relayWithoutUpdate(BazaarTypes.OrderSpec memory spec) internal returns (uint256 id) {
         uint256 deadline = vm.getBlockTimestamp() + 5;
         bytes memory sig = _sign(signerPk, _createOrderHash(spec, deadline, FEE));
@@ -168,9 +167,9 @@ contract TriggerCreationBlockBountyTest is IntegrationBase {
     // ---- keeper calls ----
 
     /// @dev Fire `orderId` as `keeper` with a fresh print at `priceUsd`, asserting the bounty
-    ///      release it emits. The cache is aged first so the print is the one the call stores;
-    ///      the block number is untouched. The update is built before the expectation is set,
-    ///      since the mock oracle call would otherwise be the call the expectation binds to.
+    ///      release it emits. The clock is warped first so the print is generated in a later
+    ///      second than the stored price and is the one the call stores; the block number is
+    ///      untouched.
     function _fireExpectingRelease(
         address keeper,
         uint256 orderId,
@@ -178,7 +177,7 @@ contract TriggerCreationBlockBountyTest is IntegrationBase {
         address recipient,
         uint256 amount
     ) internal returns (uint256 executedCount) {
-        _ageCache();
+        _ageStoredPrice();
         bytes[] memory pu = _aaplPu(priceUsd);
         BazaarTypes.TriggerExec[] memory execs = new BazaarTypes.TriggerExec[](1);
         execs[0].orderId = uint64(orderId);
@@ -240,7 +239,7 @@ contract TriggerCreationBlockBountyTest is IntegrationBase {
         _placeAapl(signer, true, POSITION, 100 * BAZAAR_SCALE);
         assertEq(_posSizeAapl(signer), POSITION, "setup: long");
         _placeAapl(carol, true, POSITION / 4, 995 * BAZAAR_SCALE / 10);
-        _ageCache();
+        _ageStoredPrice();
 
         uint256 sl = _relayWithoutUpdate(_stopLossSpec(B));
         assertEq(_fireExpectingRelease(relayer, sl, 100, signer, B / 4), 1, "fired in the creation block");

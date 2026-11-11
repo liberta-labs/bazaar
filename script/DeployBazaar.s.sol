@@ -3,7 +3,8 @@ pragma solidity 0.8.34;
 
 import {Script} from "forge-std/Script.sol";
 import {console} from "forge-std/console.sol";
-import {IPyth} from "@pythnetwork/pyth-sdk-solidity/IPyth.sol";
+import {IPythLazer} from "../src/interfaces/IPythLazer.sol";
+import {LazerUpdate} from "../test/LazerUpdate.sol";
 import {BazaarFactory} from "../src/BazaarFactory.sol";
 import {BazaarPair} from "../src/BazaarPair.sol";
 import {BazaarOracle} from "../src/BazaarOracle.sol";
@@ -13,6 +14,11 @@ import {BazaarTypes} from "../src/libraries/BazaarTypes.sol";
 import {IERC20Minimal, IOptimisticOracleV3} from "../src/interfaces/IUmaOptimisticOracleV3.sol";
 import {HelperConfig} from "./HelperConfig.s.sol";
 import {LinkedLibraries} from "./LinkedLibraries.sol";
+
+/// @dev The signer view of Pyth's PythLazer contract, which the deploy-time probe reads.
+interface IPythLazerSigners {
+    function isValidSigner(address signer) external view returns (bool);
+}
 
 /// @notice Step 2: Deploy core Bazaar contracts.
 ///         Requires external libraries to be deployed first (see DeployLibraries.s.sol); their
@@ -153,7 +159,7 @@ contract DeployBazaar is Script, LinkedLibraries {
 
     /// @dev Probes the three external dependencies HelperConfig hands over, before the first
     ///      broadcast. All three are consumed as immutables — `usdc` and the OOv3 by the factory,
-    ///      the Pyth feed by BazaarOracle — so a wrong address is corrected only by redeploying the
+    ///      the Pyth verifier by BazaarOracle — so a wrong address is corrected only by redeploying the
     ///      system, and almost nothing downstream reads back as wrong: BazaarOracle rejects only
     ///      `address(0)`, and the factory's identifier probe is a shape check that excludes a dead
     ///      OOv3 rather than a live-but-wrong one.
@@ -173,15 +179,15 @@ contract DeployBazaar is Script, LinkedLibraries {
     ///
     ///      Runs on every chain including anvil, where the mocks satisfy it: a guard that only
     ///      executes on the one run nobody rehearses is a guard nobody has tested.
-    function _assertExternalDependencies(address pythFeed, address usdcContract, address optimisticOracleV3)
+    function _assertExternalDependencies(address pythLazer, address usdcContract, address optimisticOracleV3)
         internal
         view
     {
-        require(pythFeed.code.length != 0, "Pyth address holds no code on this chain");
+        require(pythLazer.code.length != 0, "Pyth address holds no code on this chain");
         require(usdcContract.code.length != 0, "USDC address holds no code on this chain");
         require(optimisticOracleV3.code.length != 0, "OptimisticOracleV3 address holds no code on this chain");
         require(
-            pythFeed != usdcContract && pythFeed != optimisticOracleV3 && usdcContract != optimisticOracleV3,
+            pythLazer != usdcContract && pythLazer != optimisticOracleV3 && usdcContract != optimisticOracleV3,
             "Pyth / USDC / OptimisticOracleV3 must be three distinct addresses"
         );
 
@@ -193,13 +199,23 @@ contract DeployBazaar is Script, LinkedLibraries {
 
         // Each call is its own probe: the selector has to exist and return a decodable value, which
         // an EOA or an unrelated contract cannot do. Both are functions the protocol itself depends
-        // on — getMinimumBond is what the factory quotes every listing bond from, getUpdateFee what
-        // BazaarOracle pays Pyth through — so the probe exercises the same surface the deployment
-        // will. getMinimumBond is asked about the USDC resolved above, which checks the two
-        // addresses as a pair rather than individually. The empty array is priced at zero by any
-        // implementation; the return value carries no information and the call is the whole test.
+        // on — getMinimumBond is what the factory quotes every listing bond from, verification_fee
+        // what BazaarOracle prices every update's verification with — so the probe exercises the
+        // same surface the deployment will. getMinimumBond is asked about the USDC resolved above,
+        // which checks the two addresses as a pair rather than individually. The fee's value
+        // carries no information here; the call is the whole test.
         IOptimisticOracleV3(optimisticOracleV3).getMinimumBond(usdcContract);
-        IPyth(pythFeed).getUpdateFee(new bytes[](0));
+        IPythLazer(pythLazer).verification_fee();
+
+        // The local mock verifier trusts a signing key that is public (LazerUpdate.SIGNER_KEY). A
+        // verifier that trusts it prices every pair at whatever anyone signs, so off anvil the
+        // deployment refuses one that does.
+        if (block.chainid != 31337) {
+            require(
+                !IPythLazerSigners(pythLazer).isValidSigner(LazerUpdate.signer()),
+                "Pyth verifier trusts the public test signing key"
+            );
+        }
     }
 
     /// @dev The genesis UMA identifier. The factory constructor validates it against UMA's LIVE
@@ -253,14 +269,14 @@ contract DeployBazaar is Script, LinkedLibraries {
         require(bugBountyAddress != address(0), "bugBountyAddress is the zero address");
 
         helperConfig = new HelperConfig();
-        (address pythFeed, address usdcContract, address optimisticOracleV3, string memory networkName) =
+        (address pythLazer, address usdcContract, address optimisticOracleV3, string memory networkName) =
             helperConfig.activeNetworkConfig();
-        _assertExternalDependencies(pythFeed, usdcContract, optimisticOracleV3);
+        _assertExternalDependencies(pythLazer, usdcContract, optimisticOracleV3);
 
         console.log("----------------------------------------------------");
         console.log("Deploying Bazaar to:", networkName);
         console.log("  USDC:              ", usdcContract);
-        console.log("  Pyth:              ", pythFeed);
+        console.log("  Pyth Pro verifier: ", pythLazer);
         console.log("  OptimisticOracleV3:", optimisticOracleV3);
         console.log("  Bug bounty:        ", bugBountyAddress);
         console.log("----------------------------------------------------");
@@ -268,7 +284,7 @@ contract DeployBazaar is Script, LinkedLibraries {
         vm.startBroadcast();
 
         // 1. Deploy contracts that don't depend on the factory
-        BazaarOracle bazaarOracle = new BazaarOracle(pythFeed);
+        BazaarOracle bazaarOracle = new BazaarOracle(pythLazer);
         console.log("BazaarOracle:            ", address(bazaarOracle));
 
         BazaarPair pairImplementation = new BazaarPair();

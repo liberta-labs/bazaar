@@ -6,7 +6,8 @@ import {BazaarPair} from "../../src/BazaarPair.sol";
 import {BazaarPairTerminator} from "../../src/BazaarPairTerminator.sol";
 import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 import {MockOptimisticOracleV3} from "../mocks/MockOptimisticOracleV3.sol";
-import {PythChain} from "../PythChain.sol";
+import {LazerChain} from "../LazerChain.sol";
+import {LazerUpdate} from "../LazerUpdate.sol";
 
 /// @title GovernanceIntegrationTest
 /// @notice End-to-end UMA governance flows: scheduled pair termination through the real Terminator
@@ -24,7 +25,7 @@ contract GovernanceIntegrationTest is IntegrationBase {
 
     /// @dev Refresh the pair's stored price at the current timestamp, paying the Pyth fee.
     function _warmPrice(BazaarPair p, bytes[] memory pu) internal {
-        uint256 fee = oracle.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         vm.deal(address(this), fee);
         p.refreshPrice{value: fee}(pu);
     }
@@ -110,12 +111,12 @@ contract GovernanceIntegrationTest is IntegrationBase {
         assertEq(pair.scheduledTerminationTs(), lastTradingTs, "cutoff scheduled");
 
         // Past the cutoff, anyone fixes the price with the archived Pyth update from that moment —
-        // the feed's first print in the 3 s window ending at the cutoff, its predecessor published
-        // before the window opened. The price is verified on-chain against that payload, not read
-        // from the proposal.
+        // the one-second update stamped at the cutoff, its price generated inside the 3 s window
+        // ending there. The price is verified on-chain against that payload, not read from the
+        // proposal.
         vm.warp(uint256(lastTradingTs) + 1);
-        bytes[] memory tick = _priceUpdateFor(BTC_USD_FEED_ID, 50_000, lastTradingTs, lastTradingTs - 4);
-        uint256 fee = oracle.getUpdateFee(tick);
+        bytes[] memory tick = _tickUpdateFor(BTC_USD_FEED_ID, 50_000, lastTradingTs, lastTradingTs);
+        uint256 fee = oracle.getUpdateFee(tick.length);
         vm.deal(address(this), fee);
         terminator.terminateScheduledPair{value: fee}(address(pair), tick);
         address[] memory both = new address[](2);
@@ -248,13 +249,13 @@ contract GovernanceIntegrationTest is IntegrationBase {
         terminator.voteForInsurerTermination(address(pair), id, 9_500 * BAZAAR_SCALE);
 
         // The threshold schedules the pair at the cutoff at once; a bare vote settles at the median
-        // of five prints chained from the cutoff.
+        // of five samples chained from the cutoff.
         terminator.executeInsurerTermination(address(pair), id);
         (,,,, uint256 cutoffTs,,,,,,,,,,,) = terminator.insurerProposals(id);
         assertEq(pair.scheduledTerminationTs(), cutoffTs, "scheduled at the proposal's cutoff");
-        bytes[] memory pu = PythChain.flat(mockPyth, BTC_USD_FEED_ID, 50_000, uint64(cutoffTs), uint64(cutoffTs) - 1);
-        vm.warp(PythChain.lastPublish(uint64(cutoffTs)) + 10);
-        terminator.terminateScheduledPair{value: oracle.getSampleSetFee(BTC_USD_FEED_ID, pu)}(address(pair), pu);
+        bytes[] memory pu = LazerChain.flat(BTC_USD_FEED_ID, 50_000, uint64(cutoffTs));
+        vm.warp(LazerChain.lastTick(uint64(cutoffTs)) + 10);
+        terminator.terminateScheduledPair{value: oracle.getUpdateFee(pu.length)}(address(pair), pu);
         pair.finalizeTermination();
 
         assertTrue(pair.isPairTerminated(), "pair terminated by insurer consensus");
@@ -307,8 +308,8 @@ contract GovernanceIntegrationTest is IntegrationBase {
     ///         (3000 JPY / 150 JPY-per-USD = $20), and its termination claim asserts that
     ///         decommissioning of EITHER leg is sufficient grounds.
     function test_e2e_CompositePair_DeployPriceAndTerminationClaim() public {
-        bytes32 assetJpyFeed = keccak256("test.EQUITY.7203/JPY");
-        bytes32 usdJpyFeed = keccak256("test.FX.USD/JPY");
+        bytes32 assetJpyFeed = bytes32(uint256(9001));
+        bytes32 usdJpyFeed = bytes32(uint256(9002));
         bytes32 compositeId = oracle.registerComposite(assetJpyFeed, usdJpyFeed, true); // USD = base/quote
 
         usdc.mint(deployer, PROPOSAL_TOTAL_USDC);
@@ -322,15 +323,17 @@ contract GovernanceIntegrationTest is IntegrationBase {
         BazaarPair cpair = BazaarPair(payable(factory.getPairAddress(pairId)));
         assertFalse(cpair.isContinuouslyTraded(), "composite pairs are non-continuous");
 
-        // Push both legs, then refresh from the Pyth cache: 3000 JPY / 150 = $20.
+        // Refresh with one update carrying both legs: 3000 JPY / 150 = $20.
         uint64 nowTs = uint64(vm.getBlockTimestamp());
-        bytes[] memory u = new bytes[](1);
-        u[0] = mockPyth.createPriceFeedUpdateData(assetJpyFeed, 3000e8, 0, PYTH_EXPO, 3000e8, 0, nowTs, nowTs - 1);
-        vm.deal(address(this), 1 ether);
-        mockPyth.updatePriceFeeds{value: mockPyth.getUpdateFee(u)}(u);
-        u[0] = mockPyth.createPriceFeedUpdateData(usdJpyFeed, 150e8, 0, PYTH_EXPO, 150e8, 0, nowTs, nowTs - 1);
-        mockPyth.updatePriceFeeds{value: mockPyth.getUpdateFee(u)}(u);
-        cpair.refreshPrice(new bytes[](0));
+        cpair.refreshPrice(
+            LazerUpdate.one(
+                LazerUpdate.livePair(
+                    LazerUpdate.feed(assetJpyFeed, 3000e8, 3e8, int16(PYTH_EXPO), nowTs * LazerUpdate.MICROS),
+                    LazerUpdate.feed(usdJpyFeed, 150e8, 0.15e8, int16(PYTH_EXPO), nowTs * LazerUpdate.MICROS),
+                    nowTs
+                )
+            )
+        );
         (uint256 spot,,,,) = cpair.lastPairPrice();
         assertEq(spot, 20 * BAZAAR_SCALE, "composite priced at base/quote = $20");
 
@@ -340,6 +343,9 @@ contract GovernanceIntegrationTest is IntegrationBase {
         bytes32 termAid =
             terminator.proposeTermination(address(cpair), 2, vm.getBlockTimestamp() + 7 days, "Delisting announced.");
         bytes memory claim = mockOO.claims(termAid);
-        assertTrue(_contains(claim, "decommissioning of EITHER leg"), "claim covers either-leg decommission");
+        assertTrue(
+            _contains(claim, "For a composite, EITHER leg is sufficient grounds"),
+            "claim covers either-leg decommission"
+        );
     }
 }

@@ -5,7 +5,7 @@
 
 # Introduction
 
-**Bazaar is a fully permissionless perpetual-futures protocol for Arbitrum.** Any asset with a [Pyth](https://pyth.network) price feed — crypto, equities, FX, indices — can be listed through an [UMA Optimistic Oracle](https://uma.xyz) assertion and traded on a fully on-chain central limit order book, margined in USDC.
+**Bazaar is a fully permissionless perpetual-futures protocol for Arbitrum.** Any asset with a [Pyth](https://pyth.network) price feed — crypto, equities, FX, commodities — can be listed through an [UMA Optimistic Oracle](https://uma.xyz) assertion and traded on a fully on-chain central limit order book, margined in USDC.
 
 The protocol is immutable: no owner, no pauser, no upgradeable proxies, no governance token. Every privileged action is either fully permissionless, economically bonded, or adjudicated by UMA's optimistic oracle.
 

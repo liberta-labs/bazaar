@@ -7,7 +7,6 @@ import {IntegrationBase} from "./IntegrationBase.sol";
 import {BazaarFactory} from "../../src/BazaarFactory.sol";
 import {BazaarPair} from "../../src/BazaarPair.sol";
 import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
-import {PythSeed} from "../PythSeed.sol";
 
 import {VaultStore} from "../VaultStore.sol";
 
@@ -21,7 +20,7 @@ contract IndexerEventsTest is IntegrationBase {
     using stdStorage for StdStorage;
 
     uint256 constant BTC = 1e18;
-    bytes32 constant ETH_USD_FEED_ID = 0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace;
+    bytes32 constant ETH_USD_FEED_ID = bytes32(uint256(2));
 
     /// @dev Trade's non-indexed fields in order. A struct of static members decodes exactly like
     ///      the flat list and keeps the decode off the stack.
@@ -435,7 +434,6 @@ contract IndexerEventsTest is IntegrationBase {
     /// @notice The deployment event carries the listing, including the seed the pair mints to the
     ///         deployer as genesis insurance shares.
     function test_pairDeployed_carriesTheListing() public {
-        PythSeed.seed(address(mockPyth), ETH_USD_FEED_ID);
         vm.startPrank(carol);
         usdc.approve(address(factory), PROPOSAL_TOTAL_USDC);
         bytes32 aid = factory.proposePairDeployment(ETH_USD_FEED_ID, true, PROPOSAL_TOTAL, "ETH/USD");

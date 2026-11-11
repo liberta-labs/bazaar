@@ -17,8 +17,8 @@ import {OrderView} from "../OrderView.sol";
 import {OrderManagementLib} from "../../src/libraries/OrderManagementLib.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {MockOptimisticOracleV3} from "../mocks/MockOptimisticOracleV3.sol";
-import {MockPyth} from "@pythnetwork/pyth-sdk-solidity/MockPyth.sol";
-import {PythSeed} from "../PythSeed.sol";
+import {MockPythLazer} from "../mocks/MockPythLazer.sol";
+import {LazerUpdate} from "../LazerUpdate.sol";
 import {MockArbSys} from "../mocks/MockArbSys.sol";
 import {BucketStore} from "../BucketStore.sol";
 
@@ -28,8 +28,8 @@ contract BazaarPairTest is Test {
     using stdStorage for StdStorage;
     StdStorage internal _stdstore;
     // Pyth feed IDs
-    bytes32 constant BTC_USD_FEED_ID = 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43;
-    bytes32 constant AAPL_USD_FEED_ID = 0x49f6b65cb1de6b10eaf75e7c03ca029c306d0357e91b5311b175084a5ad55688;
+    bytes32 constant BTC_USD_FEED_ID = bytes32(uint256(1));
+    bytes32 constant AAPL_USD_FEED_ID = bytes32(uint256(922));
 
     // Scale constants
     uint256 constant BAZAAR_SCALE = 1e18;
@@ -56,7 +56,7 @@ contract BazaarPairTest is Test {
     // Mocks
     MockUSDC public usdc;
     MockOptimisticOracleV3 public mockOOv3;
-    MockPyth public mockPyth;
+    MockPythLazer public mockPyth;
 
     // Test accounts (with private keys for meta-tx signing)
     uint256 constant USER1_PK = 0xA11CE;
@@ -90,10 +90,7 @@ contract BazaarPairTest is Test {
         // Store sub-contract references
         oracle = factory.oracle();
         pairTerminator = factory.pairTerminator();
-        mockPyth = MockPyth(address(oracle.pyth()));
-        // The factory lists a raw feed only once Pyth has stored a price for it.
-        PythSeed.seed(address(mockPyth), BTC_USD_FEED_ID);
-        PythSeed.seed(address(mockPyth), AAPL_USD_FEED_ID);
+        mockPyth = MockPythLazer(address(oracle.pythLazer()));
 
         // Derive constants from factory
         bondUsdc = factory.DEPLOYMENT_BOND_USDC();
@@ -795,18 +792,10 @@ contract BazaarPairTest is Test {
         );
     }
 
-    /// @dev Build a MockPyth price update for BTC at $50,000 with the given publishTime.
+    /// @dev Build a MockPythLazer price update for BTC at $50,000 with the given publishTime.
     function _createBtcPriceUpdate(uint64 publishTime) internal view returns (bytes[] memory priceUpdate) {
-        bytes memory priceData = mockPyth.createPriceFeedUpdateData(
-            BTC_USD_FEED_ID,
-            BTC_PYTH_PRICE,
-            BTC_PYTH_CONF,
-            BTC_PYTH_EXPO,
-            BTC_PYTH_PRICE, // ema price same as price
-            BTC_PYTH_CONF,
-            publishTime,
-            publishTime > 0 ? publishTime - 1 : 0
-        );
+        bytes memory priceData =
+            LazerUpdate.live(BTC_USD_FEED_ID, BTC_PYTH_PRICE, BTC_PYTH_CONF, int16(BTC_PYTH_EXPO), publishTime);
         priceUpdate = new bytes[](1);
         priceUpdate[0] = priceData;
     }
@@ -903,7 +892,7 @@ contract BazaarPairTest is Test {
         bytes[] memory staleUpdate = _createBtcPriceUpdate(uint64(block.timestamp - 40));
 
         vm.prank(user1);
-        vm.expectRevert(); // PythErrors.StalePrice()
+        vm.expectPartialRevert(BazaarOracle.BazaarOracle__StalePrice.selector);
         btcPair.withdrawCollateral(1_000 * BAZAAR_SCALE, staleUpdate, 0, 0, 0, "");
     }
 
@@ -957,7 +946,7 @@ contract BazaarPairTest is Test {
 
     // ==================== Helper: Create BTC Price Update at Custom Price ====================
 
-    /// @dev Build a MockPyth price update for BTC at a custom USD price.
+    /// @dev Build a MockPythLazer price update for BTC at a custom USD price.
     function _createBtcPriceUpdateAtPrice(uint256 priceUsd, uint64 publishTime)
         internal
         view
@@ -966,16 +955,7 @@ contract BazaarPairTest is Test {
         // Pyth encodes with expo=-8, so price.price = priceUsd * 1e8
         int64 pythPrice = int64(int256(priceUsd * 1e8));
         uint64 conf = uint64(priceUsd * 1e8 / 1000); // 0.1% confidence
-        bytes memory priceData = mockPyth.createPriceFeedUpdateData(
-            BTC_USD_FEED_ID,
-            pythPrice,
-            conf,
-            BTC_PYTH_EXPO,
-            pythPrice,
-            conf,
-            publishTime,
-            publishTime > 0 ? publishTime - 1 : 0
-        );
+        bytes memory priceData = LazerUpdate.live(BTC_USD_FEED_ID, pythPrice, conf, int16(BTC_PYTH_EXPO), publishTime);
         priceUpdate = new bytes[](1);
         priceUpdate[0] = priceData;
     }
@@ -1321,7 +1301,7 @@ contract BazaarPairTest is Test {
         );
     }
 
-    /// @dev Build a MockPyth price update for AAPL at an arbitrary price (expo -8, 0.1% conf).
+    /// @dev Build a MockPythLazer price update for AAPL at an arbitrary price (expo -8, 0.1% conf).
     function _createAaplPriceUpdateAtPrice(uint256 priceUsd, uint64 publishTime)
         internal
         view
@@ -1329,16 +1309,7 @@ contract BazaarPairTest is Test {
     {
         int64 pythPrice = int64(int256(priceUsd * 1e8));
         uint64 conf = uint64(priceUsd * 1e8 / 1000);
-        bytes memory priceData = mockPyth.createPriceFeedUpdateData(
-            AAPL_USD_FEED_ID,
-            pythPrice,
-            conf,
-            BTC_PYTH_EXPO,
-            pythPrice,
-            conf,
-            publishTime,
-            publishTime > 0 ? publishTime - 1 : 0
-        );
+        bytes memory priceData = LazerUpdate.live(AAPL_USD_FEED_ID, pythPrice, conf, int16(BTC_PYTH_EXPO), publishTime);
         priceUpdate = new bytes[](1);
         priceUpdate[0] = priceData;
     }
@@ -3486,8 +3457,8 @@ contract BazaarPairTest is Test {
     uint256 internal constant CAP = BazaarTypes.MAX_ACTIVE_LIMIT_ORDERS_PER_USER;
 
     /// @dev Create one tiny long limit order at $25,000 (half of spot) — keeps notional and
-    ///      IMR low so a full cap fits under a moderate deposit. The tail hint and price
-    ///      bytes are built BEFORE the prank: both make external calls, which would consume it.
+    ///      IMR low so a full cap fits under a moderate deposit. The tail hint is built BEFORE
+    ///      the prank: it reads the book through external calls, which would consume it.
     function _createSmallLimitOrder(address user) internal {
         bytes[] memory priceUpdate = _createBtcPriceUpdate(uint64(block.timestamp));
         BazaarTypes.MatchHints memory tailHint = BazaarTypes.MatchHints(_bidTail(), 0, 0, 0, 0);

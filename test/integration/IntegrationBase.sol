@@ -12,8 +12,8 @@ import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
 import {OrderView} from "../OrderView.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {MockArbSys} from "../mocks/MockArbSys.sol";
-import {MockPyth} from "@pythnetwork/pyth-sdk-solidity/MockPyth.sol";
-import {PythSeed} from "../PythSeed.sol";
+import {MockPythLazer} from "../mocks/MockPythLazer.sol";
+import {LazerUpdate} from "../LazerUpdate.sol";
 import {BucketStore} from "../BucketStore.sol";
 import {VaultStore} from "../VaultStore.sol";
 
@@ -27,15 +27,14 @@ import {VaultStore} from "../VaultStore.sol";
 ///         separate match step. Helpers that place a maker first and a crossing taker second
 ///         therefore produce the fill prices their callers assert on.
 ///
-///         Prank ordering gotcha: any helper that builds a Pyth price update makes an EXTERNAL
-///         call to `mockPyth`, which CONSUMES a pending `vm.prank`. Every helper here builds the
-///         price bytes BEFORE the prank; do the same in tests.
+///         Price updates are built by LazerUpdate, an internal library over cheatcodes, so
+///         building one makes no external call and leaves a pending `vm.prank` in place.
 abstract contract IntegrationBase is Test {
     using stdStorage for StdStorage;
     StdStorage internal _stdstore;
 
-    bytes32 constant BTC_USD_FEED_ID = 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43;
-    bytes32 constant AAPL_USD_FEED_ID = 0x49f6b65cb1de6b10eaf75e7c03ca029c306d0357e91b5311b175084a5ad55688;
+    bytes32 constant BTC_USD_FEED_ID = bytes32(uint256(1));
+    bytes32 constant AAPL_USD_FEED_ID = bytes32(uint256(922));
     uint256 constant BAZAAR_SCALE = 1e18;
     uint256 constant USDC_SCALE = 1e6;
     int32 constant PYTH_EXPO = -8;
@@ -48,7 +47,7 @@ abstract contract IntegrationBase is Test {
     BazaarPair public pair;
     BazaarPair public aaplPair;
     MockUSDC public usdc;
-    MockPyth public mockPyth;
+    MockPythLazer public mockPyth;
     BazaarPairLens public lens;
 
     address public deployer;
@@ -73,11 +72,8 @@ abstract contract IntegrationBase is Test {
         (, address usdcAddr,,) = helperConfig.activeNetworkConfig();
         usdc = MockUSDC(usdcAddr);
         oracle = factory.oracle();
-        mockPyth = MockPyth(address(oracle.pyth()));
+        mockPyth = MockPythLazer(address(oracle.pythLazer()));
         lens = factory.lens();
-        // The factory lists a raw feed only once Pyth has stored a price for it.
-        PythSeed.seed(address(mockPyth), BTC_USD_FEED_ID);
-        PythSeed.seed(address(mockPyth), AAPL_USD_FEED_ID);
 
         usdc.mint(deployer, INITIAL_USER_BALANCE);
         usdc.mint(alice, INITIAL_USER_BALANCE);
@@ -112,31 +108,31 @@ abstract contract IntegrationBase is Test {
     // ---------------------------- price helpers ----------------------------
     receive() external payable {}
 
-    /// @dev General Pyth update for any feed at any price (uses PYTH_EXPO = -8, conf = 0.1%).
+    /// @dev General Pyth Pro update for any feed at any price (uses PYTH_EXPO = -8, conf = 0.1%),
+    ///      generated in second `publishTime`.
     function _priceUpdateFor(bytes32 feedId, uint256 priceUsd, uint64 publishTime)
         internal
-        view
-        returns (bytes[] memory pu)
-    {
-        return _priceUpdateFor(feedId, priceUsd, publishTime, publishTime > 0 ? publishTime - 1 : 0);
-    }
-
-    /// @dev As above, with the predecessor publish time Pyth's uniqueness check reads.
-    function _priceUpdateFor(bytes32 feedId, uint256 priceUsd, uint64 publishTime, uint64 prevPublishTime)
-        internal
-        view
+        pure
         returns (bytes[] memory pu)
     {
         int64 pythPrice = int64(int256(priceUsd * 1e8));
         uint64 conf = uint64(priceUsd * 1e8 / 1000);
-        bytes memory data = mockPyth.createPriceFeedUpdateData(
-            feedId, pythPrice, conf, PYTH_EXPO, pythPrice, conf, publishTime, prevPublishTime
-        );
-        pu = new bytes[](1);
-        pu[0] = data;
+        pu = LazerUpdate.one(LazerUpdate.live(feedId, pythPrice, conf, int16(PYTH_EXPO), publishTime));
     }
 
-    function _priceUpdate(uint256 priceUsd, uint64 publishTime) internal view returns (bytes[] memory) {
+    /// @dev The one-second channel's update for second `tickTs`, carrying `feedId` at a price
+    ///      generated in second `generatedTs`: what UMA's rule settles a cutoff at `tickTs` on.
+    function _tickUpdateFor(bytes32 feedId, uint256 priceUsd, uint64 tickTs, uint64 generatedTs)
+        internal
+        pure
+        returns (bytes[] memory pu)
+    {
+        int64 pythPrice = int64(int256(priceUsd * 1e8));
+        uint64 conf = uint64(priceUsd * 1e8 / 1000);
+        pu = LazerUpdate.one(LazerUpdate.tick(feedId, pythPrice, conf, int16(PYTH_EXPO), tickTs, generatedTs));
+    }
+
+    function _priceUpdate(uint256 priceUsd, uint64 publishTime) internal pure returns (bytes[] memory) {
         return _priceUpdateFor(BTC_USD_FEED_ID, priceUsd, publishTime);
     }
 
@@ -161,8 +157,7 @@ abstract contract IntegrationBase is Test {
 
     /// @dev Carries a fresh BTC update at the pair's current mark ($50k before any is stored): the
     ///      deposit reads it only while the vault holds inventory, and re-stamping the mark the
-    ///      test already set keeps the deposit from moving it. Built before the prank because the
-    ///      Pyth helper's external call would consume one.
+    ///      test already set keeps the deposit from moving it.
     function _depositInsurance(address user, uint256 amount) internal {
         (uint256 spot,,,,) = pair.lastPairPrice();
         bytes[] memory pu = _priceAt(spot == 0 ? 50_000 : spot / BAZAAR_SCALE);
@@ -175,9 +170,9 @@ abstract contract IntegrationBase is Test {
     // ---------------------------- insurance redemption ----------------------------
 
     /// @dev One executeInsuranceWithdrawal call on `p` by `user` carrying `pu`, forwarding the Pyth
-    ///      fee. Build `pu` before calling: the Pyth helper's external call would consume a prank.
+    ///      fee.
     function _executeRedemption(BazaarPair p, address user, bytes[] memory pu) internal {
-        uint256 fee = oracle.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         vm.deal(user, fee);
         vm.prank(user);
         p.executeInsuranceWithdrawal{value: fee}(pu, 0, 0, 0, "", "");
@@ -236,7 +231,7 @@ abstract contract IntegrationBase is Test {
     }
 
     function _placeLimit(address user, bool isLong, uint256 size, uint256 limitPrice) internal returns (uint256) {
-        bytes[] memory pu = _freshPrice(); // build BEFORE the prank (external mockPyth call would consume it)
+        bytes[] memory pu = _freshPrice();
         vm.prank(user);
         pair.createOrder(_limitSpec(isLong, size, limitPrice), _hintsNone(), pu, 0, 0, 0, "", "");
         return _lastCreatedOrderId(pair);

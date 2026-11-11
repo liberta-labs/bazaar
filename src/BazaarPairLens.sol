@@ -347,8 +347,9 @@ contract BazaarPairLens {
     ///      candidate ranks at the price the transaction resolves and stores, with the live
     ///      funding index, less the deposits tagged to the current window. The pair's last
     ///      stored price and live funding index stand in for that key here; they are the key
-    ///      exactly when the transaction stores nothing newer. The pair reads the Pyth cache
-    ///      before the caller's update, so a keeper cannot pin that price by what it submits.
+    ///      exactly when the transaction stores nothing newer. The pair replaces its stored price
+    ///      only with one generated in a later second, so a keeper can bring a newer price but
+    ///      cannot pin the ranking to one from an earlier second than the pair already holds.
     /// @param pair The BazaarPair to read
     /// @param user The candidate winner
     /// @return adlScore The ranking score; 0 when the user cannot be a candidate at all (no ADL

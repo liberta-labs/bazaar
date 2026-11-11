@@ -15,12 +15,11 @@ import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {MockOptimisticOracleV3} from "../mocks/MockOptimisticOracleV3.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
-import {PythSeed} from "../PythSeed.sol";
 
 contract BazaarFactoryTest is Test {
     // Pyth ETH/USD feed ID
-    bytes32 constant ETH_USD_FEED_ID = 0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace;
-    bytes32 constant BTC_USD_FEED_ID = 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43;
+    bytes32 constant ETH_USD_FEED_ID = bytes32(uint256(2));
+    bytes32 constant BTC_USD_FEED_ID = bytes32(uint256(1));
 
     // Scale constants
     uint256 constant BAZAAR_SCALE = 1e18;
@@ -76,10 +75,6 @@ contract BazaarFactoryTest is Test {
         oracle = factory.oracle();
         lens = factory.lens();
         pairTerminator = factory.pairTerminator();
-
-        // The factory lists a raw feed only once Pyth has stored a price for it.
-        PythSeed.seed(address(oracle.pyth()), ETH_USD_FEED_ID);
-        PythSeed.seed(address(oracle.pyth()), BTC_USD_FEED_ID);
 
         // Derive constants from factory
         bondUsdc = factory.DEPLOYMENT_BOND_USDC();
@@ -265,11 +260,15 @@ contract BazaarFactoryTest is Test {
         assertEq(_countOccurrences(claim, "42161)"), 0, "no hardcoded mainnet chain ID");
         assertEq(_countOccurrences(claim, "on Arbitrum,"), 0, "feed checks must not pin a chain by name");
         assertEq(_countOccurrences(claim, "NO PENDING TERMINATION EVENT"), 1, "pending-event check missing");
-        assertEq(_countOccurrences(claim, "A spot FX rate quoted in USD"), 1, "FX eligibility unstated");
+        assertEq(
+            _countOccurrences(claim, "A spot FX rate is itself eligible only as a single feed quoted in USD"),
+            1,
+            "FX eligibility unstated"
+        );
         // The contract-written head ends at the trading flag, and the numbered checks follow it.
         assertEq(
             _countOccurrences(
-                claim, ". Continuously traded: true. UMA VERIFIERS MUST CHECK ALL OF THE FOLLOWING: (1) FEED VALIDITY: "
+                claim, ". Continuously traded: true. UMA VERIFIERS MUST CHECK ALL OF THE FOLLOWING: (1) FEED: "
             ),
             1,
             "checks block follows the head"

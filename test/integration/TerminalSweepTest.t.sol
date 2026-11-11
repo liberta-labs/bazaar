@@ -89,7 +89,7 @@ contract TerminalSweepTest is IntegrationBase {
     ///      run back to back.
     function _insurerExit(address lp) internal returns (uint256 received) {
         uint256 shares = pair.insuranceShares(lp);
-        bytes[] memory pu = _priceAt(50_000); // build BEFORE the prank (mockPyth call consumes it)
+        bytes[] memory pu = _priceAt(50_000);
         vm.prank(lp);
         pair.requestInsuranceWithdrawal(shares, 0, 0, 0, "", "");
         uint256 before = usdc.balanceOf(lp);

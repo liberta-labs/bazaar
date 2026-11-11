@@ -5,7 +5,6 @@ import {StdStorage, stdStorage} from "forge-std/Test.sol";
 import {IntegrationBase} from "./IntegrationBase.sol";
 import {BazaarPair} from "../../src/BazaarPair.sol";
 import {BazaarTypes} from "../../src/libraries/BazaarTypes.sol";
-import {PythSeed} from "../PythSeed.sol";
 
 /// @title RefreshBountyTest
 /// @notice Covers the insurance-funded refreshPrice bounty (RiskParamsLib.payRefreshBounty):
@@ -27,7 +26,7 @@ contract RefreshBountyTest is IntegrationBase {
     uint256 constant HEARTBEAT_FLOOR = 1_000e18; // = RiskParamsLib.REFRESH_BOUNTY_HEARTBEAT_MIN_INSURANCE
     uint256 constant INVENTORY_FLOOR_USD = 1_250; // = BazaarTypes.UNLOAD_BOUNTY_MIN_NOTIONAL
     uint256 constant SPOT_USD = 50_000; // what _freshPrice() stores
-    bytes32 constant ETH_USD_FEED_ID = 0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace;
+    bytes32 constant ETH_USD_FEED_ID = bytes32(uint256(2));
 
     address keeper;
 
@@ -51,7 +50,7 @@ contract RefreshBountyTest is IntegrationBase {
     }
 
     function _refreshAsKeeper() internal {
-        bytes[] memory pu = _freshPrice(); // build BEFORE the prank (external mockPyth call would consume it)
+        bytes[] memory pu = _freshPrice();
         vm.prank(keeper);
         pair.refreshPrice(pu);
     }
@@ -231,7 +230,6 @@ contract RefreshBountyTest is IntegrationBase {
     /// @notice A pair listed at the minimum seed earns the heartbeat from the start, which is what
     ///         keeps the smallest listing's stored price inside the stale-termination threshold.
     function test_RefreshBounty_MinimumListing_EarnsHeartbeat() public {
-        PythSeed.seed(address(mockPyth), ETH_USD_FEED_ID);
         uint256 total = factory.MIN_DEPLOYMENT_AMOUNT();
         vm.startPrank(carol);
         usdc.approve(address(factory), total * USDC_SCALE / BAZAAR_SCALE);

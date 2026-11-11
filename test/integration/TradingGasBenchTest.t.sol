@@ -22,16 +22,15 @@ import {VaultStore} from "../VaultStore.sol";
 ///         the call costs on chain. Without it a test body is one transaction, everything an
 ///         earlier step touched stays warm, and every figure understates.
 ///
-///         "Posts a new price" in a label means the Pyth cache was older than MAX_PRICE_STALENESS,
-///         so the call pushes its update to Pyth and stores the tick on the pair. "Price already
-///         fresh" means an earlier call on the pair stored the tick the call carries, so it is
-///         served from the cache and stores nothing, as is every later caller inside one
-///         staleness window.
+///         "Posts a new price" in a label means the call carries an update newer than the pair's
+///         stored price, so it is verified and stored. "Price already fresh" means an earlier call
+///         on the pair stored the tick the call carries, so the update is verified and nothing is
+///         stored, as for every later caller carrying a tick from that same second.
 ///
-///         The oracle is MockPyth, which stores an update without verifying it, so against the
-///         real Pyth a call that posts a new price costs more: by the gap between a real Pyth
-///         update transaction on the target chain and the control here that prices
-///         MockPyth.updatePriceFeeds as a transaction of its own. Collateral is MockUSDC, a plain
+///         The verifier is MockPythLazer, whose verifyUpdate does what Pyth's deployed contract
+///         does behind its proxy, so on chain a call that carries an update costs what it costs
+///         here plus that proxy's delegatecall; the control here prices verifyUpdate as a
+///         transaction of its own. Collateral is MockUSDC, a plain
 ///         OpenZeppelin ERC-20, while Circle's USDC routes each transfer through a proxy and
 ///         checks pause and blacklist state, so the calls that move the token cost somewhat more
 ///         on chain.
@@ -110,8 +109,8 @@ contract TradingGasBenchTest is IntegrationBase {
     // Helpers
     // ============================================================
 
-    /// @dev A BTC update at `priceUsd` with the clock moved past MAX_PRICE_STALENESS, so the Pyth
-    ///      cache is stale and the call that carries the update posts it.
+    /// @dev A BTC update at `priceUsd` with the clock moved past MAX_PRICE_STALENESS, so the
+    ///      pair's stored price is stale and the call that carries the update stores it.
     function _nextTick(uint256 priceUsd) internal returns (bytes[] memory) {
         vm.warp(vm.getBlockTimestamp() + BazaarTypes.MAX_PRICE_STALENESS + 1);
         return _priceUpdate(priceUsd, uint64(vm.getBlockTimestamp()));
@@ -222,7 +221,7 @@ contract TradingGasBenchTest is IntegrationBase {
 
     function test_gas_rest_priceAlreadyFresh() public {
         _placeLimit(dave, true, BTC / 100, 48_000 * BAZAAR_SCALE);
-        // _freshPrice carries the tick already stored this second, so the call reads the cache.
+        // _freshPrice carries the tick already stored this second, so the call stores nothing.
         uint256 used = _measureCreate(carol, _limitSpec(true, BTC / 100, 49_000 * BAZAAR_SCALE), _freshPrice());
         assertTrue(_inBook(_lastCreatedOrderId(pair)), "fixture: rested");
         emit log_named_uint("createOrder: rest a limit, price already fresh", used);
@@ -261,7 +260,7 @@ contract TradingGasBenchTest is IntegrationBase {
     function test_gas_take1_opensPosition_priceAlreadyFresh() public {
         _deposit(taker, 20_000 * BAZAAR_SCALE);
         _standingQuote(maker1, false, BTC / 10, 50_010 * BAZAAR_SCALE);
-        // _freshPrice carries the tick already stored this second, so the call reads the cache.
+        // _freshPrice carries the tick already stored this second, so the call stores nothing.
         uint256 used = _measureCreate(taker, _limitSpec(true, BTC / 10, 50_100 * BAZAAR_SCALE), _freshPrice());
         assertEq(_posSize(taker), BTC / 10, "fixture: filled");
         emit log_named_uint("createOrder: take 1 maker, opens a position, price already fresh", used);
@@ -470,17 +469,17 @@ contract TradingGasBenchTest is IntegrationBase {
         emit log_named_uint("refreshPrice: posts a new price, no bounty due", used);
     }
 
-    /// @notice The oracle control: the mock's own update as a transaction of its own, to set
-    ///         against a real Pyth update transaction on the target chain.
-    function test_gas_mockPythUpdate_control() public {
+    /// @notice The oracle control: one update verified as a transaction of its own, the cost every
+    ///         call that carries an update pays Pyth's contract on top of its own work.
+    function test_gas_verifyUpdate_control() public {
         bytes[] memory pu = _nextTick(50_000);
-        uint256 fee = mockPyth.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         vm.deal(seq, fee);
         vm.prank(seq);
         uint256 g0 = gasleft();
-        mockPyth.updatePriceFeeds{value: fee}(pu);
+        mockPyth.verifyUpdate{value: fee}(pu[0]);
         uint256 used = g0 - gasleft();
-        emit log_named_uint("MockPyth.updatePriceFeeds as its own transaction", used);
-        emit log_named_uint("MockPyth: update payload (bytes)", pu[0].length);
+        emit log_named_uint("PythLazer.verifyUpdate as its own transaction", used);
+        emit log_named_uint("Pyth Pro: update (bytes)", pu[0].length);
     }
 }

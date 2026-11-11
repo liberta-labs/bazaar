@@ -8,11 +8,10 @@ import {BazaarPairTerminator} from "../../src/BazaarPairTerminator.sol";
 import {DeployBazaar} from "../../script/DeployBazaar.s.sol";
 import {HelperConfig} from "../../script/HelperConfig.s.sol";
 import {MockArbSys} from "../mocks/MockArbSys.sol";
-import {MockPyth} from "@pythnetwork/pyth-sdk-solidity/MockPyth.sol";
-import {PythErrors} from "@pythnetwork/pyth-sdk-solidity/PythErrors.sol";
+import {MockPythLazer} from "../mocks/MockPythLazer.sol";
+import {LazerUpdate} from "../LazerUpdate.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
-import {PythSeed} from "../PythSeed.sol";
-import {PythChain} from "../PythChain.sol";
+import {LazerChain} from "../LazerChain.sol";
 import {BazaarOracle} from "../../src/BazaarOracle.sol";
 
 /// @notice A bare insurer cutoff that meets a cutoff UMA verified halts the pair at the earlier of
@@ -25,7 +24,7 @@ import {BazaarOracle} from "../../src/BazaarOracle.sol";
 ///         that must not settle the pair. The votes here are bare proposals, filed with no claim
 ///         of their own; the UMA claims they meet are other proposers' and go unvoted.
 contract InsurerUmaCutoffCapTest is Test {
-    bytes32 constant BTC_USD_FEED_ID = 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43;
+    bytes32 constant BTC_USD_FEED_ID = bytes32(uint256(1));
     uint256 constant BAZAAR_SCALE = 1e18;
     uint256 constant PROPOSAL_TOTAL = 5_000 * BAZAAR_SCALE;
     uint256 constant INSURER_BOND_USDC = 1_000 * 1e6; // mirror of INSURER_TERMINATION_BOND_USDC
@@ -42,7 +41,7 @@ contract InsurerUmaCutoffCapTest is Test {
     BazaarPair pair;
     BazaarPairTerminator terminator;
     MockUSDC usdc;
-    MockPyth mockPyth;
+    MockPythLazer mockPyth;
 
     address deployer = makeAddr("deployer");
     address insurer = makeAddr("insurer"); // files the insurer proposal from a small mature stake
@@ -61,8 +60,7 @@ contract InsurerUmaCutoffCapTest is Test {
         (, address usdcAddr,,) = helperConfig.activeNetworkConfig();
         usdc = MockUSDC(usdcAddr);
         terminator = factory.pairTerminator();
-        mockPyth = MockPyth(address(factory.oracle().pyth()));
-        PythSeed.seed(address(mockPyth), BTC_USD_FEED_ID);
+        mockPyth = MockPythLazer(address(factory.oracle().pythLazer()));
 
         usdc.mint(deployer, PROPOSAL_TOTAL / 1e12);
         vm.startPrank(deployer);
@@ -79,8 +77,8 @@ contract InsurerUmaCutoffCapTest is Test {
         vm.warp(vm.getBlockTimestamp() + 8 days); // the shares mature
 
         // The pair's stored price: the last print before the closed session.
-        bytes[] memory pu = _tick(50_000, _now(), _now() - 1);
-        pair.refreshPrice{value: factory.oracle().getUpdateFee(pu)}(pu);
+        bytes[] memory pu = _live(50_000, _now());
+        pair.refreshPrice{value: factory.oracle().getUpdateFee(pu.length)}(pu);
         (uint256 stored,,,,) = pair.lastPairPrice();
         assertEq(stored, STORED_PRICE, "fixture: the stored price");
     }
@@ -100,19 +98,11 @@ contract InsurerUmaCutoffCapTest is Test {
         vm.stopPrank();
     }
 
-    /// @dev A BTC print at `priceUsd` published at `publishTime`, whose predecessor was published at
-    ///      `prevPublishTime`: it is the first print at or after any instant in between.
-    function _tick(uint256 priceUsd, uint64 publishTime, uint64 prevPublishTime)
-        internal
-        view
-        returns (bytes[] memory pu)
-    {
+    /// @dev A live BTC update at `priceUsd`, generated in second `generatedTs`.
+    function _live(uint256 priceUsd, uint64 generatedTs) internal pure returns (bytes[] memory) {
         int64 price = int64(int256(priceUsd * 1e8));
         uint64 conf = uint64(priceUsd * 1e8 / 1000);
-        pu = new bytes[](1);
-        pu[0] = mockPyth.createPriceFeedUpdateData(
-            BTC_USD_FEED_ID, price, conf, -8, price, conf, publishTime, prevPublishTime
-        );
+        return LazerUpdate.one(LazerUpdate.live(BTC_USD_FEED_ID, price, conf, -8, generatedTs));
     }
 
     function _proposeUma(uint256 lastTradingTs) internal returns (bytes32 aid) {
@@ -153,17 +143,27 @@ contract InsurerUmaCutoffCapTest is Test {
     }
 
     function _settle(bytes[] memory pu) internal {
-        uint256 fee = pu.length == 0 ? 0 : factory.oracle().getSampleSetFee(BTC_USD_FEED_ID, pu);
+        uint256 fee = factory.oracle().getUpdateFee(pu.length);
         terminator.terminateScheduledPair{value: fee}(address(pair), pu);
     }
 
-    /// @dev A chain of $`priceUsd` prints, the first published at `firstPublish` after a print at `firstPrev`.
-    function _chain(uint256 priceUsd, uint64 firstPublish, uint64 firstPrev) internal view returns (bytes[] memory) {
-        return PythChain.flat(mockPyth, BTC_USD_FEED_ID, priceUsd, firstPublish, firstPrev);
+    /// @dev A chain of $`priceUsd` samples for a cutoff at `target`, the first at `firstTick`
+    ///      after a feed quiet since `quietSince` when that tick is later than the cutoff.
+    function _chain(uint256 priceUsd, uint64 target, uint64 firstTick, uint64 quietSince)
+        internal
+        pure
+        returns (bytes[] memory)
+    {
+        return LazerChain.flat(BTC_USD_FEED_ID, priceUsd, target, firstTick, quietSince);
     }
 
     function _noSamples() internal pure returns (bytes memory) {
-        return abi.encodeWithSelector(BazaarOracle.BazaarOracle__SampleCountMismatch.selector, 0, 5);
+        return abi.encodeWithSelector(BazaarOracle.BazaarOracle__SampleCountMismatch.selector, 0, 1);
+    }
+
+    /// @dev The refusal of a sample whose tick lies past the UMA cutoff `cap`.
+    function _tooLate(uint64 tick, uint64 cap) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(BazaarOracle.BazaarOracle__SampleTooLate.selector, BTC_USD_FEED_ID, tick, cap);
     }
 
     function _settlementPrice() internal view returns (uint256) {
@@ -174,11 +174,11 @@ contract InsurerUmaCutoffCapTest is Test {
     ///      reopen prints and empty data are both refused; past it the reopen chain still cannot
     ///      settle the pair, and the stored price does.
     function _assertSettlesAtStoredPrice(uint64 tIns, uint64 tUma) internal {
-        bytes[] memory reopen = _chain(REOPEN_PRICE_USD, tUma + 10 hours, tIns - 1 hours);
-        uint256 fee = factory.oracle().getSampleSetFee(BTC_USD_FEED_ID, reopen);
+        bytes[] memory reopen = _chain(REOPEN_PRICE_USD, tIns, tUma + 10 hours, tIns - 1 hours);
+        uint256 fee = factory.oracle().getUpdateFee(reopen.length);
 
-        vm.warp(PythChain.lastPublish(tUma + 10 hours) + 1);
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
+        vm.warp(LazerChain.lastTick(tUma + 10 hours) + 1);
+        vm.expectRevert(_tooLate(tUma + 10 hours, tUma));
         terminator.terminateScheduledPair{value: fee}(address(pair), reopen);
         vm.expectRevert(_noSamples());
         terminator.terminateScheduledPair(address(pair), new bytes[](0));
@@ -255,7 +255,7 @@ contract InsurerUmaCutoffCapTest is Test {
         _acceptUmaAfterLiveness(aid);
 
         vm.warp(tIns + 2 hours);
-        _settle(_chain(49_000, tIns + 30 minutes, tIns - 1));
+        _settle(_chain(49_000, tIns, tIns + 30 minutes, tIns - 1));
         assertEq(_settlementPrice(), 49_000 * BAZAAR_SCALE, "settled at the chain after the halt");
     }
 
@@ -269,14 +269,14 @@ contract InsurerUmaCutoffCapTest is Test {
         _proposeInsurer(tIns);
         _voteAndExecute();
 
-        uint64 firstSample = tUma - 4 * PythChain.SPACING;
-        bytes[] memory late = _chain(48_000, firstSample + 1, tIns - 1);
-        uint256 fee = factory.oracle().getSampleSetFee(BTC_USD_FEED_ID, late);
+        uint64 firstSample = tUma - 4 * LazerChain.SPACING;
+        bytes[] memory late = _chain(48_000, tIns, firstSample + 1, tIns - 1);
+        uint256 fee = factory.oracle().getUpdateFee(late.length);
         vm.warp(tUma + 2);
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
+        vm.expectRevert(_tooLate(tUma + 1, tUma));
         terminator.terminateScheduledPair{value: fee}(address(pair), late);
 
-        _settle(_chain(48_000, firstSample, tIns - 1));
+        _settle(_chain(48_000, tIns, firstSample, tIns - 1));
         assertEq(_settlementPrice(), 48_000 * BAZAAR_SCALE, "settled at a chain ending at the cap");
     }
 
@@ -293,7 +293,7 @@ contract InsurerUmaCutoffCapTest is Test {
         _acceptUmaAfterLiveness(aid);
         assertEq(terminator.umaCutoffCap(address(pair)), tUma, "capped while already in limbo");
 
-        _settle(_chain(49_000, tIns + 10 minutes, tIns - 1));
+        _settle(_chain(49_000, tIns, tIns + 10 minutes, tIns - 1));
         assertEq(_settlementPrice(), 49_000 * BAZAAR_SCALE, "prints published before the cap still settle");
     }
 
@@ -308,7 +308,7 @@ contract InsurerUmaCutoffCapTest is Test {
         bytes32 aid = _proposeUma(_now() + 2 days);
 
         vm.warp(tIns + 1 hours);
-        _settle(_chain(49_000, tIns + 10 minutes, tIns - 1));
+        _settle(_chain(49_000, tIns, tIns + 10 minutes, tIns - 1));
         assertGt(pair.settlementPriceFixedTs(), 0, "fixture: settled at the insurer cutoff");
 
         vm.warp(tIns - 4 hours + terminator.TERMINATION_PROPOSAL_LIVENESS() + 1);
@@ -330,13 +330,13 @@ contract InsurerUmaCutoffCapTest is Test {
         _voteAndExecute();
 
         // Nobody settles the claim until every sample of the chain has been published.
-        vm.warp(PythChain.lastPublish(tIns) + 1);
+        vm.warp(LazerChain.lastTick(tIns) + 1);
         terminator.settleTerminationProposal(aid);
         assertEq(terminator.umaCutoffCap(address(pair)), tUma, "capped at the verified cutoff, not at the settle");
 
-        bytes[] memory samples = _chain(49_000, tIns, tIns - 1);
-        uint256 fee = factory.oracle().getSampleSetFee(BTC_USD_FEED_ID, samples);
-        vm.expectRevert(PythErrors.PriceFeedNotFoundWithinRange.selector);
+        bytes[] memory samples = _chain(49_000, tIns, tIns, tIns - 1);
+        uint256 fee = factory.oracle().getUpdateFee(samples.length);
+        vm.expectRevert(_tooLate(tIns + 30 minutes, tUma));
         terminator.terminateScheduledPair{value: fee}(address(pair), samples);
 
         vm.warp(tUma + GRACE + 1);
@@ -353,14 +353,14 @@ contract InsurerUmaCutoffCapTest is Test {
         _proposeInsurer(tIns);
         _voteAndExecute();
 
-        vm.warp(PythChain.lastPublish(tIns) + 1);
+        vm.warp(LazerChain.lastTick(tIns) + 1);
         vm.expectEmit(true, true, false, true, address(terminator));
         emit BazaarPairTerminator.TerminationProposalSuperseded(address(pair), aid);
         terminator.settleTerminationProposal(aid);
         assertEq(terminator.umaCutoffCap(address(pair)), 0, "no cap");
         assertEq(terminator.acceptedTerminationAssertionId(address(pair)), bytes32(0), "no acceptance in force");
 
-        _settle(_chain(49_000, tIns, tIns - 1));
+        _settle(_chain(49_000, tIns, tIns, tIns - 1));
         assertEq(_settlementPrice(), 49_000 * BAZAAR_SCALE, "the chain from the insurer cutoff settles");
     }
 
@@ -397,8 +397,8 @@ contract InsurerUmaCutoffCapTest is Test {
         _voteAndExecute();
         assertEq(terminator.umaCutoffCap(address(pair)), type(uint256).max, "capped at the maximum");
 
-        vm.warp(PythChain.lastPublish(tIns + 2 days) + 1);
-        _settle(_chain(REOPEN_PRICE_USD, tIns + 2 days, tIns - 1 hours));
+        vm.warp(LazerChain.lastTick(tIns + 2 days) + 1);
+        _settle(_chain(REOPEN_PRICE_USD, tIns, tIns + 2 days, tIns - 1 hours));
         assertEq(_settlementPrice(), REOPEN_PRICE_USD * BAZAAR_SCALE, "settled at the chain, uncapped");
     }
 

@@ -23,7 +23,7 @@ A = json.load(open(ADDRESSES))
 S = json.load(open(STATE)) if os.path.exists(STATE) else {"done": [], "orders": {}, "price": 2000.0}
 K = [key(i) for i in range(7)]
 W = [addr(k) for k in K]
-PX = Prices(A["pyth"])
+PX = Prices()
 CREATE = ("createOrder((uint8,bool,bool,uint8,uint256,uint256,uint256,uint256,uint64,address),"
           "(uint64,uint64,uint64,uint64,uint32),bytes[],uint256,uint256,uint256,bytes,bytes)")
 EXECUTE = "executeTriggeredOrders((uint64,(uint64,uint64,uint64,uint64,uint32))[],bytes[])"
@@ -62,11 +62,6 @@ def create(i, otype, is_long, size, label, trigger=0, limit=0, slip=0, exp=None)
 def mint_usdc():
     for w in W:
         send(K[0], A["usdc"], "mint(address,uint256)", w, 2_000_000 * 10**6)
-
-
-def seed_price():
-    # The factory lists a feed only once Pyth holds a price for it.
-    send(K[0], A["pyth"], "updatePriceFeeds(bytes[])", pu())
 
 
 def list_pair():
@@ -227,7 +222,7 @@ def close_short():
     create(4, MARKET, True, E18, "market-close", slip=500)
 
 
-STEPS = [mint_usdc, seed_price, list_pair, approvals, deposits, insurance_deposit, makers, taker_buy, taker_sell,
+STEPS = [mint_usdc, list_pair, approvals, deposits, insurance_deposit, makers, taker_buy, taker_sell,
          cancel, amend, stop_loss, stop_limit, refreshes, fire_stop_limit, victim_opens, liquidate, fire_stop_loss,
          unload_vault, withdraw_collateral, expire_and_sweep, insurance_withdrawal, claim_fees, close_short]
 

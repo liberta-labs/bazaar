@@ -262,7 +262,7 @@ contract InsuranceRedemptionHeadroomTest is IntegrationBase {
 
     function _claimExpect(address user, uint256 priceUsd, bytes4 selector) internal {
         bytes[] memory pu = _priceAt(priceUsd);
-        uint256 fee = oracle.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         vm.deal(user, fee);
         vm.prank(user);
         vm.expectRevert(selector);
@@ -313,7 +313,7 @@ contract InsuranceRedemptionHeadroomTest is IntegrationBase {
         // are not the call it binds to.
         bytes32 pairId = pair.pairId();
         bytes[] memory pu = _priceAt(MARK_USD);
-        uint256 fee = oracle.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         vm.deal(carol, fee);
         vm.expectEmit(true, true, false, true, address(pair));
         emit BazaarTypes.InsuranceWithdrawalExecuted(pairId, carol, paidShares, paid);

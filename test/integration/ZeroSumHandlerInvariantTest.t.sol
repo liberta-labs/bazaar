@@ -13,7 +13,8 @@ import {AdlLib} from "../../src/libraries/AdlLib.sol";
 import {RiskParamsLib} from "../../src/libraries/RiskParamsLib.sol";
 import {OrderView} from "../OrderView.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
-import {MockPyth} from "@pythnetwork/pyth-sdk-solidity/MockPyth.sol";
+import {MockPythLazer} from "../mocks/MockPythLazer.sol";
+import {LazerUpdate} from "../LazerUpdate.sol";
 import {VaultStore} from "../VaultStore.sol";
 
 /// @dev Stateful fuzzing handler for the conservation invariants. Drives deposits, withdrawals
@@ -37,7 +38,7 @@ import {VaultStore} from "../VaultStore.sol";
 ///      Every pair call is wrapped in try/catch so an occasional legitimate revert (thin margin,
 ///      dust order, a frozen pair) advances the sequence instead of aborting the run.
 contract ZeroSumHandler is Test {
-    bytes32 constant FEED = 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43;
+    bytes32 constant FEED = bytes32(uint256(1));
     int32 constant EXPO = -8;
     uint256 constant SCALE = 1e18;
     uint256 constant USDC_SCALE = 1e6;
@@ -58,7 +59,7 @@ contract ZeroSumHandler is Test {
     BazaarPair internal pair;
     BazaarPairLens internal lens;
     MockUSDC internal usdc;
-    MockPyth internal mockPyth;
+    MockPythLazer internal mockPyth;
     address[] internal traders;
 
     // Per-action coverage counters, asserted by afterInvariant. The invariant profile does not
@@ -152,7 +153,13 @@ contract ZeroSumHandler is Test {
     ///      end-of-run flag alone cannot stand in for this.
     bool public ghostAdlEverPending;
 
-    constructor(BazaarPair _pair, BazaarPairLens _lens, MockUSDC _usdc, MockPyth _pyth, address[] memory _traders) {
+    constructor(
+        BazaarPair _pair,
+        BazaarPairLens _lens,
+        MockUSDC _usdc,
+        MockPythLazer _pyth,
+        address[] memory _traders
+    ) {
         pair = _pair;
         lens = _lens;
         usdc = _usdc;
@@ -165,7 +172,7 @@ contract ZeroSumHandler is Test {
         uint64 pt = uint64(vm.getBlockTimestamp());
         int64 px = int64(int256(priceUsd * 1e8));
         uint64 conf = uint64(priceUsd * 1e8 / 1000);
-        bytes memory d = mockPyth.createPriceFeedUpdateData(FEED, px, conf, EXPO, px, conf, pt, pt > 0 ? pt - 1 : 0);
+        bytes memory d = LazerUpdate.live(FEED, px, conf, int16(EXPO), pt);
         pu = new bytes[](1);
         pu[0] = d;
     }
@@ -364,7 +371,7 @@ contract ZeroSumHandler is Test {
         amtBaz -= amtBaz % 1e12; // round to USDC granularity
         if (amtBaz == 0) return;
 
-        bytes[] memory pu = _pu(markUsd); // built before the prank: the mockPyth call consumes one
+        bytes[] memory pu = _pu(markUsd);
         vm.prank(a);
         try pair.withdrawCollateral(amtBaz, pu, 0, 0, 0, "") {
             ghostOpenWithdrawals++;

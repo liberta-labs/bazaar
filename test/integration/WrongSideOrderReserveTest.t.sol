@@ -12,7 +12,7 @@ import {CollateralLib} from "../../src/libraries/CollateralLib.sol";
 ///         margin test — the loss a limit on the wrong side of the mark books when it fills, and
 ///         the maker fee — so an order admitted at the mark fills at full size there, and no taker
 ///         sized past the maker's collateral can auto-cancel it. On the AAPL book at a $200 mark,
-///         with no per-call price update: every call rides the cache.
+///         where creations, amendments and withdrawals carry no update and run on the stored price.
 contract WrongSideOrderReserveTest is IntegrationBase {
     uint256 constant SHARE = 1e18;
     uint256 constant PX = 200;
@@ -49,7 +49,7 @@ contract WrongSideOrderReserveTest is IntegrationBase {
         _aaplDeposit(user, collateral);
     }
 
-    /// @dev Push a fresh price so every subsequent same-timestamp call rides the oracle cache.
+    /// @dev Store a fresh price so every subsequent same-timestamp call runs on the stored price.
     function _refreshAt(uint256 priceUsd) internal {
         vm.warp(vm.getBlockTimestamp() + 4);
         bytes[] memory pu = _priceUpdateFor(AAPL_USD_FEED_ID, priceUsd, uint64(vm.getBlockTimestamp()));
@@ -89,7 +89,7 @@ contract WrongSideOrderReserveTest is IntegrationBase {
         s.expirationBlock = uint64(vm.getBlockNumber() + 500_000);
     }
 
-    /// @dev Place an AAPL limit off the fresh cache.
+    /// @dev Place an AAPL limit with no price update, on the fresh stored price.
     function _place(address user, bool isLong, uint256 size, uint256 limitPriceBz) internal returns (uint256) {
         vm.prank(user);
         aaplPair.createOrder(_limitSpecAt(isLong, size, limitPriceBz), _hintsNone(), new bytes[](0), 0, 0, 0, "", "");

@@ -22,7 +22,7 @@ contract MarginLiquidationIntegrationTest is IntegrationBase {
     ///      lagged-MMR lookback is measured back from.
     function _pokePrice(uint256 priceUsd) internal {
         bytes[] memory pu = _priceAt(priceUsd);
-        uint256 fee = oracle.getUpdateFee(pu);
+        uint256 fee = oracle.getUpdateFee(pu.length);
         vm.deal(bob, 1 ether);
         vm.prank(bob);
         pair.refreshPrice{value: fee}(pu);
