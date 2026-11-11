@@ -448,8 +448,8 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     ///      sampling behind a stored price (a closed-market pair) eventually roll the ring past
     ///      it, and the window is then everything the ring holds, which moves with the block. No
     ///      seizure reads that state: it needs a mark more than an MMR_SAMPLE_INTERVAL older than
-    ///      the block, and liquidate refuses a stored price older than MAX_LIQUIDATION_PRICE_AGE
-    ///      while executeAdl refuses the stale fallback outright.
+    ///      the block, and liquidate first stores the price it judges at, which is never older
+    ///      than MAX_LIQUIDATION_PRICE_AGE, while executeAdl refuses the stale fallback outright.
     /// @return The lagged MMR in basis points.
     function _laggedMmr() internal view returns (uint256) {
         uint256 refTs = lastPairPrice.updateTs;
@@ -716,7 +716,7 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     ///      can, so shares priced against a frozen mark hand the difference to whoever can see it,
     ///      and inventory upside has no ceiling to charge conservatively against. Nothing is lost
     ///      by waiting: a closed venue freezes the machinery the capital would fund (ADL refuses a
-    ///      stale mark, liquidation refuses one past MAX_LIQUIDATION_PRICE_AGE), and the loss it
+    ///      stale mark, liquidation a price older than MAX_LIQUIDATION_PRICE_AGE), and the loss it
     ///      would cover realizes at the reopen, where a fresh mark prices the deposit correctly.
     ///      With no inventory held the basis is free capital, no price is read, and `priceUpdate`
     ///      may be empty — so recapitalizing a fund drained by ordinary bad debt is never gated on
@@ -1046,18 +1046,15 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     ///         these rewards; all paid from insurance. An account whose position is worth less
     ///         than MIN_ORDER_AMOUNT counts for at most its own equity (LiquidationLib.flatReward).
     uint256 internal constant MIN_LIQUIDATOR_REWARD = BazaarTypes.MIN_LIQUIDATOR_REWARD;
-    /// @notice Oldest stale-fallback price liquidate() will judge solvency against.
-    ///         The fallback carries no expiry of its own — it stays authoritative until some
-    ///         call stores a newer one — and seizure takes a position's entire bucket rather
-    ///         than its shortfall. Without this ceiling an account that breached maintenance
-    ///         margin for a single tick would stay seizable at that tick for as long as the pair
-    ///         went untouched, long after the market traded back through it. Past the ceiling the
-    ///         position is still liquidatable by a caller who supplies priceUpdate and pays the
-    ///         oracle fee out of msg.value, so the ceiling redirects liquidation onto a fresh
-    ///         price rather than withdrawing the power. Deliberately its own constant rather than
-    ///         a reference to the refresh bounty's gap: that one sizes keeper upkeep, this one
-    ///         bounds how old a mark may be and still confiscate collateral.
-    uint256 internal constant MAX_LIQUIDATION_PRICE_AGE = 10 minutes;
+    /// @notice Oldest price liquidate() will judge solvency against. On a non-continuously traded
+    ///         pair whose feed has gone quiet, Pyth's latest price may be this old and no older
+    ///         (_liquidationPrice); anything older waits for the next price. Seizure takes a
+    ///         position's entire bucket rather than its shortfall, so it is decided only against a
+    ///         price the market has just shown: across a closure positions wait for the reopen,
+    ///         the gap the reopen leg of the margin curve is sized for. Deliberately its own
+    ///         constant rather than a reference to the refresh bounty's gap: that one sizes keeper
+    ///         upkeep, this one bounds how old a price may be and still confiscate collateral.
+    uint256 internal constant MAX_LIQUIDATION_PRICE_AGE = 1 minutes;
 
     // -------------------- Functions --------------------
 
@@ -1067,12 +1064,14 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     ///      the stored one inside the cooldown; _liquidationMarginReqs) and this batch's 24h-lagged
     ///      MMR; the curve is stored after the walk. If underwater, it
     ///      seizes the bucket and aggregates the position into the vault's pending-liquidation
-    ///      inventory at the bankruptcy price. Reverts when solvency would be judged against a
-    ///      stale fallback price older than MAX_LIQUIDATION_PRICE_AGE — supplying priceUpdate
-    ///      resolves a fresh price and lifts that restriction. Once a settlement price is fixed
-    ///      the same entry point settles positions at it instead, and the caller earns up to
-    ///      BazaarTypes.TERMINAL_SETTLEMENT_TIP per position settled for someone else
-    ///      (CollateralLib._paySettlementTip describes who funds it and when).
+    ///      inventory at the bankruptcy price. The price is a fresh one, or on a non-continuously
+    ///      traded pair Pyth's latest one no older than MAX_LIQUIDATION_PRICE_AGE
+    ///      (_liquidationPrice). A call without priceUpdate reverts once the stored price has aged
+    ///      out, and one with it is judged at a stored price past the freshness window only when
+    ///      that is newer than the price the update brings.
+    ///      Once a settlement price is fixed the same entry point settles positions at it instead,
+    ///      and the caller earns up to BazaarTypes.TERMINAL_SETTLEMENT_TIP per position settled for
+    ///      someone else (CollateralLib._paySettlementTip describes who funds it and when).
     /// @param usersToLiquidate Array of addresses to check and potentially liquidate
     /// @param priceUpdate The signed price update messages for current price
     /// @return liquidatedCount Number of positions successfully liquidated
@@ -1113,14 +1112,7 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
         if (_pastTradingCutoff()) revert BazaarPair__TradingHalted();
 
         (BazaarTypes.PairPrice memory priceStruct, uint256 ethRefund, bool isPriceStale) =
-            _getCurrentPairPrice(priceUpdate, msg.value);
-        // Age-bound the stale fallback before it can decide a seizure. Compared by adding the
-        // ceiling to the mark rather than subtracting the mark from now: updateTs is a Pyth
-        // publish time, which may sit slightly ahead of the block, and a future-dated mark is
-        // not an old one — the subtraction would panic on exactly that input.
-        if (isPriceStale && priceStruct.updateTs + MAX_LIQUIDATION_PRICE_AGE < block.timestamp) {
-            revert BazaarPair__LiquidationPriceTooOld();
-        }
+            _liquidationPrice(priceUpdate, msg.value);
         uint256 currentPrice = priceStruct.spotPrice;
         // Judge at the curve this price gives, capped by the stored one inside the cooldown
         // (_liquidationMarginReqs says why), without storing it; the curve is written after the walk.
@@ -2305,7 +2297,7 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
             //
             // The adlTerminationTs legs add the runway itself. ADL requires a fresh price too, so a
             // closed market blocks the auction and this clock alike; both unblock together at the
-            // first stored price, and without the delay they would race in that one block over a
+            // first fresh price stored, and without the delay they would race in that one block over a
             // pair the auction might still save. Deferring costs nothing that is not already spent:
             // the exposure has sat unresolved for a day, and half an hour of a market that is
             // demonstrably open is the cheapest possible test of whether it can be resolved at all.
@@ -2382,6 +2374,66 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
         _refundEth(unusedEth);
     }
 
+    /// @notice Resolves the price liquidate() judges solvency against.
+    /// @dev A stored price past MAX_PRICE_STALENESS decides a seizure only when it is newer than
+    ///      the price the call's update brings. A continuously traded pair, or a call that brings
+    ///      no update, resolves the price as every other entry point does (_getCurrentPairPrice): a
+    ///      continuously traded pair then needs a fresh update, and on any other a call whose stored
+    ///      price has aged out reverts and must bring Pyth's latest update. On a non-continuously
+    ///      traded pair an update is read as Pyth's latest price
+    ///      (BazaarOracle.verifyAndFetchLatestPrice): issued within MAX_PRICE_STALENESS of the
+    ///      block, generated no more than MAX_LIQUIDATION_PRICE_AGE before it, and inside the
+    ///      confidence cap, a wider latest price reverting rather than giving way to an older one.
+    ///      Without this a caller could pick, whenever the stored price had aged out, between that
+    ///      stored price and a fresh one.
+    ///
+    ///      The price is stored when it is newer than the stored one, as any priced call's is, so
+    ///      the mark and the lagged MMR the seizure reads describe the instant it is judged at. One
+    ///      dated in the stored price's own second is not stored but is still the price judged at:
+    ///      a composite's price is dated by its older leg, so while that leg is quiet every latest
+    ///      update shares the stored second, and judging at the stored price would hold the moving
+    ///      leg at whatever value the first store of that second caught. A stored price newer than
+    ///      the update's is judged instead. An update carries each feed's latest price as of its
+    ///      issue, so that stored price came from an update issued after the call's: a single
+    ///      feed's was generated after the call's update was issued, within MAX_PRICE_STALENESS of
+    ///      the block, and a composite's, dated by its older leg, is still newer than the update's
+    ///      own price, which MAX_LIQUIDATION_PRICE_AGE bounds. A price older than
+    ///      MAX_PRICE_STALENESS is reported stale: the inline unload fills nothing against it and
+    ///      the health verdict opens no auction on it.
+    /// @param priceUpdate The signed Pyth Pro updates (may be empty)
+    /// @param ethBudget The ETH available to pay Pyth's verification fee
+    /// @return priceStruct The price solvency is judged at
+    /// @return unusedEth The ETH not spent on the oracle update, for the caller to refund
+    /// @return isStale True when that price is older than MAX_PRICE_STALENESS
+    function _liquidationPrice(bytes[] calldata priceUpdate, uint256 ethBudget)
+        internal
+        returns (BazaarTypes.PairPrice memory priceStruct, uint256 unusedEth, bool isStale)
+    {
+        if (isContinuouslyTraded || priceUpdate.length == 0) {
+            (priceStruct, unusedEth, isStale) = _getCurrentPairPrice(priceUpdate, ethBudget);
+            if (isStale) revert BazaarPair__LiquidationPriceTooOld();
+            return (priceStruct, unusedEth, false);
+        }
+        uint256 fee = oracle.getUpdateFee(priceUpdate.length);
+        if (fee > ethBudget) revert BazaarPair__InsufficientPythFee();
+        (uint256 spotPrice, uint256 lowPrice, uint256 highPrice, uint256 publishTime) = oracle.verifyAndFetchLatestPrice{
+            value: fee
+        }(
+            baseFeedId, priceUpdate, BazaarTypes.MAX_PRICE_STALENESS, MAX_LIQUIDATION_PRICE_AGE
+        );
+        (priceStruct,) = _buildAndStorePairPrice(spotPrice, lowPrice, highPrice, publishTime, 0);
+        if (publishTime >= priceStruct.updateTs) {
+            priceStruct.spotPrice = spotPrice;
+            priceStruct.lowPrice = lowPrice;
+            priceStruct.highPrice = highPrice;
+            priceStruct.updateTs = publishTime;
+        }
+        // Compared by adding the window rather than subtracting the stamp: updateTs may sit
+        // slightly ahead of the block.
+        isStale = priceStruct.updateTs + BazaarTypes.MAX_PRICE_STALENESS < block.timestamp;
+        unusedEth = ethBudget - fee;
+    }
+
     /// @notice Resolves the current pair price: the one in the caller's update when it supplies
     ///         one, otherwise the pair's own stored price.
     /// @dev Resolution order: (1) caller-supplied priceUpdate → (2) the pair's stored price while
@@ -2442,13 +2494,13 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
             }
 
             // Step 3: the stored price has aged out and there is no caller update — fall back to
-            // it anyway, for non-continuously traded pairs only. lastPairPrice is written only by
-            // step 1, so whatever it holds cleared both the freshness gate and the 2% confidence
-            // cap at the moment it was recorded: the fallback ages, but it is never a mark nobody
-            // validated. Nor can whoever submits the call choose which old mark their liquidation
-            // or valuation is judged against: the sole way to advance this one is refreshPrice (or
-            // any priced entry point), and those can only ever store a price that is fresh at the
-            // time they run.
+            // it anyway, for non-continuously traded pairs only. lastPairPrice is written only from
+            // verified updates: whatever it holds cleared the 2% confidence cap, and was fresh when
+            // it was recorded or, recorded by a liquidation, Pyth's latest price
+            // (_liquidationPrice). The fallback ages, but it is never a mark nobody validated, and
+            // never older than the last price someone could prove: the sole way to advance it is a
+            // priced call, and each can only store a price that is fresh, or Pyth's latest, at the
+            // time it runs. A liquidation never reaches this step's result.
             if (!isContinuouslyTraded) {
                 return (priceStruct, budget, true);
             }
@@ -2510,15 +2562,18 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
             emit NewPriceUpdateAdded(pairId, publishTime, spotPrice, BAZAAR_EXPONENT, currentFundingIndex);
 
             // Start the timed-out auction's runway. Sited here because this branch is the only
-            // writer of lastPairPrice and runs solely on a fresh, confidence-checked price, which
-            // makes it the one place that observes the feed actually serving this pair — a price
-            // the caller merely supplied but that fails the guard above stores nothing and arms
-            // nothing. The adlPendingSince term also bounds how much runway a single window can
-            // hand out: it is set once, when the window opens, so nothing that happens inside the
-            // window can rewind the clock and buy another grace period.
+            // writer of lastPairPrice, and armed only on a fresh, confidence-checked price, which
+            // shows the feed actually serving this pair. A latest price a liquidation stores after
+            // the feed has gone quiet arms nothing: ADL cannot run on it, so a runway started then
+            // would spend itself while the market is shut. A price the caller merely supplied but
+            // that fails the guard above stores nothing and arms nothing. The adlPendingSince term
+            // also bounds how much runway a single window can hand out: it is set once, when the
+            // window opens, so nothing that happens inside the window can rewind the clock and buy
+            // another grace period.
             if (
                 isAdlPending && adlTerminationTs == 0
                     && block.timestamp > adlPendingSince + VaultHealthLib.ADL_TIMEOUT_DURATION
+                    && publishTime + BazaarTypes.MAX_PRICE_STALENESS >= block.timestamp
             ) {
                 adlTerminationTs = block.timestamp + BazaarTypes.ADL_TERMINATION_GRACE;
                 emit AdlTerminationArmed(pairId, adlTerminationTs);
@@ -2685,10 +2740,9 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
 
     /// @notice Instant from which a timed-out ADL auction may terminate the pair; 0 while unarmed
     ///         (appended last to preserve the storage slots of all earlier state).
-    /// @dev Armed by _buildAndStorePairPrice — the sole writer of lastPairPrice, reached only from
-    ///      a fresh confidence-checked price — on the first stored price past
-    ///      adlPendingSince + VaultHealthLib.ADL_TIMEOUT_DURATION, and never re-armed while the
-    ///      window lasts. Set
+    /// @dev Armed by _buildAndStorePairPrice — the sole writer of lastPairPrice — on the first
+    ///      fresh price stored past adlPendingSince + VaultHealthLib.ADL_TIMEOUT_DURATION, and
+    ///      never re-armed while the window lasts. Set
     ///      once is what makes it a deadline rather than a snooze button: refreshing on every
     ///      stored price would push termination out indefinitely, and the refresh bounty pays
     ///      keepers to store a price every few minutes while the vault holds inventory, as it does

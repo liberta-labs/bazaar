@@ -133,7 +133,8 @@ library ClaimTextLib {
     ///        to after acceptance, in seconds
     /// @param graceHours How long the cutoff's update is awaited before the pair settles at its own
     ///        last stored price, counted from the cutoff or, for a pair the vote halted, from when
-    ///        the assertion's result is known if that is later, in hours
+    ///        the assertion's result is known if that is later, in hours; also how long after an
+    ///        accepted proposal's timestamp that caps a chain the stored price may settle it
     /// @param verdictGraceDays How long after submission a pair the vote halted waits for this
     ///        assertion's result before settling without one, in days
     /// @param voterLockDays How long after the settlement the voters of a halt the assertion did
@@ -143,6 +144,8 @@ library ClaimTextLib {
     /// @param sampleCount How many prices the median a halt the assertion did not uphold settles
     ///        at is taken over
     /// @param sampleSpacingMinutes How far apart in minutes those prices are taken, at least
+    /// @param chainLastResortDays How long after the timestamp a pair the vote halted waits for
+    ///        that median before settling at its own last stored price, in days
     /// @return The validation steps with each figure rendered, as UTF-8 text
     function terminationHowToValidate(
         uint256 livenessHours,
@@ -154,7 +157,8 @@ library ClaimTextLib {
         uint256 voterLockDays,
         uint256 levyFloorPercent,
         uint256 sampleCount,
-        uint256 sampleSpacingMinutes
+        uint256 sampleSpacingMinutes,
+        uint256 chainLastResortDays
     ) external pure returns (bytes memory) {
         string memory liveness = Strings.toString(livenessHours);
         string memory voteLead = Strings.toString(voteLeadHours);
@@ -210,8 +214,14 @@ library ClaimTextLib {
                     " prices from Pyth Pro one-second updates - the first the earliest update carrying a price generated at or "
                     "after the timestamp, each later one the earliest carrying a price generated at least ",
                     Strings.toString(sampleSpacingMinutes),
-                    " minutes after the update before it - and the holders who voted for it forfeit half of their voted shares. "
-                    "Without a result ",
+                    " minutes after the update before it (for a composite feed, the later of its two legs' updates) - and the "
+                    "holders who voted for it forfeit half of their voted shares. Where a proposal accepted for the pair names a "
+                    "timestamp at or after this one, no price in an update stamped after that timestamp counts. From ",
+                    Strings.toString(chainLastResortDays),
+                    " days after the timestamp, or from ",
+                    grace,
+                    " hours after that accepted timestamp if that is sooner, a call that does not bring such a set of prices "
+                    "settles the pair at its own last stored price. " "Without a result ",
                     verdictGrace,
                     " days after submission: as for FALSE, but those holders forfeit half of the dissenting fraction of their "
                     "voted shares, never less than ",

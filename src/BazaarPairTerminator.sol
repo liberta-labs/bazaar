@@ -309,7 +309,8 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
             voterLock,
             levyFloor,
             SETTLEMENT_SAMPLE_COUNT,
-            SETTLEMENT_SAMPLE_SPACING / 1 minutes
+            SETTLEMENT_SAMPLE_SPACING / 1 minutes,
+            ORACLE_DEAD_THRESHOLD / 1 days
         );
     }
 
@@ -761,7 +762,7 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
     ///
     ///      Settlement uses that same stored price (or, for a pair that never stored one,
     ///      NEVER_PRICED_SETTLEMENT_PRICE): lastPairPrice can only ever hold a mark that cleared
-    ///      both the freshness gate and the confidence cap at the moment it was recorded. A pair
+    ///      the confidence cap and was fresh, or Pyth's latest price, when it was recorded. A pair
     ///      that never stored a price is aged from its creation instead (_lastStoredPrice), so a
     ///      new listing cannot be terminated before it has had the threshold to be priced.
     function terminateStalePair(address pair) external nonReentrant {
@@ -954,9 +955,14 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
         uint256 earliest = block.timestamp + BazaarTypes.MIN_CUTOFF_LEAD;
         uint256 cutoffTs = proposal.lastTradingTs > earliest ? proposal.lastTradingTs : earliest;
         // A fixed price ends the pair, and a cutoff that does not beat the UMA cutoff in force
-        // changes nothing.
+        // changes nothing. A proposal at or after an insurer schedule caps that schedule's chain at
+        // its own timestamp (below), so that timestamp, not the floored cutoff, is what must beat
+        // the cap.
+        uint256 existing = p.scheduledTerminationTs();
+        bool capsSchedule = insurerScheduleId[proposal.pair] != bytes32(0) && proposal.lastTradingTs >= existing;
+        uint256 verified = capsSchedule ? proposal.lastTradingTs : cutoffTs;
         (bool umaCutoffSet, uint256 umaCutoff) = _umaCutoffInForce(proposal.pair, p);
-        if ((!umaCutoffSet || cutoffTs < umaCutoff) && p.settlementPriceFixedTs() == 0) {
+        if ((!umaCutoffSet || verified < umaCutoff) && p.settlementPriceFixedTs() == 0) {
             // The pair may already carry a cutoff: a UMA one, or an insurer one voted ahead of
             // time. A verified cutoff EARLIER than it pulls it in. For an insurer schedule this is
             // what keeps a 60% coalition from parking a late cutoff that no other path can
@@ -972,7 +978,6 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
             // acceptance earns nothing, while one after an acceptance that only capped an
             // insurer schedule is the first to schedule the pair, and earns it. The cap is
             // cleared because the pair now settles under UMA's rule, which never reads it.
-            uint256 existing = p.scheduledTerminationTs();
             if (existing == 0 || cutoffTs < existing) {
                 try p.setScheduledTermination(cutoffTs, proposal.proposer) {
                     acceptedTerminationAssertionId[proposal.pair] = assertionId;
@@ -1001,7 +1006,7 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
             // ever tightens. The listing bounty is not paid on this path; the pair pays it only
             // when it schedules. Any schedule at or before the cutoff that is not an insurer's is
             // UMA's own, which the cutoff already beat, so the pull-in above has covered it.
-            if (insurerScheduleId[proposal.pair] != bytes32(0) && proposal.lastTradingTs >= existing) {
+            if (capsSchedule) {
                 acceptedTerminationAssertionId[proposal.pair] = assertionId;
                 umaCutoffCap[proposal.pair] = proposal.lastTradingTs;
                 emit TerminationProposalAccepted(proposal.pair, assertionId, proposal.lastTradingTs);

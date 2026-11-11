@@ -593,6 +593,170 @@ contract BazaarOracleTest is Test {
         oracle.verifyAndFetchPrice{value: FEE}(compositeId, updates, MAX_AGE);
     }
 
+    // ==================== verifyAndFetchLatestPrice ====================
+
+    uint256 constant ISSUE = 3;
+    uint256 constant PRICE_AGE = 60;
+
+    function _latest(bytes32 id, bytes[] memory updates)
+        internal
+        returns (uint256 spot, uint256 low, uint256 high, uint256 publishTime)
+    {
+        return oracle.verifyAndFetchLatestPrice{value: FEE * updates.length}(id, updates, ISSUE, PRICE_AGE);
+    }
+
+    /// @notice An update issued now that carries a price generated earlier is Pyth's latest price:
+    ///         the live path refuses it as stale, the latest-price path returns it, dated when it
+    ///         was generated.
+    function test_Latest_CarriedPriceIssuedNow() public {
+        bytes[] memory carried = LazerUpdate.one(_tick(ASSET_JPY_FEED, 3000e8, 3e8, nowTs, nowTs - 40));
+        vm.expectRevert(
+            abi.encodeWithSelector(BazaarOracle.BazaarOracle__StalePrice.selector, ASSET_JPY_FEED, uint256(nowTs - 40))
+        );
+        oracle.verifyAndFetchPrice{value: FEE}(ASSET_JPY_FEED, carried, 3);
+
+        (uint256 spot, uint256 low, uint256 high, uint256 publishTime) = _latest(ASSET_JPY_FEED, carried);
+        assertEq(spot, 3000e18);
+        assertEq(low, 2997e18);
+        assertEq(high, 3003e18);
+        assertEq(publishTime, nowTs - 40, "dated when the price was generated");
+    }
+
+    /// @notice A fresh price passes both paths alike.
+    function test_Latest_FreshPrice() public {
+        (uint256 spot,,, uint256 publishTime) =
+            _latest(ASSET_JPY_FEED, LazerUpdate.one(_live(ASSET_JPY_FEED, 3000e8, 3e8, nowTs)));
+        assertEq(spot, 3000e18);
+        assertEq(publishTime, nowTs);
+    }
+
+    /// @notice The price may be exactly `maxPriceAge` old and no older.
+    function test_Latest_PriceAgeBoundIsInclusive() public {
+        _latest(ASSET_JPY_FEED, LazerUpdate.one(_tick(ASSET_JPY_FEED, 3000e8, 3e8, nowTs, nowTs - 60)));
+
+        bytes[] memory tooOld = LazerUpdate.one(_tick(ASSET_JPY_FEED, 3000e8, 3e8, nowTs, nowTs - 61));
+        vm.expectRevert(
+            abi.encodeWithSelector(BazaarOracle.BazaarOracle__StalePrice.selector, ASSET_JPY_FEED, uint256(nowTs - 61))
+        );
+        oracle.verifyAndFetchLatestPrice{value: FEE}(ASSET_JPY_FEED, tooOld, ISSUE, PRICE_AGE);
+    }
+
+    /// @notice The update must have been issued within `maxIssueAge` of the block, before or after
+    ///         it: one issued earlier says nothing about the seconds since.
+    function test_Latest_IssueBoundIsInclusiveBothWays() public {
+        _latest(ASSET_JPY_FEED, LazerUpdate.one(_tick(ASSET_JPY_FEED, 3000e8, 3e8, nowTs - 3, nowTs - 10)));
+        _latest(ASSET_JPY_FEED, LazerUpdate.one(_tick(ASSET_JPY_FEED, 3000e8, 3e8, nowTs + 3, nowTs - 10)));
+
+        bytes[] memory early = LazerUpdate.one(_tick(ASSET_JPY_FEED, 3000e8, 3e8, nowTs - 4, nowTs - 10));
+        vm.expectRevert(abi.encodeWithSelector(BazaarOracle.BazaarOracle__StaleUpdate.selector, (nowTs - 4) * MICROS));
+        oracle.verifyAndFetchLatestPrice{value: FEE}(ASSET_JPY_FEED, early, ISSUE, PRICE_AGE);
+
+        bytes[] memory ahead = LazerUpdate.one(_tick(ASSET_JPY_FEED, 3000e8, 3e8, nowTs + 4, nowTs - 10));
+        vm.expectRevert(abi.encodeWithSelector(BazaarOracle.BazaarOracle__StaleUpdate.selector, (nowTs + 4) * MICROS));
+        oracle.verifyAndFetchLatestPrice{value: FEE}(ASSET_JPY_FEED, ahead, ISSUE, PRICE_AGE);
+    }
+
+    /// @notice A price generated after the block by more than the issue window is refused, as on
+    ///         the live path.
+    function test_Latest_PriceGeneratedTooFarAhead_Reverts() public {
+        bytes[] memory ahead = LazerUpdate.one(_tick(ASSET_JPY_FEED, 3000e8, 3e8, nowTs + 3, nowTs + 4));
+        vm.expectRevert(
+            abi.encodeWithSelector(BazaarOracle.BazaarOracle__StalePrice.selector, ASSET_JPY_FEED, uint256(nowTs + 4))
+        );
+        oracle.verifyAndFetchLatestPrice{value: FEE}(ASSET_JPY_FEED, ahead, ISSUE, PRICE_AGE);
+    }
+
+    /// @notice Every supplied update must be recent, including one that would not be chosen: an
+    ///         older one cannot ride along beside a current one.
+    function test_Latest_EveryUpdateMustBeRecent() public {
+        bytes[] memory mixed = LazerUpdate.two(
+            _tick(ASSET_JPY_FEED, 3000e8, 3e8, nowTs, nowTs - 10),
+            _tick(ASSET_JPY_FEED, 2900e8, 3e8, nowTs - 30, nowTs - 30)
+        );
+        vm.expectRevert(abi.encodeWithSelector(BazaarOracle.BazaarOracle__StaleUpdate.selector, (nowTs - 30) * MICROS));
+        oracle.verifyAndFetchLatestPrice{value: 2 * FEE}(ASSET_JPY_FEED, mixed, ISSUE, PRICE_AGE);
+    }
+
+    /// @notice Among recent updates the most recently generated price is the one returned.
+    function test_Latest_MostRecentlyGeneratedWins() public {
+        bytes[] memory two = LazerUpdate.two(
+            _tick(ASSET_JPY_FEED, 2900e8, 3e8, nowTs - 2, nowTs - 20),
+            _tick(ASSET_JPY_FEED, 3000e8, 3e8, nowTs, nowTs - 5)
+        );
+        (uint256 spot,,, uint256 publishTime) = _latest(ASSET_JPY_FEED, two);
+        assertEq(spot, 3000e18);
+        assertEq(publishTime, nowTs - 5);
+    }
+
+    /// @notice A latest price wider than the confidence cap is refused, never passed over for an
+    ///         older one; a zero confidence is refused as absent.
+    function test_Latest_ConfidenceRules() public {
+        bytes[] memory wide = LazerUpdate.one(_tick(ASSET_JPY_FEED, 3000e8, 61e8, nowTs, nowTs - 10));
+        vm.expectPartialRevert(BazaarOracle.BazaarOracle__ConfidenceTooHigh.selector);
+        oracle.verifyAndFetchLatestPrice{value: FEE}(ASSET_JPY_FEED, wide, ISSUE, PRICE_AGE);
+
+        bytes[] memory unbounded = LazerUpdate.one(_tick(ASSET_JPY_FEED, 3000e8, 0, nowTs, nowTs - 10));
+        vm.expectRevert(abi.encodeWithSelector(BazaarOracle.BazaarOracle__IncompleteFeed.selector, ASSET_JPY_FEED));
+        oracle.verifyAndFetchLatestPrice{value: FEE}(ASSET_JPY_FEED, unbounded, ISSUE, PRICE_AGE);
+    }
+
+    /// @notice An update requested without the feed update timestamp cannot show when its price was
+    ///         generated, and is refused.
+    function test_Latest_UpdateWithoutGenerationTime_Reverts() public {
+        bytes memory props = abi.encodePacked(
+            LazerUpdate.propPrice(3000e8), LazerUpdate.propExponent(EXPO), LazerUpdate.propConfidence(3e8)
+        );
+        bytes[] memory missing = LazerUpdate.one(
+            LazerUpdate.sign(
+                LazerUpdate.rawPayload(
+                    nowTs * MICROS,
+                    LazerUpdate.CHANNEL_FIXED_RATE_1000,
+                    1,
+                    LazerUpdate.rawFeed(ASSET_JPY_FEED, 3, props)
+                )
+            )
+        );
+        vm.expectRevert(abi.encodeWithSelector(BazaarOracle.BazaarOracle__IncompleteFeed.selector, ASSET_JPY_FEED));
+        oracle.verifyAndFetchLatestPrice{value: FEE}(ASSET_JPY_FEED, missing, ISSUE, PRICE_AGE);
+    }
+
+    /// @notice A composite's legs may come from two recent updates; its price is dated by the older
+    ///         leg, and a leg older than the bound reverts.
+    function test_Latest_Composite() public {
+        bytes32 compositeId = _registerJpyComposite();
+        bytes[] memory legs = LazerUpdate.two(
+            _tick(ASSET_JPY_FEED, 3000e8, 3e8, nowTs, nowTs - 30), _tick(USD_JPY_FEED, 150e8, 0.15e8, nowTs, nowTs - 2)
+        );
+        (uint256 spot,,, uint256 publishTime) = _latest(compositeId, legs);
+        assertEq(spot, 20e18);
+        assertEq(publishTime, nowTs - 30, "the older leg's second");
+
+        bytes[] memory staleLeg = LazerUpdate.two(
+            _tick(ASSET_JPY_FEED, 3000e8, 3e8, nowTs, nowTs - 5), _tick(USD_JPY_FEED, 150e8, 0.15e8, nowTs, nowTs - 61)
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(BazaarOracle.BazaarOracle__StalePrice.selector, USD_JPY_FEED, uint256(nowTs - 61))
+        );
+        oracle.verifyAndFetchLatestPrice{value: 2 * FEE}(compositeId, staleLeg, ISSUE, PRICE_AGE);
+    }
+
+    /// @notice The fee is exact, as on every path.
+    function test_Latest_FeeMustMatchExactly() public {
+        bytes[] memory u = LazerUpdate.one(_tick(ASSET_JPY_FEED, 3000e8, 3e8, nowTs, nowTs - 10));
+        vm.expectRevert(abi.encodeWithSelector(BazaarOracle.BazaarOracle__FeeMismatch.selector, FEE + 1, FEE));
+        oracle.verifyAndFetchLatestPrice{value: FEE + 1}(ASSET_JPY_FEED, u, ISSUE, PRICE_AGE);
+    }
+
+    /// @notice No bound a caller passes can overflow the age arithmetic.
+    function test_Latest_HugeBoundsDoNotOverflow() public {
+        bytes[] memory u = LazerUpdate.one(_tick(ASSET_JPY_FEED, 3000e8, 3e8, nowTs, nowTs - 10));
+        (uint256 spot,,,) =
+            oracle.verifyAndFetchLatestPrice{value: FEE}(ASSET_JPY_FEED, u, type(uint256).max, type(uint256).max);
+        assertEq(spot, 3000e18);
+        (spot,,,) = oracle.verifyAndFetchPrice{value: FEE}(ASSET_JPY_FEED, u, type(uint256).max);
+        assertEq(spot, 3000e18);
+    }
+
     // ==================== fetchPriceAtTick ====================
 
     uint64 constant CUTOFF = 1_699_990_000;

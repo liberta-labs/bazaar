@@ -146,15 +146,16 @@ contract UnloadStaleOracleTest is IntegrationBase {
     // liquidate()'s inline unload
     // ============================================================
 
-    /// @notice A liquidation on a stale fallback no older than MAX_LIQUIDATION_PRICE_AGE still
-    ///         seizes, and still pays the flat reward, but its inline unload leaves the inventory
-    ///         in the vault instead of selling it into an in-band bid. A fresh-price unloadVault
-    ///         afterwards sells the same inventory into that bid.
+    /// @notice A liquidation on Pyth's latest price, older than MAX_PRICE_STALENESS but within the
+    ///         minute a seizure may be judged on, still seizes and still pays the flat reward, but
+    ///         its inline unload leaves the inventory in the vault instead of selling it into an
+    ///         in-band bid. A fresh-price unloadVault afterwards sells the same inventory into that
+    ///         bid.
     ///
     ///         Dave: 1 AAPL long, entry $190, $50 collateral. At the stale $150 his equity is $10,
     ///         under the 20% MMR of $30, and his bankruptcy price is about $140. Carol's bid at
     ///         $150 sits inside the 5% band (edge $142.50), where a fresh walk fills at once.
-    function test_liquidate_staleFallback_seizesButLeavesInventory_freshUnloadFills() public {
+    function test_liquidate_staleLatestPrice_seizesButLeavesInventory_freshUnloadFills() public {
         _warmAapl(150);
 
         _depositAapl(carol, 300 * BAZAAR_SCALE);
@@ -165,11 +166,14 @@ contract UnloadStaleOracleTest is IntegrationBase {
         BucketStore.setSize(address(aaplPair), dave, AAPL);
         BucketStore.setEntryValue(address(aaplPair), dave, 190 * BAZAAR_SCALE);
 
-        // Stale, but well inside MAX_LIQUIDATION_PRICE_AGE, so the seizure itself is allowed.
+        // Thirty seconds on, with nothing generated since: Pyth's latest update still carries $150.
         vm.warp(vm.getBlockTimestamp() + 30);
+        uint64 nowTs = uint64(vm.getBlockTimestamp());
+        bytes[] memory latest = _tickUpdateFor(AAPL_USD_FEED_ID, 150, nowTs, nowTs - 30);
 
+        vm.deal(bob, 1 ether);
         vm.prank(bob);
-        assertEq(aaplPair.liquidate(_arr1(dave), new bytes[](0)), 1, "seizure commits on the stale mark");
+        assertEq(aaplPair.liquidate{value: 0.01 ether}(_arr1(dave), latest), 1, "seizure commits on the stale mark");
 
         assertEq(_pendingLiqSize(), AAPL, "the inline unload leaves the inventory with the vault");
         assertEq(OrderView.order(aaplPair, bidId).filledSize, 0, "in-band bid not sold into");
@@ -194,5 +198,42 @@ contract UnloadStaleOracleTest is IntegrationBase {
         (uint256 size, uint256 entryValue) = _aaplPosition(carol);
         assertEq(size, AAPL, "maker took the inventory over");
         assertEq(entryValue, 150 * BAZAAR_SCALE, "at the maker's own price");
+    }
+
+    /// @dev Dave's 1 AAPL long (entry $190, $50 collateral) and carol's in-band bid at $150, with the
+    ///      pair's stored price at $150 thirty seconds ago.
+    function _stageSeizableLongBesideABid() internal returns (uint256 bidId) {
+        _warmAapl(150);
+        _depositAapl(carol, 300 * BAZAAR_SCALE);
+        bidId = _placeBidAapl(carol, AAPL, 150 * BAZAAR_SCALE, _aaplPu(150));
+        _depositAapl(dave, 50 * BAZAAR_SCALE);
+        BucketStore.setIsLong(address(aaplPair), dave, true);
+        BucketStore.setSize(address(aaplPair), dave, AAPL);
+        BucketStore.setEntryValue(address(aaplPair), dave, 190 * BAZAAR_SCALE);
+        vm.warp(vm.getBlockTimestamp() + 30);
+    }
+
+    function _liquidateDaveOn(bytes[] memory pu) internal {
+        vm.deal(bob, 1 ether);
+        vm.prank(bob);
+        assertEq(aaplPair.liquidate{value: 0.01 ether}(_arr1(dave), pu), 1, "dave seized");
+    }
+
+    /// @notice Pyth's latest price generated exactly MAX_PRICE_STALENESS before the block is fresh:
+    ///         the seizure's inline unload sells into the in-band bid.
+    function test_liquidate_latestPriceAtTheFreshBoundary_unloadFills() public {
+        _stageSeizableLongBesideABid();
+        uint64 nowTs = uint64(vm.getBlockTimestamp());
+        _liquidateDaveOn(_tickUpdateFor(AAPL_USD_FEED_ID, 150, nowTs, nowTs - 3));
+        assertEq(_pendingLiqSize(), 0, "the inventory sold into the bid");
+    }
+
+    /// @notice One second older and the same price is stale: the seizure commits, the unload waits.
+    function test_liquidate_latestPricePastTheFreshBoundary_unloadWaits() public {
+        uint256 bidId = _stageSeizableLongBesideABid();
+        uint64 nowTs = uint64(vm.getBlockTimestamp());
+        _liquidateDaveOn(_tickUpdateFor(AAPL_USD_FEED_ID, 150, nowTs, nowTs - 4));
+        assertEq(_pendingLiqSize(), AAPL, "the inventory waits in the vault");
+        assertEq(OrderView.order(aaplPair, bidId).filledSize, 0, "the bid is untouched");
     }
 }

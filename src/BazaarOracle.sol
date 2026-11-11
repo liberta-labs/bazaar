@@ -29,7 +29,8 @@ import {LazerPayloadLib} from "./libraries/LazerPayloadLib.sol";
 ///      that the ones it relies on are there (LazerPayloadLib.Feed.included). A price's age is
 ///      measured from its feedUpdateTimestamp, when the price was generated, never from the
 ///      update's own timestamp: while a market is shut Pyth keeps issuing updates that carry the
-///      last price forward, each stamped with the current time.
+///      last price forward, each stamped with the current time. That stamp says when Pyth issued
+///      the update, which verifyAndFetchLatestPrice reads to prove no newer price was left out.
 contract BazaarOracle {
     // -------------------- Errors --------------------
     error BazaarOracle__ZeroAddress();
@@ -41,6 +42,7 @@ contract BazaarOracle {
     error BazaarOracle__FeedNotInUpdate(bytes32 feedId);
     error BazaarOracle__IncompleteFeed(bytes32 feedId);
     error BazaarOracle__StalePrice(bytes32 feedId, uint256 generatedTs);
+    error BazaarOracle__StaleUpdate(uint64 timestampUs);
     error BazaarOracle__WrongTick(uint64 timestampUs, uint8 channel);
     error BazaarOracle__SampleCountMismatch(uint256 updates, uint256 expected);
     error BazaarOracle__SampleNotProven(bytes32 feedId, uint64 target, uint64 tick);
@@ -198,11 +200,65 @@ contract BazaarOracle {
             if (_isNewer(q, quote)) quote = q;
         }
 
-        _requireLive(baseId, base, maxStaleness);
+        _requireLive(baseId, base, maxStaleness, maxStaleness);
         if (quoteId == bytes32(0)) {
             return _normalizeBase(baseId, base);
         }
-        _requireLive(quoteId, quote, maxStaleness);
+        _requireLive(quoteId, quote, maxStaleness, maxStaleness);
+        return _composeSafe(baseId, base, quote, quoteId, invertQuote);
+    }
+
+    /// @notice Verify the supplied updates and return the USD price they carry: Pyth's latest
+    ///         price as of updates issued within `maxIssueAge` of the block, provided it was
+    ///         generated no more than `maxPriceAge` before the block.
+    /// @dev Pyth issues an update on every tick of a fixed-rate channel whether or not its feeds
+    ///      produced anything, and each update, on any channel, carries the feed's most recent
+    ///      price as of its own timestamp, with
+    ///      the feed update timestamp saying when that price was generated. An update issued within
+    ///      `maxIssueAge` of the block therefore holds the latest price that existed when it was
+    ///      issued, however long the feed has been quiet: a price generated after that can only
+    ///      fall between the update's timestamp and the block, the latitude every live price
+    ///      leaves too. Every supplied update must meet the bound, so none can carry an older
+    ///      reading in place of a newer one.
+    ///
+    ///      The legs, their properties and the confidence cap are read and checked exactly as in
+    ///      verifyAndFetchPrice. A latest price wider than MAX_CONFIDENCE_BP reverts, so a wide
+    ///      price is never passed over for an older, narrower one.
+    /// @param baseFeedId The Pyth feed ID for the base asset, or a registered composite ID
+    /// @param priceUpdate The signed Pyth Pro updates; `msg.value` must equal getUpdateFee of their count
+    /// @param maxIssueAge How far each update's own timestamp may sit from the block, in either
+    ///        direction, in seconds
+    /// @param maxPriceAge How long before the block each leg's price may have been generated, in seconds
+    /// @return spotPrice The USD price normalized to BAZAAR_SCALE
+    /// @return lowPrice spotPrice − confidence (floored at 1 wei)
+    /// @return highPrice spotPrice + confidence
+    /// @return publishTime The second the price was generated in (the older leg's for composites)
+    function verifyAndFetchLatestPrice(
+        bytes32 baseFeedId,
+        bytes[] calldata priceUpdate,
+        uint256 maxIssueAge,
+        uint256 maxPriceAge
+    ) external payable returns (uint256 spotPrice, uint256 lowPrice, uint256 highPrice, uint256 publishTime) {
+        (bytes32 baseId, bytes32 quoteId, bool invertQuote) = _resolve(baseFeedId);
+        uint256 fee = _perUpdateFee(priceUpdate.length);
+
+        LazerPayloadLib.Feed memory base;
+        LazerPayloadLib.Feed memory quote;
+        for (uint256 i = 0; i < priceUpdate.length; i++) {
+            (uint64 timestamp,, LazerPayloadLib.Feed memory b, LazerPayloadLib.Feed memory q) =
+                _verifyAndRead(priceUpdate[i], fee, baseId, quoteId);
+            if (!_within(LazerPayloadLib.toSeconds(timestamp), maxIssueAge, maxIssueAge)) {
+                revert BazaarOracle__StaleUpdate(timestamp);
+            }
+            if (_isNewer(b, base)) base = b;
+            if (_isNewer(q, quote)) quote = q;
+        }
+
+        _requireLive(baseId, base, maxPriceAge, maxIssueAge);
+        if (quoteId == bytes32(0)) {
+            return _normalizeBase(baseId, base);
+        }
+        _requireLive(quoteId, quote, maxPriceAge, maxIssueAge);
         return _composeSafe(baseId, base, quote, quoteId, invertQuote);
     }
 
@@ -369,17 +425,26 @@ contract BazaarOracle {
     }
 
     /// @dev Reverts unless `feed` was supplied, carries every property a live price needs with a
-    ///      value for its confidence and its generation time, and was generated within
-    ///      `maxStaleness` seconds of the block in either direction.
-    function _requireLive(bytes32 feedId, LazerPayloadLib.Feed memory feed, uint256 maxStaleness) internal view {
+    ///      value for its confidence and its generation time, and was generated no more than
+    ///      `maxAge` seconds before the block and no more than `maxAhead` seconds after it.
+    function _requireLive(bytes32 feedId, LazerPayloadLib.Feed memory feed, uint256 maxAge, uint256 maxAhead)
+        internal
+        view
+    {
         if (!feed.found) revert BazaarOracle__FeedNotInUpdate(feedId);
         if (feed.included & LIVE_PROPERTIES != LIVE_PROPERTIES || feed.feedUpdateTimestamp == 0 || feed.confidence == 0)
         {
             revert BazaarOracle__IncompleteFeed(feedId);
         }
         uint256 generated = LazerPayloadLib.toSeconds(feed.feedUpdateTimestamp);
-        uint256 distance = generated > block.timestamp ? generated - block.timestamp : block.timestamp - generated;
-        if (distance > maxStaleness) revert BazaarOracle__StalePrice(feedId, generated);
+        if (!_within(generated, maxAge, maxAhead)) revert BazaarOracle__StalePrice(feedId, generated);
+    }
+
+    /// @dev Whether second `ts` lies no more than `maxBehind` seconds before the block and no more
+    ///      than `maxAhead` after it. Compared by subtraction on the larger side, so no bound a
+    ///      caller passes can overflow.
+    function _within(uint256 ts, uint256 maxBehind, uint256 maxAhead) internal view returns (bool) {
+        return ts > block.timestamp ? ts - block.timestamp <= maxAhead : block.timestamp - ts <= maxBehind;
     }
 
     /// @dev Reverts unless `feed` was supplied with the properties a tick's price needs.

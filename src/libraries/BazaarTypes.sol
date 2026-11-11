@@ -708,7 +708,10 @@ library BazaarTypes {
     ///      whichever comes first.
     uint256 internal constant INSURER_SWEEP_GRACE = 14 days;
     /// @dev How far the second a Pyth price was generated in may sit from the block timestamp, in
-    ///      either direction, for the pair to act on the price.
+    ///      either direction, for the pair to act on the price. A liquidation on a non-continuously
+    ///      traded pair may also act on Pyth's latest price up to BazaarPair's
+    ///      MAX_LIQUIDATION_PRICE_AGE old, provided the update proving it was issued within this
+    ///      window of the block.
     uint256 internal constant MAX_PRICE_STALENESS = 3 seconds;
     /// @dev How long before a scheduled cutoff limbo begins: from then until the price is fixed
     ///      nothing trades, liquidates, deposits or withdraws. Nothing may trade once the
@@ -848,15 +851,15 @@ library BazaarTypes {
     // ADL constants (shared between BazaarPair, AdlLib, BazaarPairLens)
     uint256 internal constant ADL_AUCTION_DURATION = 10 minutes;
 
-    /// @notice Runway a timed-out auction gets, measured from the first stored price after the
-    ///         timeout, before anyone may terminate the pair on the clock.
+    /// @notice Runway a timed-out auction gets, measured from the first fresh price stored after
+    ///         the timeout, before anyone may terminate the pair on the clock.
     /// @dev Non-continuously traded pairs cannot execute ADL while their market is closed: every
     ///      ADL path requires a fresh price, and no signed update exists to supply. Without this
     ///      grace the auction and the termination it is racing both unblock in the same block at
     ///      reopen, and whoever calls first wins — with termination favoured, since the auction
     ///      needs its winners submitted in a sorted batch. That is the auction's strongest moment
     ///      (threshold fully decayed, reopen gap finally on-chain), so it is the worst one to lose
-    ///      by a race. Arming from the stored price rather than from a wall-clock offset keeps the
+    ///      by a race. Arming from a stored price rather than from a wall-clock offset keeps the
     ///      window independent of how long the market was shut: a weekend and a holiday closure
     ///      both yield exactly this much fresh-priced runway.
     uint256 internal constant ADL_TERMINATION_GRACE = 30 minutes;

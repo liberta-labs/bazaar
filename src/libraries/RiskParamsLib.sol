@@ -57,9 +57,10 @@ library RiskParamsLib {
     uint256 internal constant LIQ_GAP_PRIOR_FLOOR_BP = 100; // 1% of per-side open-interest size
 
     /// @notice Time without a stored price that the fade clock refuses to count on a
-    ///         non-continuously traded pair. A liquidation either stores the fresh price it runs
-    ///         on or needs one stored no more than MAX_LIQUIDATION_PRICE_AGE before it, so a
-    ///         stretch this long with nothing stored is one in which no liquidation happened. On a
+    ///         non-continuously traded pair. A liquidation runs on a price generated no more than
+    ///         MAX_LIQUIDATION_PRICE_AGE before it, which its own call stores when it is newer than
+    ///         the stored one, so a stretch this long with nothing stored is one in which no
+    ///         liquidation happened. On a
     ///         session pair whose vault holds inventory it is also one in which none could have —
     ///         the refresh bounty stores a price every REFRESH_BOUNTY_MIN_GAP there whenever the
     ///         feed publishes — so twelve silent hours mean a shut venue. Where that cadence is off

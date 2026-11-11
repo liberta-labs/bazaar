@@ -114,11 +114,15 @@ contract AdlStaleTriggerTest is IntegrationBase {
         count = aaplPair.liquidate{value: 0.01 ether}(_arr1(user), freshPu);
     }
 
-    /// @dev Liquidate `user` as bob on the stale fallback: empty calldata against a stored price
-    ///      the caller has aged past MAX_PRICE_STALENESS.
+    /// @dev Liquidate `user` as bob on a stale mark: Pyth's latest update, issued now, carrying MARK
+    ///      generated 30 s ago with nothing newer since. That is past MAX_PRICE_STALENESS, so the call
+    ///      runs as stale, and within the minute a liquidation may be judged on.
     function _liquidateStale(address user) internal returns (uint256 count) {
+        uint64 nowTs = uint64(vm.getBlockTimestamp());
+        bytes[] memory latest = _tickUpdateFor(AAPL_USD_FEED_ID, MARK, nowTs, nowTs - 30);
+        vm.deal(bob, 1 ether);
         vm.prank(bob);
-        count = aaplPair.liquidate(_arr1(user), new bytes[](0));
+        count = aaplPair.liquidate{value: 0.01 ether}(_arr1(user), latest);
     }
 
     /// The stale fallback must not open a window, even though the inherited exposure is far past
@@ -131,7 +135,6 @@ contract AdlStaleTriggerTest is IntegrationBase {
         // be the freshness gate and not an undersized fixture.
         assertGt(expectedLoss, _aaplInsurance(), "fixture clears the whole fund, let alone the fund above its reserve");
 
-        // Age the stored price past MAX_PRICE_STALENESS so empty calldata resolves the stale fallback.
         vm.warp(vm.getBlockTimestamp() + 30);
 
         assertEq(_liquidateStale(dave), 1, "liquidation commits on the stale mark");
@@ -155,7 +158,7 @@ contract AdlStaleTriggerTest is IntegrationBase {
         assertTrue(aaplPair.isAdlPending(), "fresh mark opens the ADL window");
     }
 
-    /// A seizure on the stale fallback commits into the estate's own bucket although no window is
+    /// A seizure on a stale mark commits into the estate's own bucket although no window is
     /// stored. The vault holds a long at the mark, covered by the fund, so nothing opens a window
     /// until alice's loss beyond her collateral is held opposite it; netting her against the long
     /// would cost the fund more than it may spend, so she is seized into the short bucket, and the
@@ -202,6 +205,31 @@ contract AdlStaleTriggerTest is IntegrationBase {
         assertTrue(aaplPair.isAdlPending(), "window open before the clock is aged");
 
         vm.warp(vm.getBlockTimestamp() + 25 hours);
+    }
+
+    /// A timed-out window's runway arms on the first fresh price stored, not on Pyth's latest price
+    /// a liquidation stores after the feed went quiet: ADL cannot run on that price, so a runway
+    /// started then would spend itself while the market is shut.
+    function test_staleLatestPriceStore_doesNotArmTheRunway() public {
+        _openWindowThenExpireClock();
+        assertEq(lens.adlTerminationTs(address(aaplPair)), 0, "fixture: the runway is not armed");
+
+        uint64 nowTs = uint64(vm.getBlockTimestamp());
+        bytes[] memory latest = _tickUpdateFor(AAPL_USD_FEED_ID, MARK, nowTs, nowTs - 30);
+        vm.deal(bob, 1 ether);
+        vm.prank(bob);
+        assertEq(aaplPair.liquidate{value: 0.01 ether}(_arr1(carol), latest), 0, "nothing to seize");
+        (,, uint256 storedTs,,) = aaplPair.lastPairPrice();
+        assertEq(storedTs, nowTs - 30, "the latest price is stored");
+        assertEq(lens.adlTerminationTs(address(aaplPair)), 0, "a stale store arms nothing");
+
+        vm.warp(vm.getBlockTimestamp() + 1);
+        _warmAapl(MARK);
+        assertEq(
+            lens.adlTerminationTs(address(aaplPair)),
+            vm.getBlockTimestamp() + BazaarTypes.ADL_TERMINATION_GRACE,
+            "the first fresh price arms it"
+        );
     }
 
     /// @dev Call executeAdl with a fresh mark and an empty winner set. Which revert comes back
@@ -446,7 +474,7 @@ contract AdlStaleTriggerTest is IntegrationBase {
     // ---------------------------------------------------------------------------------------
 
     /// @dev Seizes alice into the short bucket while a window is open on dave's long, on a fresh
-    ///      mark or on the stale fallback (the caller ages the stored price), and checks both buckets
+    ///      mark or on a stale one (_liquidateStale), and checks both buckets
     ///      stand under the one window. Her netting against the long cannot fit: the overlap's
     ///      loss is the gap between the two entry bases, about four times the fund, against free
     ///      capital above the reserve plus the two slices' seizure.
@@ -570,8 +598,7 @@ contract AdlStaleTriggerTest is IntegrationBase {
         uint256 topUp = 20 * BAZAAR_SCALE;
         _stageTaggedLong(carol, topUp);
 
-        // Part-way down the decay, and short of MAX_LIQUIDATION_PRICE_AGE so the stale fallback can
-        // still carry a seizure.
+        // Part-way down the decay; the seizure runs on Pyth's latest price, generated 30 s before it.
         vm.warp(vm.getBlockTimestamp() + 8 minutes);
         uint256 clockBefore = aaplPair.adlAuctionStartTs();
         uint256 gateBefore = lens.getAdlScoreThreshold(address(aaplPair));

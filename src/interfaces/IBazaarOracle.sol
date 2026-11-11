@@ -29,6 +29,7 @@ interface IBazaarOracle {
     error BazaarOracle__FeedNotInUpdate(bytes32 feedId);
     error BazaarOracle__IncompleteFeed(bytes32 feedId);
     error BazaarOracle__StalePrice(bytes32 feedId, uint256 generatedTs);
+    error BazaarOracle__StaleUpdate(uint64 timestampUs);
     error BazaarOracle__WrongTick(uint64 timestampUs, uint8 channel);
     error BazaarOracle__SampleCountMismatch(uint256 updates, uint256 expected);
     error BazaarOracle__SampleNotProven(bytes32 feedId, uint64 target, uint64 tick);
@@ -49,6 +50,12 @@ interface IBazaarOracle {
         external
         payable
         returns (uint256 spotPrice, uint256 lowPrice, uint256 highPrice, uint256 publishTime);
+    function verifyAndFetchLatestPrice(
+        bytes32 baseFeedId,
+        bytes[] calldata priceUpdate,
+        uint256 maxIssueAge,
+        uint256 maxPriceAge
+    ) external payable returns (uint256 spotPrice, uint256 lowPrice, uint256 highPrice, uint256 publishTime);
     function fetchPriceAtTick(bytes32 baseFeedId, bytes[] calldata priceUpdate, uint64 tick)
         external
         payable

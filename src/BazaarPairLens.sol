@@ -1048,7 +1048,7 @@ contract BazaarPairLens {
     ///      price in the same block. A price published at this block is not stored once the
     ///      settlement price is fixed or the scheduled cutoff has passed, so nothing accrues: both
     ///      rates are 0 and the index is the stored one. A pair with trading hours accrues nothing
-    ///      while its oracle is stale, and these figures then say what a fresh price published at
+    ///      while no price is stored, and these figures then say what a fresh price published at
     ///      this block would charge: a window older than FundingLib.MAX_FUNDING_GAP charges nothing,
     ///      and one older than FundingLib.MAX_FUNDING_AGE charges only its last MAX_FUNDING_AGE.
     /// @param pair The pair

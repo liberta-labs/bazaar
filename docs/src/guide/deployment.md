@@ -36,6 +36,10 @@ The per-chain file only helps if the RPC alias actually serves the chain the tar
 
 The lens and the terminator are pre-deployed against the predicted address because inlining their deployment in the factory constructor would push the factory's initcode past the EIP-3860 limit.
 
+## The Pyth Pro verifier
+
+On any chain but Anvil, before the first broadcast, `DeployBazaar` has the configured Pyth Pro verifier verify an update Pyth's signer signed (`RECORDED_PYTH_UPDATE`: BTC/USD and ETH/USD on the one-second channel) and requires it to hand back that update's payload unchanged. No probe of the verifier's functions can show that it trusts the key Pyth signs with and returns the payload in the layout `BazaarOracle` reads; a contract at the wrong address, a verifier that trusts no signer, or one that returns the payload in another layout stops the deployment there. If Pyth retires the key that signed the recorded update, replace it with any update from Pyth's archive.
+
 ## The bug-bounty recipient
 
 `BUG_BOUNTY_ADDRESS` must be set before deploying to any chain but Anvil; the script aborts before the first broadcast if it is missing, and prints the resolved address in the banner alongside USDC, Pyth and the OOv3. It receives 1% (`BUG_BOUNTY_TAX_BP`) of the integrator and insurance fee streams on every fill. The factory holds it `immutable` and copies it into every pair at listing, so there is no setter and no governance path — changing it means redeploying the factory and re-listing every pair. Anvil keeps an implicit default of the deploying account, since a local chain has no revenue to misdirect.

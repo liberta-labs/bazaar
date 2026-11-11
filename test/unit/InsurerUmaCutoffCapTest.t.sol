@@ -490,6 +490,28 @@ contract InsurerUmaCutoffCapTest is Test {
         _assertSettlesAtStoredPrice(tIns, tUmaNear);
     }
 
+    /// @notice The same tightening holds when the nearer proposal is accepted only after the cap it
+    ///         beats has passed: the cap is the timestamp it verified, and a late acceptance moves
+    ///         nothing the pair has not already stopped trading through.
+    function test_LateUmaAcceptanceBetweenTheCutoffs_TightensTheCap() public {
+        uint64 tUmaFar = _now() + 4 days;
+        _acceptUmaAfterLiveness(_proposeUma(tUmaFar));
+        uint64 tIns = _now() + 1 days;
+        _proposeInsurer(tIns);
+        _voteAndExecute();
+
+        uint64 tUmaNear = _now() + 2 days;
+        bytes32 aid = _proposeUma(tUmaNear);
+        vm.warp(uint256(tUmaFar) + 1 hours);
+        vm.expectEmit(true, true, false, true, address(terminator));
+        emit TerminationProposalAccepted(address(pair), aid, tUmaNear);
+        terminator.settleTerminationProposal(aid);
+
+        assertEq(terminator.umaCutoffCap(address(pair)), tUmaNear, "the cap tightened to the verified timestamp");
+        assertEq(terminator.acceptedTerminationAssertionId(address(pair)), aid, "the nearer proposal is in force");
+        assertEq(pair.scheduledTerminationTs(), tIns, "the insurer cutoff still halts trading");
+    }
+
     /// @notice A UMA acceptance earlier than the insurer cutoff pulls the schedule in, and the pair
     ///         then settles under UMA's rule.
     function test_LaterUmaAcceptanceBeforeTheInsurerCutoff_PullsItIn() public {

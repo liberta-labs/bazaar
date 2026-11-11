@@ -112,8 +112,9 @@ contract StaleAndRewardEdgeTest is IntegrationBase {
 
     // ============================ stale liquidation posture ============================
 
-    /// @notice Non-continuous pairs liquidate on the stale-fallback price: bad debt is not left
-    ///         hanging just because the market is closed.
+    /// @notice Right after a close a non-continuous pair liquidates on Pyth's latest price, the
+    ///         last one before the close: bad debt is not left hanging for the first minute of the
+    ///         closure. The stored price alone, aged out, decides nothing.
     function test_staleLiquidation_nonContinuousPairProceeds() public {
         // Store an AAPL price of $200, give dave a phantom insolvent long (entry $300).
         bytes[] memory pu = _priceUpdateFor(AAPL_USD_FEED_ID, 200, uint64(vm.getBlockTimestamp()));
@@ -127,8 +128,15 @@ contract StaleAndRewardEdgeTest is IntegrationBase {
 
         vm.warp(vm.getBlockTimestamp() + 30); // stale (MAX_PRICE_STALENESS = 3s)
         vm.prank(bob);
-        uint256 n = aaplPair.liquidate(_arr1(dave), new bytes[](0));
-        assertEq(n, 1, "liquidated at the stale fallback price");
+        vm.expectRevert(BazaarPair.BazaarPair__LiquidationPriceTooOld.selector);
+        aaplPair.liquidate(_arr1(dave), new bytes[](0));
+
+        uint64 nowTs = uint64(vm.getBlockTimestamp());
+        bytes[] memory latest = _tickUpdateFor(AAPL_USD_FEED_ID, 200, nowTs, nowTs - 30);
+        vm.deal(bob, 1 ether);
+        vm.prank(bob);
+        uint256 n = aaplPair.liquidate{value: 0.01 ether}(_arr1(dave), latest);
+        assertEq(n, 1, "liquidated at Pyth's latest price");
     }
 
     /// @notice Continuous pairs REQUIRE a fresh price to liquidate — pinning the protocol posture

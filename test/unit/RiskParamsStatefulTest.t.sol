@@ -671,9 +671,10 @@ contract RiskParamsStatefulTest is Test {
 
     // -------- fade suspension across closures --------
 
-    /// @notice A weekend does not age the readings. A liquidation needs a price stored within
-    ///         MAX_LIQUIDATION_PRICE_AGE, so a stretch with none stored is one in which no
-    ///         liquidation arrived — and on a live pair one in which none could have — and the fade
+    /// @notice A weekend does not age the readings. A liquidation runs on a price no more than
+    ///         MAX_LIQUIDATION_PRICE_AGE old, which its own call stores, so a stretch with none stored
+    ///         is one in which no liquidation arrived — and on a live pair one in which none could
+    ///         have — and the fade
     ///         would otherwise read that silence as evidence the maintenance level is holding.
     ///         Friday close to Monday open is 65.5h against a 3-day tau, which would nearly halve
     ///         a reading on no information at all.

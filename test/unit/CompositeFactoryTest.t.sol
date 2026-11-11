@@ -14,6 +14,7 @@ import {MockOptimisticOracleV3} from "../mocks/MockOptimisticOracleV3.sol";
 import {MockArbSys} from "../mocks/MockArbSys.sol";
 import {MockPythLazer} from "../mocks/MockPythLazer.sol";
 import {LazerUpdate} from "../LazerUpdate.sol";
+import {BucketStore} from "../BucketStore.sol";
 
 /// @notice Factory-level tests for composite pair deployment: the FX leg forces
 ///         non-continuous trading, and a composite pair prices end-to-end through BazaarPair.
@@ -204,7 +205,13 @@ contract CompositeFactoryTest is Test {
         assertTrue(
             _contains(
                 claim,
-                "Resolved FALSE: at the median of 5 prices from Pyth Pro one-second updates - the first the earliest update carrying a price generated at or after the timestamp, each later one the earliest carrying a price generated at least 10 minutes after the update before it - and the holders who voted for it forfeit half"
+                "Resolved FALSE: at the median of 5 prices from Pyth Pro one-second updates - the first the earliest update carrying a price generated at or after the timestamp, each later one the earliest carrying a price generated at least 10 minutes after the update before it (for a composite feed, the later of its two legs' updates) - and the holders who voted for it forfeit half of their voted shares."
+            )
+        );
+        assertTrue(
+            _contains(
+                claim,
+                "Where a proposal accepted for the pair names a timestamp at or after this one, no price in an update stamped after that timestamp counts. From 21 days after the timestamp, or from 12 hours after that accepted timestamp if that is sooner, a call that does not bring such a set of prices settles the pair at its own last stored price."
             )
         );
     }
@@ -349,6 +356,49 @@ contract CompositeFactoryTest is Test {
         vm.warp(cutoff + 1); // within grace
         terminator.terminateScheduledPair(address(pair), both);
         assertEq(pair.auxState().settlementPrice, 22e18, "composed from both legs at the tick");
+    }
+
+    /// @notice A composite's price is dated by its older leg, so while the asset leg is quiet every
+    ///         latest update shares the stored second however far the FX leg moves. A liquidation is
+    ///         judged at the latest legs all the same: the yen weakening from 150 to 160 takes the
+    ///         $20 stored price to $18.75, and a long solvent at $20 is seized at $18.75.
+    function test_CompositePair_LiquidationJudgedAtTheLatestLegs() public {
+        BazaarPair pair = BazaarPair(payable(_list(compositeId, false, "Toyota on TSE")));
+        uint64 t0 = uint64(vm.getBlockTimestamp());
+        pair.refreshPrice(
+            LazerUpdate.one(
+                LazerUpdate.livePair(
+                    LazerUpdate.feed(ASSET_JPY_FEED, 3000e8, 3e8, int16(PYTH_EXPO), t0 * LazerUpdate.MICROS),
+                    LazerUpdate.feed(USD_JPY_FEED, 150e8, 0.15e8, int16(PYTH_EXPO), t0 * LazerUpdate.MICROS),
+                    t0
+                )
+            )
+        );
+
+        // A 2-unit long entered at $20 with $9: solvent at $20 (20% of $40 is $8), insolvent at
+        // $18.75 (equity $6.50 against $7.50).
+        address trader = makeAddr("trader");
+        usdc.mint(trader, 9 * USDC_SCALE);
+        vm.startPrank(trader);
+        usdc.approve(address(pair), 9 * USDC_SCALE);
+        pair.depositCollateral(9 * BAZAAR_SCALE, 0, 0, 0, "", "");
+        vm.stopPrank();
+        BucketStore.setIsLong(address(pair), trader, true);
+        BucketStore.setSize(address(pair), trader, 2 * BAZAAR_SCALE);
+        BucketStore.setEntryValue(address(pair), trader, 40 * BAZAAR_SCALE);
+
+        vm.warp(uint256(t0) + 30);
+        uint64 nowTs = uint64(vm.getBlockTimestamp());
+        bytes[] memory latest = LazerUpdate.two(
+            LazerUpdate.tick(ASSET_JPY_FEED, 3000e8, 3e8, int16(PYTH_EXPO), nowTs, t0),
+            LazerUpdate.tick(USD_JPY_FEED, 160e8, 0.16e8, int16(PYTH_EXPO), nowTs, t0 + 20)
+        );
+        address[] memory users = new address[](1);
+        users[0] = trader;
+        assertEq(pair.liquidate(users, latest), 1, "seized at the latest legs");
+        (uint256 stored,, uint256 storedTs,,) = pair.lastPairPrice();
+        assertEq(stored, 20e18, "the stored price is unchanged");
+        assertEq(storedTs, t0, "dated by the quiet leg");
     }
 
     // ==================== One market per asset ====================

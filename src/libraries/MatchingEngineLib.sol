@@ -416,8 +416,8 @@ library MatchingEngineLib {
         // stored, while off-chain venues can already show where the market will reopen, so a
         // maker who sees the reopen would take the inventory at the frozen mark only when it
         // favours the vault: the fund would exit exactly when holding pays and hold when it loses.
-        // The inventory waits for a fresh mark instead. liquidate() still seizes against a
-        // fallback no older than MAX_LIQUIDATION_PRICE_AGE, so only its inline walk waits; a stale
+        // The inventory waits for a fresh mark instead. liquidate() still seizes against Pyth's
+        // latest price up to MAX_LIQUIDATION_PRICE_AGE old, so only its inline walk waits; a stale
         // unloadVault fills nothing and earns nothing. Every gap-EMA sample the walk records is
         // therefore measured against a fresh oracle, never one whose error would read as depth.
         if (RiskParamsLib.inventorySize(pairVault) == 0 || ctx.isOracleStale) return sum;

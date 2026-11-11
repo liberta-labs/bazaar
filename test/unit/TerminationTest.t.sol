@@ -2863,6 +2863,15 @@ contract TerminationProposalTest is Test {
             1,
             "vote grace figure"
         );
+        string memory lastResort = Strings.toString(uint256(21 days) / 1 days); // mirror of ORACLE_DEAD_THRESHOLD
+        assertEq(
+            _count(
+                claim,
+                bytes(string.concat("From ", lastResort, " days after the timestamp, or from ", grace, " hours after"))
+            ),
+            1,
+            "chain last-resort figures"
+        );
     }
 
     /// @notice An accepted cutoff only ever moves earlier: a later proposal for an earlier event
