@@ -38,15 +38,15 @@ the disagreement as a finding.
 | Item | Value |
 |---|---|
 | Repository | https://github.com/liberta-labs/bazaar |
-| Tag | `v1.0.0-rc6` |
-| Commit | `5a2f74188c5359e47b5d70d6b55ff3f3c18ddf6d` |
+| Tag | `v1.0.0-rc7` |
+| Commit | `342e629989adbe98bd0a865ef5374d1bbf4324cf` |
 | Target chain | Arbitrum One (chain id 42161) |
 | Compiler | solc 0.8.34 |
 | Optimizer | on, `optimizer_runs = 150` for every contract |
 | Codegen | `via_ir = true` (required: `BazaarPair` exceeds the stack limit under legacy codegen) |
 | EVM version | `cancun` (the bytecode uses `MCOPY` and transient storage) |
 | Test-only setting | `dynamic_test_linking = true`; deployed bytecode is byte-identical with it on or off |
-| Dependencies | OpenZeppelin Contracts 5.4.0 (`lib/openzeppelin-contracts`), Pyth SDK `@pythnetwork/pyth-sdk-solidity` 4.2.0 (npm), forge-std 1.9.7; UMA's `lib/protocol` is used by one test only |
+| Dependencies | OpenZeppelin Contracts 5.4.0 (`lib/openzeppelin-contracts`), forge-std 1.9.7; UMA's `lib/protocol` is used by one test only, and Pyth's own payload parser is vendored under `test/vendor/pyth-lazer` for a differential test |
 
 The line counts in section 3, the link table below and the test count in section 10 were all
 taken at this commit.
@@ -56,10 +56,10 @@ taken at this commit.
 - `BazaarFactory` deploys each market as an EIP-1167 clone (`Clones.clone`) of one `BazaarPair`
   implementation. The implementation's constructor calls `_disableInitializers()`; each clone is
   initialized once through `initialize`.
-- `BazaarOracle` (Pyth adapter and composite-feed registry), `BazaarPairTerminator` and
+- `BazaarOracle` (Pyth Pro adapter and composite-feed registry), `BazaarPairTerminator` and
   `BazaarPairLens` are protocol-wide singletons.
-- Arbitrum One dependency addresses, as configured in `script/HelperConfig.s.sol`: Pyth
-  Core `0xff1a0f4744e8582DF1aE09D5611b887B6a12925C`, native USDC `0xaf88d065e77c8cC2239327C5EDb3A432268e5831`, UMA OptimisticOracleV3
+- Arbitrum One dependency addresses, as configured in `script/HelperConfig.s.sol`: Pyth Pro's
+  verifier (PythLazer) `0xACeA761c27A909d4D3895128EBe6370FDE2dF481`, native USDC `0xaf88d065e77c8cC2239327C5EDb3A432268e5831`, UMA OptimisticOracleV3
   `0xa6147867264374F324524E30C02C331cF28aa879`.
 
 ### Externally linked libraries
@@ -85,8 +85,8 @@ graph below follows the calls to each library's external and public functions in
 | `ClaimTextLib` | `BazaarFactory`, `BazaarPairTerminator` |
 
 `BazaarOracle` and `BazaarPairLens` link no library. `BazaarTypes`, `OrderBookLib`, `BucketLib`,
-`MmrSampleLib`, `FeeEscrowLib` and `BazaarMathLib` are internal libraries, inlined into their
-callers.
+`MmrSampleLib`, `FeeEscrowLib`, `BazaarMathLib` and `LazerPayloadLib` are internal libraries,
+inlined into their callers.
 
 ## 3. Files in scope
 
@@ -94,14 +94,14 @@ Counts are non-blank, non-comment lines (natspec included in "comment"), compute
 tokenizer that skips `//` comments and `/* */` blocks and does not mistake `//` inside a string
 literal for a comment.
 
-### Tier 1 — full scope (21 files, 9,416 lines)
+### Tier 1 — full scope (22 files, 9,496 lines)
 
 | File | Lines | Role |
 |---|---:|---|
-| `src/BazaarPair.sol` | 1,221 | Market contract: entry points, price resolution, vault-health verdict, termination glue |
-| `src/BazaarPairTerminator.sol` | 961 | UMA, insurer-vote, scheduled and stale-oracle termination paths |
-| `src/BazaarFactory.sol` | 617 | UMA-gated listing, identifier governance, clone deployment |
-| `src/BazaarOracle.sol` | 377 | Pyth adapter, composite feeds, confidence and staleness rules |
+| `src/BazaarPair.sol` | 1,219 | Market contract: entry points, price resolution, vault-health verdict, termination glue |
+| `src/BazaarPairTerminator.sol` | 923 | UMA, insurer-vote, scheduled and stale-oracle termination paths |
+| `src/BazaarFactory.sol` | 614 | UMA-gated listing, identifier governance, clone deployment |
+| `src/BazaarOracle.sol` | 374 | Pyth Pro adapter: update verification, composite feeds, confidence and freshness rules, settlement proofs |
 | `src/libraries/MatchingEngineLib.sol` | 1,435 | Arrival walk, trigger execution, vault unload (one bucket per walk), per-fill margin checks, fees |
 | `src/libraries/RiskParamsLib.sol` | 791 | Margin curve, insurance target, reserve, the two-bucket read model and netting gate, unload planner, fund-ledger helpers, bounties |
 | `src/libraries/AdlLib.sol` | 690 | ADL batches over the two buckets: on-chain ranking, losing leg first, paired and fallback sizing, winner closes, executor rewards |
@@ -112,6 +112,7 @@ literal for a comment.
 | `src/libraries/OrderBookLib.sol` | 218 | Sorted doubly-linked book lists, in-place rewrite of a resting order |
 | `src/libraries/FundingLib.sol` | 212 | Mark tallies and funding-index accrual |
 | `src/libraries/LiquidationLib.sol` | 206 | Seizure into the estate's own bucket, netting of the buckets' overlap, rewards |
+| `src/libraries/LazerPayloadLib.sol` | 126 | Bounds-checked reader of signed Pyth Pro payloads |
 | `src/libraries/TerminationLib.sol` | 109 | Finalize: total owed, payout ratios |
 | `src/libraries/BucketLib.sol` | 99 | Position solvency math |
 | `src/libraries/MetaTxLib.sol` | 67 | EIP-712 relayed calls, nonces |
@@ -119,14 +120,14 @@ literal for a comment.
 | `src/libraries/BazaarMathLib.sol` | 62 | Fixed point, exponent conversion |
 | `src/libraries/VaultHealthLib.sol` | 43 | Liquidation-exposure (ADL gate) check over both buckets |
 | `src/libraries/FeeEscrowLib.sol` | 36 | Claimable-balance escrow for every third-party payout |
-| **Total** | **9,416** | |
+| **Total** | **9,496** | |
 
-### Tier 2 — riskiest subset for a competition (12 files, 6,225 lines)
+### Tier 2 — riskiest subset for a competition (12 files, 6,187 lines)
 
 | File | Lines |
 |---|---:|
 | `src/libraries/MatchingEngineLib.sol` | 1,435 |
-| `src/BazaarPairTerminator.sol` | 961 |
+| `src/BazaarPairTerminator.sol` | 923 |
 | `src/libraries/RiskParamsLib.sol` | 791 |
 | `src/libraries/AdlLib.sol` | 690 |
 | `src/libraries/OrderManagementLib.sol` | 669 |
@@ -137,7 +138,7 @@ literal for a comment.
 | `src/libraries/TerminationLib.sol` | 109 |
 | `src/libraries/BucketLib.sol` | 99 |
 | `src/libraries/VaultHealthLib.sol` | 43 |
-| **Total** | **6,225** |
+| **Total** | **6,187** |
 
 This covers the matching engine and order management, liquidation and ADL, the insurance vault, the
 termination lifecycle, collateral accounting with the resting-order tally, and the risk library
@@ -150,18 +151,19 @@ margin curve (`calculateIMRandMMR`, `liquidationImrBp`).
 `BazaarPair`, `FundingLib` and `BazaarTypes` are required reading for it, since the tier's files are
 called from the pair.
 
-### Out of scope (9 files, 2,104 lines)
+### Out of scope (10 files, 2,111 lines)
 
 | File | Lines | Reason |
 |---|---:|---|
 | `src/BazaarPairLens.sol` | 880 | Read-only views for frontends and keepers. No contract calls it on-chain: the factory stores its address and reads `factory()` from it once in the constructor as a wiring check. Known limitation: `getMaxWithdrawable` does not reproduce the liquidation-exposure refusal a position holder's withdrawal can meet before an ADL window latches, as its natspec states. |
-| `src/libraries/ClaimTextLib.sol` | 179 | Static UMA claim text (pure functions returning bytes); its correctness as prose matters to UMA verifiers, not to the contracts' state. |
+| `src/libraries/ClaimTextLib.sol` | 183 | Static UMA claim text (pure functions returning bytes); its correctness as prose matters to UMA verifiers, not to the contracts' state. |
 | `src/interfaces/IBazaarPair.sol` | 445 | Interface |
 | `src/interfaces/IBazaarPairTerminator.sol` | 187 | Interface |
 | `src/interfaces/IBazaarFactory.sol` | 163 | Interface |
 | `src/interfaces/IBazaarPairLens.sol` | 143 | Interface |
 | `src/interfaces/IUmaOptimisticOracleV3.sol` | 55 | Interface |
-| `src/interfaces/IBazaarOracle.sol` | 48 | Interface |
+| `src/interfaces/IBazaarOracle.sol` | 46 | Interface |
+| `src/interfaces/IPythLazer.sol` | 5 | Interface |
 | `src/interfaces/IArbSys.sol` | 4 | Interface |
 
 The five `IBazaar*` interfaces are MIT-licensed for integrators and declare every function, event
@@ -170,11 +172,13 @@ run, fails on any difference in a name, a type, an indexed flag or a state mutab
 `BazaarPairTerminator` calls the pair through `IBazaarPair`; no other contract imports them.
 
 Also out of scope: `script/`, `test/` (including mocks), `examples/`, `docs/`, and the dependencies
-themselves (OpenZeppelin, Pyth SDK, UMA, forge-std). How Bazaar integrates its dependencies is in
-scope, including whether the local interface `IUmaOptimisticOracleV3` matches the deployed oracle's
-ABI, since the factory decodes `getAssertion` results to decide proposal outcomes.
+themselves (OpenZeppelin, UMA, forge-std, and Pyth's deployed verifier). How Bazaar integrates its
+dependencies is in scope, including whether the local interface `IUmaOptimisticOracleV3` matches the
+deployed oracle's ABI, since the factory decodes `getAssertion` results to decide proposal outcomes,
+and whether `IPythLazer` and `LazerPayloadLib` match the deployed PythLazer verifier and the
+payloads Pyth signs.
 
-All files: 30, 11,520 lines (9,416 in scope + 2,104 out of scope).
+All files: 32, 11,607 lines (9,496 in scope + 2,111 out of scope).
 
 ## 4. Build and test
 
@@ -182,7 +186,6 @@ All files: 30, 11,520 lines (9,416 in scope + 2,104 out of scope).
 
 - Foundry **v1.4.3**, the version CI pins (`.github/workflows/test.yml`, `foundry-rs/foundry-toolchain@v1`
   with `version: v1.4.3`). Later versions disagree with it on `forge fmt` rules.
-- Node.js and npm: `foundry.toml` remaps `@pythnetwork/pyth-sdk-solidity/` into `node_modules/`.
 - Git submodules (`lib/forge-std`, `lib/openzeppelin-contracts`, `lib/protocol`).
 
 ### Commands
@@ -192,11 +195,7 @@ git clone --recursive https://github.com/liberta-labs/bazaar.git bazaar
 ```
 
 ```bash
-git checkout v1.0.0-rc6
-```
-
-```bash
-npm ci
+git checkout v1.0.0-rc7
 ```
 
 ```bash
@@ -322,50 +321,65 @@ immutable. A change works as follows (listing.md, "The only governance"):
 
 ## 6. External dependencies and trust assumptions
 
-### Pyth (through `BazaarOracle`)
+### Pyth Pro (through `BazaarOracle`)
 
 How it is used:
 
-- **Pull updates.** Callers attach Pyth update data (`priceUpdate`) and ETH for Pyth's fee. A pair
-  reads Pyth's on-chain cache first (`tryReadFreshPrice`) and pays for the supplied update
-  (`updateAndFetchPrice`) only when the cache holds no fresh, in-confidence price; unspent ETH is
-  refunded to the caller. `priceUpdate` is never part of a signed meta-transaction payload.
-- **Staleness.** `MAX_PRICE_STALENESS` (3 s) applies to every price-resolving entry point. Pyth's age
-  check is two-sided, so a publish time up to 3 s ahead of the block is accepted; the pair clamps
-  future-dated timestamps where it computes ages. A price is stored only when its publish time is
-  newer than the stored one and not after a scheduled cutoff, and nothing is stored once the
-  settlement price is fixed.
-- **Confidence.** Prices whose confidence exceeds `MAX_CONFIDENCE_BP` (2%) of the price are rejected;
-  composites check each leg and the composed bracket. Reads return spot ± confidence: withdrawals
-  value longs at the low edge and shorts at the high edge, while liquidations and ADL use spot. The
-  termination price sources (`fetchFirstPriceAtOrAfter`, `fetchChainedMedian`) apply no confidence
-  cap, by design.
+- **Signed updates, no on-chain price.** Pyth Pro keeps no price on-chain. Callers attach signed
+  updates (`priceUpdate`) and ETH for Pyth's fee. `BazaarOracle` has each update verified by Pyth's
+  `PythLazer` contract (`IPythLazer.verifyUpdate`, one call and one `verification_fee` per update)
+  and reads the signed payload with `LazerPayloadLib`, a bounds-checked parser written for the
+  fields Bazaar uses. `getUpdateFee(count)` is the fee and the oracle requires exactly that value;
+  the pair pays it from the ETH sent and refunds the rest. `priceUpdate` is never part of a signed
+  meta-transaction payload.
+- **Price resolution.** A call that supplies an update is judged on it: the update is verified, a
+  failure reverts the call, and the price is stored when it was generated in a later second than
+  the stored one (for a composite, when its older leg was), not after a scheduled cutoff, and not
+  once the settlement price is fixed. A call with no update uses the pair's stored price while it
+  is within `MAX_PRICE_STALENESS`.
+- **Freshness.** `MAX_PRICE_STALENESS` (3 s) applies to every price-resolving entry point and is
+  measured on the feed update timestamp, when Pyth generated the price, not on the update's own
+  timestamp: an update that carries an old price forward is stale. The check is two-sided, so a
+  price generated up to 3 s ahead of the block is accepted; the pair clamps future-dated
+  timestamps where it computes ages.
+- **Confidence.** A live price must carry its price, exponent, confidence and feed update
+  timestamp, and a zero confidence is refused as an absent one. Prices whose confidence exceeds
+  `MAX_CONFIDENCE_BP` (2%) of the price are rejected; composites check each leg and the composed
+  bracket. Reads return spot ± confidence: withdrawals value longs at the low edge and shorts at
+  the high edge, while liquidations and ADL use spot. The termination price sources
+  (`fetchPriceAtTick`, `fetchChainedMedian`) apply no confidence cap, by design.
 - **Stale-oracle regime.** Only session pairs (`isContinuouslyTraded == false`) fall back to the
   stored `lastPairPrice`. On the fallback, fills are banded to ±`MAX_STALE_DEVIATION_BP` (10%),
   market orders and trigger executions revert, the mark and funding are frozen, unloads fill
   nothing, position holders cannot withdraw, LP redemptions are refused, `executeAdl` refuses to
   run, and liquidations use the stored price within `MAX_LIQUIDATION_PRICE_AGE`. Continuous pairs
-  have no fallback: a priced call reverts until a fresh price lands.
-- **Composites.** `registerComposite(baseId, quoteId, invertQuote)` is permissionless and
-  write-once; a composite is as fresh as its stalest leg. A listing must name a registered
-  composite or a raw feed Pyth already holds a price for, so legs cannot be attached after UMA
-  approved a single-feed claim.
-- **Termination prices.** Settlement prints are archived updates supplied as calldata, since Pyth's
-  cache holds only the latest print. A UMA-scheduled pair (and a vote-scheduled pair whose claim UMA
-  upheld) accepts only the feed's first print in [T − `MAX_PRICE_STALENESS`, T], parsed with Pyth's
-  uniqueness check so the caller cannot pick a later tick. A vote-scheduled pair whose claim UMA has
-  not upheld settles at the median of `SETTLEMENT_SAMPLE_COUNT` (5) prints chained from the cutoff,
-  at least `SETTLEMENT_SAMPLE_SPACING` (10 minutes) apart. Once a path's last-resort time passes, and
-  on the stale path, the pair settles at its last stored price, never at Pyth's permissionlessly
-  writable cache.
+  have no fallback: a priced call reverts until a fresh price lands. A session pair is on the
+  fallback whenever a call brings no update and its stored price has aged out, including while its
+  venue is open (section 9, item 44).
+- **Feed IDs and composites.** A raw feed ID is a Pyth Pro feed number, a non-zero 32-bit integer
+  held in a `bytes32`. `registerComposite(baseId, quoteId, invertQuote)` is permissionless and
+  write-once, and both legs must be raw IDs; a composite is as fresh as its stalest leg. A listing
+  must name a registered composite or an ID of the raw form (`isRawFeedId`), so legs cannot be
+  attached after UMA approved a single-feed claim. Whether Pyth publishes a feed under a number is
+  left to UMA's verifiers, since nothing on-chain can tell.
+- **Termination prices.** Settlement prices are archived updates from Pyth's one-second channel,
+  which issues one update per second stamped on the second, supplied as calldata. A UMA-scheduled
+  pair (and a vote-scheduled pair whose claim UMA upheld) settles at the price carried by the
+  update stamped exactly at the cutoff, which for a quiet feed is its last price carried forward;
+  an update from another second or another channel is refused. A vote-scheduled pair whose claim
+  UMA has not upheld settles at the median of `SETTLEMENT_SAMPLE_COUNT` (5) prices chained from the
+  cutoff, at least `SETTLEMENT_SAMPLE_SPACING` (10 minutes) apart, each proven to be the earliest
+  tick carrying a price generated at or after its target. Once a path's last-resort time passes,
+  and on the stale path, the pair settles at its last stored price.
 
-Trusted: Pyth's publishers and attestation for the price and confidence values; the Pyth Core
-contract at the immutable `BazaarOracle.pyth` address (Pyth's own governance can upgrade it; see
-section 9, item 28); availability of
-signed updates off-chain for keepers and frontends, which is a liveness rather than a safety
-assumption. Defended against: stale and future-dated prices, wide confidence, tick-picking from
-the cache or from a batch of updates at termination, composite re-registration, and a feed that
-goes quiet (session fallback, stale termination after `ORACLE_DEAD_THRESHOLD`).
+Trusted: Pyth's publishers and aggregation for the price and confidence values; the signer set of
+the `PythLazer` verifier at the immutable `BazaarOracle.pythLazer` address, an upgradeable proxy
+Pyth administers (section 9, items 28 and 43); that Pyth signs one price per feed, channel and
+tick; availability of signed updates off-chain for keepers and frontends, which needs a Pyth Pro
+subscription and is a liveness rather than a safety assumption. Defended against: stale,
+carried-forward and future-dated prices, missing, zero or wide confidence, malformed payloads,
+tick-picking at termination, composite re-registration, and a feed that goes quiet (session
+fallback, stale termination after `ORACLE_DEAD_THRESHOLD`).
 
 ### UMA Optimistic Oracle V3
 
@@ -523,13 +537,13 @@ in scope whatever its profit.
     `claimFees`, which stays open in every pair state; settlement cannot revert for a position that
     exists; and a pair terminates exactly once (fees.md, termination.md).
 15. **No trade sees the settlement print.** From `LIMBO_LEAD` (6 s) before a scheduled cutoff no
-    fill, deposit or insurance flow executes, no price published after the cutoff is stored, and no
+    fill, deposit or insurance flow executes, no price generated after the cutoff is stored, and no
     price at all is stored once the settlement price is fixed.
 16. **Governance fails closed.** While `umaIdentifierIsLive()` is false, `proposePairDeployment` and
     `proposeTermination` revert, so no assertion enters a pipeline where no dispute can be
     resolved (listing.md).
 17. **One market per asset feed.** No two non-terminated pairs, and no two pending proposals, share
-    a raw Pyth feed (`pairAddressByBaseFeed`, `pendingDeploymentByBaseFeed`).
+    a raw Pyth Pro feed (`pairAddressByBaseFeed`, `pendingDeploymentByBaseFeed`).
 
 ## 8. Focus areas
 
@@ -590,7 +604,7 @@ found most of their defects.
    be set or cleared by a relayer, and that the gate holds for any mix of skipped and applied
    amendments, including the same order named twice in a batch.
 6. **The termination lifecycle.** `BazaarPairTerminator.proposeTermination`,
-   `_handleTerminationResolution`, `terminateScheduledPair`, `settlementRule`, `_settleByChain`,
+   `_handleTerminationResolution`, `terminateScheduledPair`, `settlementRule`, `_tickGraceEnd`,
    `_insurerSettlementBounds`, `_umaCutoffInForce`, `proposeInsurerTermination`,
    `voteForInsurerTermination`, `executeInsurerTermination`, `terminateStalePair`;
    `BazaarPair.setScheduledTermination`, `_pastTradingCutoff`, `fixSettlementPrice`,
@@ -622,9 +636,10 @@ found most of their defects.
    cases in section 6.
 10. **Price resolution, relayed calls and ETH refunds.** `BazaarPair._getCurrentPairPrice`,
     `_buildAndStorePairPrice`, `_resolveUser`, `_sendWithRelayerFee`, `_refundEth`;
-    `MetaTxLib.verifyAndConsume`; `BazaarOracle.tryReadFreshPrice`, `updateAndFetchPrice`,
-    `tryReadStalePrice`, `fetchFirstPriceAtOrAfter`, `fetchChainedMedian`. Resolution is cache-first
-    and `priceUpdate` is unsigned, so a relayer or keeper chooses which fresh print a call sees. ETH
+    `MetaTxLib.verifyAndConsume`; `BazaarOracle.verifyAndFetchPrice`, `fetchPriceAtTick`,
+    `fetchChainedMedian`, `_requireLive`, `_pricedSince`; `LazerPayloadLib.readFeeds`. A supplied
+    update is always verified and `priceUpdate` is unsigned, so a relayer or keeper chooses which
+    fresh price a call sees. ETH
     refunds go to the caller at the end of payable entry points while the transient guard is held;
     functions without the guard, such as `finalizeTermination`, stay reachable from that callback.
 
@@ -635,8 +650,8 @@ without a new consequence (a larger impact, a cheaper path, or a broken bound) a
 
 ### Oracle and pricing
 
-1. **A liquidation can run on a stored price up to 10 minutes old.** On a session pair, when
-   neither Pyth's cache nor the caller supplies a fresh price, `liquidate` judges accounts against
+1. **A liquidation can run on a stored price up to 10 minutes old.** On a session pair, when the
+   caller supplies no update and the stored price has aged out, `liquidate` judges accounts against
    the stored mark if it is within `MAX_LIQUIDATION_PRICE_AGE` (10 minutes); a 24/7 pair has no stale
    fallback and reverts instead. Accepted: the mark was fresh when stored, the owner can
    top up or store a newer price inside the window, the caller earns only the standard reward, and
@@ -653,7 +668,7 @@ without a new consequence (a larger impact, a cheaper path, or a broken bound) a
 3. **24/7 pairs halt when Pyth and Arbitrum clocks drift apart by more than 3 s.** On continuous
    pairs a clock skew or delivery lag beyond `MAX_PRICE_STALENESS` (3 s) halts every priced entry
    point until fresh updates land. Accepted pending a mainnet measurement of the revert rate.
-   `terminateScheduledPair` selects prints by publish time against the cutoff and
+   `terminateScheduledPair` reads the update stamped at the cutoff, whatever the block time, and
    `terminateStalePair` needs no fresh price, so both keep working; the pair's own insolvency and
    ADL-timeout freezes run inside priced entry points and wait with them.
 4. **24/7 pairs have no restart grace after an outage.** The first fresh price after a sequencer or
@@ -661,15 +676,13 @@ without a new consequence (a larger impact, a cheaper path, or a broken bound) a
    lose residual equity (up to about MMR × notional) to the fund. Documented in liquidations.md; no
    code change.
 5. **`terminateStalePair` is bondless and one-step.** Anyone can terminate a pair at its last stored
-   price once both the latest confidence-cleared tick in Pyth's on-chain cache and the pair's stored
-   price (its creation, if it never stored one) are older than `ORACLE_DEAD_THRESHOLD` (21 days). A
-   quiet pair on a feed that still publishes off-chain can therefore be settled at a price at least
-   21 days old. Accepted: one on-chain Pyth push resets the clock, and the refresh bounty's daily
-   heartbeat (`REFRESH_BOUNTY_HEARTBEAT`) pays keepers to push while the fund's free capital exceeds
-   `REFRESH_BOUNTY_HEARTBEAT_MIN_INSURANCE` ($1,000), which every listing seed clears.
-
-### Margin and risk parameters
-
+   price once that price (its creation, if it never stored one) is older than
+   `ORACLE_DEAD_THRESHOLD` (21 days). Pyth Pro keeps no price on-chain, so the pair's own stored
+   price is the only evidence: a quiet pair on a feed that still publishes can be settled at a price
+   at least 21 days old. Accepted: one `refreshPrice` call with a fresh update resets the clock, and
+   the refresh bounty's daily heartbeat (`REFRESH_BOUNTY_HEARTBEAT`) pays keepers to make it while
+   the fund's free capital exceeds `REFRESH_BOUNTY_HEARTBEAT_MIN_INSURANCE` ($1,000), which every
+   listing seed clears.
 6. **A margin-rate rise just before a quiet stretch reaches maintenance late.** The curve is
    recomputed (at most once per `IMR_UPDATE_COOLDOWN`, 1 minute) and the lagged-MMR ring advanced (at
    most one sample closes per `MMR_SAMPLE_INTERVAL`, 1 hour) only when a call reaches
@@ -839,22 +852,23 @@ without a new consequence (a larger impact, a cheaper path, or a broken bound) a
     yes-voters even if the DVM upheld the claim (unless the vote met a cutoff UMA had already
     verified). Accepted: it needs a USDC-blacklisted bond recipient, and its cost falls on that
     claim and its voters, not on the pair.
-28. **The Pyth contract address is immutable.** `BazaarOracle.pyth` is set at deployment to Pyth Core
-    (`0xff1a0f4744e8582DF1aE09D5611b887B6a12925C`), the original Arbitrum One contract, which Pyth upgraded in
-    place in August 2026. Pyth's list also names a second contract with the same interface and separate
-    storage, Pyth Core Compatible (`0xe15357fB7ab31E091583b9c4b4135BB2f176f38e`), which Bazaar does not use,
-    and it does not say how long it will maintain either. If Pyth Core stopped accepting updates, pairs
-    could store no new price: 24/7 pairs would halt, session pairs would stay on their stale fallback,
-    and markets would wind down through the UMA claim category for a Pyth contract migration or, after
-    `ORACLE_DEAD_THRESHOLD`, `terminateStalePair`; new listings would need a new deployment. Accepted:
-    there is no upgrade path by design, and the termination paths are the way out.
+28. **The Pyth verifier address is immutable.** `BazaarOracle.pythLazer` is set at deployment to
+    Pyth Pro's `PythLazer` contract (`0xACeA761c27A909d4D3895128EBe6370FDE2dF481` on Arbitrum One), a
+    proxy Pyth can upgrade in place. If Pyth moved to a verifier at a new address, or the contract
+    stopped verifying the updates Pyth distributes, pairs could store no new price: 24/7 pairs would
+    halt, session pairs would stay on their stale fallback, and markets would wind down through the
+    UMA claim category for a Pyth verifier migration or, after `ORACLE_DEAD_THRESHOLD`,
+    `terminateStalePair`; new listings would need a new deployment. Accepted: there is no upgrade
+    path by design, and the termination paths are the way out.
 29. **Deployment-environment checks still to run.** The build targets `cancun` (`MCOPY` and transient
     storage), which Arbitrum One supports since ArbOS 20; the Arbitrum Sepolia rehearsal is the
     planned confirmation. `DeployBazaar` probes the USDC, Pyth and OOv3 addresses for code,
-    distinctness, decimals and live calls before broadcasting, but a wrong-but-live address of the
+    distinctness, decimals and live calls before broadcasting, and refuses a Pyth verifier that
+    trusts the public test signing key, but a wrong-but-live address of the
     right shape (for example bridged USDC.e, which also has 6 decimals) is detectable only by reading
-    the literals against the issuers' published lists. All three matched those lists on 2026-11-01;
-    they have to be read again before a mainnet deployment.
+    the literals against the issuers' published lists. The USDC and OOv3 literals matched those
+    lists on 2026-11-01 and the Pyth Pro verifier literal was taken from Pyth's documentation on
+    2026-11-09; all three have to be read again before a mainnet deployment.
 
 ### Accepted residuals of fixed issues
 
@@ -967,6 +981,49 @@ without a new consequence (a larger impact, a cheaper path, or a broken bound) a
     leave it the only candidate, and listings and UMA termination proposals stay refused until
     activation.
 
+### Pyth Pro
+
+43. **Every price rests on Pyth's signer set and an upgradeable verifier.** `PythLazer` accepts an
+    update signed by any signer Pyth currently trusts, Pyth administers that set, and the contract
+    is a proxy Pyth can upgrade. A compromised signer or a hostile upgrade can sign any price for
+    any feed, and the freshness and confidence checks read the same signed payload, so they are no
+    defence against it. Accepted: this is the oracle's trust boundary, as the attestation of Pyth's
+    earlier contract was.
+44. **A session pair uses its stale fallback whenever a call brings no update.** Pyth Pro has no
+    on-chain price for a call to prefer, so on a session pair a call with an empty `priceUpdate`
+    runs on the stored price once it is older than `MAX_PRICE_STALENESS`, including while the venue
+    is open and a fresh price exists off-chain. Accepted: the stale regime's restrictions apply to
+    such a call (section 6), a supplied update is always verified, and anyone can store a fresh
+    price with `refreshPrice`. The recorded hardening is to require proof that the feed is quiet
+    before the fallback applies.
+45. **A caller chooses among the prices of the last few seconds.** A live call may carry any price
+    generated within `MAX_PRICE_STALENESS` of the block, and the pair stores it when it was
+    generated in a later second than the stored one; within one second the first price stored
+    stands. A keeper or relayer therefore picks which recent price a liquidation, a trigger
+    execution or a fill is judged at. Accepted: it is inherent to a pull oracle, and the 3 s bound,
+    the later-second rule and the limits in items 11 and 13 bound what it is worth.
+46. **After the grace, the first caller chooses between the cutoff update and the stored price.**
+    For `SCHEDULED_TERMINATION_GRACE` (12 hours) only the update stamped at the cutoff settles a
+    pair under UMA's rule. After it, `terminateScheduledPair` settles at that update when the caller
+    supplies it and at the stored price otherwise, so whoever calls first picks the one that favours
+    them. Supplying the update needs access to Pyth Pro's archive; the fallback needs nothing.
+    Accepted: the grace is the protection, sized like the proposal liveness, and one keeper with
+    Pyth Pro access settles inside it.
+47. **A pair whose feed is quiet at the cutoff settles at a price known beforehand.** The cutoff's
+    update carries a quiet feed's last price forward, so a session pair scheduled to end while its
+    venue is shut settles at its last generated price, which is public from the close on; the limbo
+    lead hides nothing there. Accepted: the information is public and symmetric, quotes left resting
+    through a closure ahead of a published cutoff are the maker's choice, and the pair's own stored
+    price, the alternative, is never newer.
+48. **The Pyth Pro integration has not run against Pyth's live service.** `LazerPayloadLib` is a
+    purpose-built parser, fuzzed differentially against Pyth's own (vendored under
+    `test/vendor/pyth-lazer`), and every update in the suite is built and signed by the test
+    helpers; none is a recorded Pyth payload. The settlement rules assume that the one-second
+    channel stamps its updates on exact seconds, that a carried-forward price keeps the feed update
+    timestamp of its generation, that this timestamp never decreases, and that Pyth signs one price
+    per feed, channel and tick. Accepted until the Arbitrum Sepolia rehearsal, the planned
+    confirmation, alongside the checks in item 29.
+
 ## 10. Prior review
 
 The codebase has been through eight rounds of internal security review. The later rounds split the
@@ -984,8 +1041,12 @@ mechanism is unchanged, and the review reports quote the earlier rates (a 0.5 bp
 timelock, early activation once UMA removes the incumbent identifier, the immediate discard of a
 proposal disputed after its identifier's removal, and the void of an undisputed listing approved
 under a removed identifier. It has had one focused internal review by two independent reviewers,
-and what it found is fixed or listed in section 9 (items 25 and 38 to 42). The test suite holds
-1,837 test functions in 115 files under `test/unit` and `test/integration` at the time of writing, including
+and what it found is fixed or listed in section 9 (items 25 and 38 to 42). The move from Pyth
+Core to Pyth Pro came after them as well: the oracle adapter and its payload parser, price
+resolution from the caller's update, the tick and chain settlement proofs, and the rewritten UMA
+claim texts. It has had two focused internal reviews, and what they found is fixed or listed in
+section 9 (items 5, 28 and 43 to 48). The test suite holds
+1,898 test functions in 117 files under `test/unit` and `test/integration` at the time of writing, including
 fuzz tests, fixed zero-sum scenarios and the handler-based invariant suite. **The protocol has not
 had a professional audit.** The internal review reports can be shared with the selected auditor on
 request.
