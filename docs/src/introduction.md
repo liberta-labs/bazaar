@@ -9,7 +9,7 @@
 
 The protocol is immutable: no owner, no pauser, no upgradeable proxies, no governance token. Every privileged action is either fully permissionless, economically bonded, or adjudicated by UMA's optimistic oracle.
 
-> ⚠️ **Status: pre-audit, work in progress — not yet deployed.** There is no official deployment on any network; do not use with real funds.
+> ⚠️ **Status: pre-audit, work in progress — testnet only.** The official deployment runs on the Arbitrum Sepolia testnet ([addresses](reference/networks.md)); there is no mainnet deployment. Do not use with real funds.
 
 ## Vision
 

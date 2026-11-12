@@ -6,10 +6,10 @@ artifacts/
 # Node
 node_modules/
 
-# Ignores development broadcast logs
-!/broadcast
-/broadcast/*/31337/
-/broadcast/**/dry-run/
+# Forge's broadcast logs, on every network. They stay on the deploying machine, where
+# `forge script --resume` and `make force-settle-arb-sepolia` read them; the deployed addresses
+# and blocks are on-chain and on the docs' Deployments page.
+/broadcast/
 
 # Docs build output (mdBook)
 docs/book/

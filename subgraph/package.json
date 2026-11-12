@@ -12,7 +12,7 @@
     "build:arbitrum": "graph build --network arbitrum-one",
     "test": "graph test",
     "deploy:local": "graph create --node http://localhost:8020/ bazaar && graph deploy --node http://localhost:8020/ --ipfs http://localhost:5001 --network anvil bazaar",
-    "deploy:sepolia": "graph deploy bazaar-sepolia --network arbitrum-sepolia",
+    "deploy:sepolia": "graph deploy bazaar-arbitrum-sepolia --network arbitrum-sepolia",
     "deploy:arbitrum": "graph deploy bazaar --network arbitrum-one"
   },
   "devDependencies": {

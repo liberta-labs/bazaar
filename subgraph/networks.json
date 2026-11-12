@@ -5,9 +5,9 @@
     "BazaarOracle": { "address": "0x0000000000000000000000000000000000000000", "startBlock": 0 }
   },
   "arbitrum-sepolia": {
-    "BazaarFactory": { "address": "0x0000000000000000000000000000000000000000", "startBlock": 0 },
-    "BazaarPairTerminator": { "address": "0x0000000000000000000000000000000000000000", "startBlock": 0 },
-    "BazaarOracle": { "address": "0x0000000000000000000000000000000000000000", "startBlock": 0 }
+    "BazaarFactory": { "address": "0x9f077B7D49EE7B451ae0858e391dC6960F144612", "startBlock": 328418565 },
+    "BazaarPairTerminator": { "address": "0x59F836254D3781A06d2Af7270ea8697c8c7De4e8", "startBlock": 328418562 },
+    "BazaarOracle": { "address": "0x1E4686fA4855ac3E17E4afd80645d64D4A9D0fA7", "startBlock": 328418550 }
   },
   "arbitrum-one": {
     "BazaarFactory": { "address": "0x0000000000000000000000000000000000000000", "startBlock": 0 },

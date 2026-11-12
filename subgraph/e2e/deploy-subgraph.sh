@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the subgraph against the addresses deploy-contracts.sh wrote and deploys it to a local
 # Graph Node as `bazaar`. It builds a copy under $E2E_WORK, so the tracked subgraph.yaml and
-# networks.json keep their placeholder addresses. The ABIs are exported from the same build the
+# networks.json keep the addresses they hold. The ABIs are exported from the same build the
 # contracts were deployed from, so the handlers decode exactly what the chain emits.
 #
 #   REPO      Foundry project the contracts were deployed from (default: this checkout)

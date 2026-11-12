@@ -60,9 +60,11 @@ npm test
 ## Deploy
 
 1. Deploy the contracts, then put the factory, terminator and oracle addresses and their deployment
-   blocks into `networks.json` under the network's name.
+   blocks into `networks.json` under the network's name. The official Arbitrum Sepolia deployment's
+   are already there, and `subgraph.yaml` holds the same values.
 2. Create the subgraph in [Subgraph Studio](https://thegraph.com/studio) and copy its deploy key.
-   The scripts assume the slugs `bazaar-sepolia` and `bazaar`; edit `package.json` if yours differ.
+   The scripts assume the slugs `bazaar-arbitrum-sepolia` (the official testnet subgraph's) and
+   `bazaar`; edit `package.json` if yours differ.
 3. Authenticate once, then build and deploy:
 
    ```bash

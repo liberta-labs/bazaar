@@ -1,7 +1,8 @@
 # Security Policy
 
-> ⚠️ **Pre-audit, work in progress. The protocol is not yet deployed — there is no official
-> deployment on any network. Do not use with real funds.**
+> ⚠️ **Pre-audit, work in progress. The protocol runs only on the Arbitrum Sepolia testnet
+> ([addresses](https://docs.bazaar.finance/reference/networks.html)) — there is no mainnet
+> deployment. Do not use with real funds.**
 
 ## Reporting a vulnerability
 
@@ -22,11 +23,13 @@ Reports are triaged on a best-effort basis by a small team. No response time is 
   project is funded, but none is promised or guaranteed.
 - The contracts do carry an on-chain white-hat budget: 1% of every fill's insurance and
   integrator fees is skimmed to a bug-bounty address fixed at factory deployment
-  (`BUG_BOUNTY_TAX_BP`). Nothing has accrued and
-  nothing can be paid from it — the protocol is not deployed and charges no fees. Treat it as
-  future funding for a program that does not exist yet, not as a bounty you are reporting into.
-- Please give us a reasonable window to publish an advisory before disclosing publicly. Nothing is
-  deployed, so no user funds are at risk today; that changes the moment a deployment exists.
+  (`BUG_BOUNTY_TAX_BP`). Nothing of value has accrued and
+  nothing of value can be paid from it — the only deployment is the testnet, whose fees are paid in
+  faucet USDC. Treat it as future funding for a program that does not exist yet, not as a bounty
+  you are reporting into.
+- Please give us a reasonable window to publish an advisory before disclosing publicly. Only the
+  testnet is deployed and it holds nothing of value, so no user funds are at risk today; that
+  changes the moment a mainnet deployment exists.
 
 ## Scope
 
@@ -80,12 +83,14 @@ Full posture and testing detail: [Security & Status][security] in the book.
 
 ## Supported versions
 
-There are no releases and no deployments. Only the current `master` branch is in scope; there is
-nothing older to support.
+There are no releases and no mainnet deployment. In scope are the current `master` branch and the
+Arbitrum Sepolia testnet deployment, which runs the contracts tagged `v1.0.0-rc9`; there is nothing
+older to support.
 
-| Version  | Supported |
-| -------- | --------- |
-| `master` | ✅        |
+| Version                     | Supported |
+| --------------------------- | --------- |
+| `master`                    | ✅        |
+| `v1.0.0-rc9` (testnet)      | ✅        |
 
 [termination]: https://docs.bazaar.finance/protocol/termination.html
 [matching]: https://docs.bazaar.finance/protocol/matching.html

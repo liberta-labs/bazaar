@@ -69,12 +69,8 @@ contract HelperConfig is Script {
     }
 
     // -------------------- Arbitrum Sepolia --------------------
-    // Uses Pyth Pro's verifier on Arbitrum Sepolia, but deploys its own mock OOv3 instead of UMA's
-    // OptimisticOracleV3 on that chain (0x1037A21a30aEfF90c269b01c3933eB9a5285d9b8), which cannot
-    // adjudicate Bazaar's assertions: Circle's test USDC is not on its CollateralWhitelist, so every
-    // USDC-bonded assertTruth reverts; its default currency is an 18-decimal test token, which
-    // cannot stand in for USDC; and its DVM stand-in, MockOracleAncillary, lets anyone push the
-    // resolution of any dispute.
+    // Uses Pyth Pro's verifier on Arbitrum Sepolia, but deploys its own mock OOv3, since UMA does
+    // not support an OptimisticOracleV3 on that chain.
 
     /// @dev Circle's test USDC on Arbitrum Sepolia, read from Circle's published list.
     address internal constant ARBITRUM_SEPOLIA_CIRCLE_USDC = 0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d;

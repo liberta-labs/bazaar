@@ -261,15 +261,21 @@ contract DeployBazaar is Script, LinkedLibraries {
     bytes internal constant RECORDED_PYTH_UPDATE =
         hex"2a22999a19358f8c810243297f20a36a2a87e7038ca55531c3c47442da7b25bee2c6eb345971b90bf9900b5519c2814a31675ea578117037576da72c6042954b5a2b35fe01005693c7d37500065fd93743dc000402000000010400000006cdcbaa1e6d04fff80500000001705b87530c0100065fd93743dc00000000020400000000318523f19a04fff805000000000ac1a9b10c0100065fd93743dc00";
 
+    /// @dev Sends the verifier probe's call. `forge script` aborts a run that reads the script
+    ///      contract's own address, so the script cannot fund and send the call itself; the
+    ///      simulation funds this address with the fee and pranks it instead.
+    address internal constant PYTH_PROBE_CALLER = address(uint160(uint256(keccak256("bazaar.deploy.pyth-probe"))));
+
     /// @dev Has the verifier verify RECORDED_PYTH_UPDATE and hand back its payload unchanged. A
     ///      verifier that does is one that trusts the key Pyth signs its updates with and returns
     ///      the payload BazaarOracle reads, which no probe of its selectors can show: a contract at
     ///      the wrong address, a verifier that trusts nobody, or one that returns the payload in
     ///      another layout all fail here, before anything is broadcast. Runs in the script's
-    ///      simulation, so the verification fee comes from ETH the simulation gives the script.
+    ///      simulation, from PYTH_PROBE_CALLER with ETH the simulation gives it for the fee.
     function _assertVerifierAcceptsPyth(address pythLazer) internal {
         uint256 fee = IPythLazer(pythLazer).verification_fee();
-        vm.deal(address(this), address(this).balance + fee);
+        vm.deal(PYTH_PROBE_CALLER, fee);
+        vm.prank(PYTH_PROBE_CALLER);
         (bytes memory payload,) = IPythLazer(pythLazer).verifyUpdate{value: fee}(RECORDED_PYTH_UPDATE);
         bytes memory update = RECORDED_PYTH_UPDATE;
         uint256 length = uint16(bytes2(bytes.concat(update[69], update[70])));

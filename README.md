@@ -28,7 +28,7 @@ Bazaar is the first-ever fully permissionless perpetual-derivatives protocol, US
 
 The protocol is immutable: no owner, no pauser, no upgradeable proxies, no governance token. Every privileged action is either fully permissionless, economically bonded, or adjudicated by UMA's optimistic oracle. The single governed parameter — the UMA identifier those assertions are adjudicated under — moves only through a bonded assertion (at least $5,000), a 2-day public dispute window, and a 7-day activation timelock (4 days once UMA has removed the incumbent).
 
-> ⚠️ **Status: pre-audit, work in progress — not yet deployed.** There is no official deployment on any network; do not use with real funds.
+> ⚠️ **Status: pre-audit, work in progress — testnet only.** The official deployment runs on the Arbitrum Sepolia testnet ([addresses](https://docs.bazaar.finance/reference/networks.html)); there is no mainnet deployment. Do not use with real funds.
 
 ## Documentation
 
@@ -92,7 +92,7 @@ test/
 
 ## Security
 
-- **Unaudited and not deployed.** This codebase has not undergone a professional audit, and there is no official deployment on any network.
+- **Unaudited and on testnet only.** This codebase has not undergone a professional audit. The official deployment runs on the Arbitrum Sepolia testnet, with a faucet USDC and a mock UMA oracle; there is no mainnet deployment.
 - No admin keys: there is nothing to compromise, but also no one who can pause a bad deployment — the [termination paths](https://docs.bazaar.finance/protocol/termination.html) are the only brakes.
 - **Reporting a vulnerability:** please use GitHub's private vulnerability reporting — go to the [Security tab](../../security/advisories/new) and select *Report a vulnerability*. Do not open a public issue for security findings.
 - There is no bug-bounty program at this stage. Valid findings are credited to the reporter in the published advisory. A retroactive reward may be considered for significant findings once the project is funded, but none is promised or guaranteed.

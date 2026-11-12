@@ -75,4 +75,4 @@ Because the address can never change, the live `make` targets do not read it fro
 
 ## Network support
 
-See [Networks](../reference/networks.md) for chain IDs and external-contract addresses. Note that `BazaarPair` reads Arbitrum's `ArbSys` precompile (`0x64`) for L2 block numbers — the protocol runs only on Arbitrum chains. UMA has no official OOv3 deployment on Arbitrum Sepolia, so the testnet configuration deploys a mock; the real UMA dispute flow can only be exercised on a chain with an official OOv3 deployment.
+See [Networks](../reference/networks.md) for chain IDs and external-contract addresses. Note that `BazaarPair` reads Arbitrum's `ArbSys` precompile (`0x64`) for L2 block numbers — the protocol runs only on Arbitrum chains. UMA no longer supports an OOv3 on Arbitrum Sepolia, so the testnet configuration deploys a mock; the real UMA dispute flow can only be exercised on a chain with an official OOv3 deployment.
