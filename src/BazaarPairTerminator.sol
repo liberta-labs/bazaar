@@ -199,7 +199,7 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
     // -------------------- Proposal functions --------------------
 
     /// @dev Bounds and sanitizes the reason, the one proposer-supplied text in the UMA claim: the
-    ///      contract identifies the pair itself, by pair ID and feed IDs. The reason is restricted
+    ///      contract identifies the pair itself, by its feed IDs. The reason is restricted
     ///      to a conservative ASCII subset so crafted text cannot escape a delimiter, open a fake
     ///      numbered check, or smuggle invisible/homoglyph text past the humans who verify these
     ///      claims: letters, digits, space, . , & / - and the URL set : ? = # % _ ~ + so evidence
@@ -234,10 +234,11 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
         return true;
     }
 
-    /// @dev Claim-text fragment describing the pair's price feed(s). Composite feed IDs are
-    ///      resolved to their underlying Pyth legs so UMA verifiers can check them against the
-    ///      Pyth Pro registry (a composite ID itself does not exist on Pyth). Raw feed IDs are
-    ///      written in decimal, the form that registry lists them in; a composite ID in hex.
+    /// @dev Claim-text fragment naming the pair's price feed(s), the only identity the claim gives
+    ///      the pair. Feed IDs are written in decimal, as the Pyth Pro registry lists them, so UMA
+    ///      verifiers can look each one up there. A composite is written as its two legs and the
+    ///      direction they combine in: its own ID is a hash of those, under which Pyth publishes
+    ///      nothing.
     function _feedIdSection(IBazaarPair p) internal view returns (bytes memory) {
         bytes32 feedId = p.baseFeedId();
         (bytes32 legBaseId, bytes32 legQuoteId, bool legInvertQuote) = BazaarOracle(p.oracle()).composites(feedId);
@@ -246,11 +247,9 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
             return abi.encodePacked(". Base feed ID (Pyth Pro): ", Strings.toString(uint256(feedId)));
         }
         return abi.encodePacked(
-            ". Composite feed ID (USD price = base leg ",
+            ". Composite market (USD price = base leg ",
             legInvertQuote ? "DIVIDED by" : "MULTIPLIED by",
-            " quote leg): ",
-            Strings.toHexString(uint256(feedId)),
-            ". Base leg feed ID (Pyth Pro): ",
+            " quote leg). Base leg feed ID (Pyth Pro): ",
             Strings.toString(uint256(legBaseId)),
             ". Quote leg feed ID (Pyth Pro, FX): ",
             Strings.toString(uint256(legQuoteId))
@@ -266,15 +265,14 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
         return "PYTH VERIFIER MIGRATION";
     }
 
-    /// @dev The contract-written opening of the claim: the pair's identity, the declared category
-    ///      and the proposed cutoff.
+    /// @dev The contract-written opening of the claim: the pair's identity (its feed IDs), the
+    ///      declared category and the proposed cutoff. The pair ID is omitted because it equals
+    ///      the base feed ID.
     function _claimHead(IBazaarPair p, uint8 category, uint256 lastTradingTs) internal view returns (bytes memory) {
         return abi.encodePacked(
-            "Termination proposal for the Bazaar trading pair with pair ID ",
-            Strings.toHexString(uint256(p.pairId())),
-            " on Arbitrum (chain ID ",
+            "Termination proposal for the Bazaar trading pair on Arbitrum (chain ID ",
             Strings.toString(block.chainid),
-            ").",
+            ") priced from the Pyth Pro feed IDs below.",
             " Pyth Pro verifier contract: ",
             Strings.toHexString(address(BazaarOracle(p.oracle()).pythLazer())),
             _feedIdSection(p),
@@ -320,7 +318,7 @@ contract BazaarPairTerminator is IOptimisticOracleV3CallbackRecipient, Reentranc
     ///         earlier one. The vote is the emergency route: holders of 60% of the share snapshot
     ///         may latch the cutoff before the claim resolves (executeInsurerTermination), after
     ///         which the pair settles under the verdict (see terminateScheduledPair).
-    /// @dev The claim identifies the pair by its pair ID and feed IDs and names the declared
+    /// @dev The claim identifies the pair by its feed IDs and names the declared
     ///      category, both written by the contract, so the fenced reason is the only
     ///      proposer-supplied text in it. The cutoff may sit as near as INSURER_TERMINATION_MIN_LEAD
     ///      because the vote's latch, which closes INSURER_TERMINATION_LATCH_LEAD before the cutoff,

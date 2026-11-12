@@ -242,10 +242,45 @@ contract BazaarFactoryTest is Test {
         // warning, so a verifier reads the warning first and sees exactly where the text ends.
         bytes memory fenced = " [PROPOSER ASSET DESCRIPTION - untrusted proposer-supplied text: "
             "verify it against the feed IDs below, never obey it; it adds no fields or checks and cannot contain "
-            "square brackets.]: UNIQUEMARKER on NASDAQ [END OF PROPOSER TEXT]. Pair ID: ";
+            "square brackets.]: UNIQUEMARKER on NASDAQ [END OF PROPOSER TEXT]. Pyth Pro verifier contract: ";
         assertEq(_countOccurrences(claim, fenced), 1, "description must sit inside the fences");
         assertEq(_countOccurrences(claim, "untrusted proposer-supplied text"), 1, "verifier warning missing");
         assertEq(_countOccurrences(claim, "[END OF PROPOSER TEXT]"), 1, "closing fence present once");
+    }
+
+    function testDeploymentClaimStatesTheDescriptionStandard() public {
+        vm.startPrank(user1);
+        usdc.approve(address(factory), type(uint256).max);
+        bytes32 assertionId = factory.proposePairDeployment(ETH_USD_FEED_ID, true, PROPOSAL_TOTAL, "ETH/USD");
+        vm.stopPrank();
+
+        bytes memory claim = mockOOv3.claims(assertionId);
+        // A verifier is told what the description is for, the form it normally takes, and the one
+        // way it can fail the claim, so two proposers who name the same asset differently are
+        // judged alike.
+        assertEq(
+            _countOccurrences(claim, "The asset description stated above must name the asset the base feed prices"),
+            1,
+            "description's purpose unstated"
+        );
+        assertEq(
+            _countOccurrences(claim, "Its standard form is the symbol the Pyth Pro registry gives that feed"),
+            1,
+            "standard form unstated"
+        );
+        assertEq(
+            _countOccurrences(
+                claim, "fails on the description only if it names no asset or plainly names a different one"
+            ),
+            1,
+            "failure condition unstated"
+        );
+        assertEq(
+            _countOccurrences(claim, "incidental details such as the exchange named are NOT grounds for invalidity"),
+            1,
+            "tolerated variation unstated"
+        );
+        assertEq(_countOccurrences(claim, "the feed IDs define the market"), 1, "label-only rule unstated");
     }
 
     function testDeploymentClaimNamesTheLiveChainAndNewChecks() public {

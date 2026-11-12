@@ -2,7 +2,7 @@
 
 Bazaar has no batch form of `createOrder`: each order is one call, because each order is one
 signed intent and the [relayer](../protocol/meta-transactions.md) path signs them one at a time.
-Cancelling and amending are batched already — `cancelOrders` takes up to 200 ids and
+Cancelling and amending are batched already — `cancelOrders` takes up to 34 ids and
 `amendOrders` reprices or resizes up to 32 resting limits in one call — so the only thing that
 needs more than one transaction today is placing several new orders at once.
 

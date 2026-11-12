@@ -124,6 +124,8 @@ contract CompositeFactoryTest is Test {
                 )
             )
         );
+        // The pair ID equals the feed ID, so the claim does not repeat it in hex.
+        assertFalse(_contains(claim, "Pair ID"));
         assertTrue(_contains(claim, "is the numeric ID of an ACTIVE feed in the Pyth Pro price feed registry"));
         assertTrue(_contains(claim, "Pyth Core feed IDs are a different namespace and are INVALID"));
         assertTrue(_contains(claim, "a funding-rate or redemption-rate feed - is INVALID"));
@@ -137,8 +139,15 @@ contract CompositeFactoryTest is Test {
         vm.stopPrank();
 
         bytes memory claim = mockOOv3.claims(assertionId);
-        assertTrue(_contains(claim, "Composite feed ID (USD price = base leg DIVIDED by quote leg)"));
-        assertTrue(_contains(claim, "Base leg feed ID (Pyth Pro, asset in its native currency): 9001."));
+        assertTrue(
+            _contains(
+                claim,
+                "Composite market (USD price = base leg DIVIDED by quote leg). "
+                "Base leg feed ID (Pyth Pro, asset in its native currency): 9001."
+            )
+        );
+        // The composite's own ID is a hash of its legs, under which Pyth publishes nothing.
+        assertFalse(_contains(claim, bytes(Strings.toHexString(uint256(compositeId)))));
         assertTrue(_contains(claim, "Quote leg feed ID (Pyth Pro, FX conversion to USD): 9002."));
         assertTrue(_contains(claim, "Quote leg inverted: true"));
         assertTrue(_contains(claim, "eligible ONLY as a composite, and only if that currency is one of: "));
@@ -176,8 +185,15 @@ contract CompositeFactoryTest is Test {
         assertTrue(_contains(claim, "special dividends or other one-time distributions exceeding 5%"));
         assertTrue(_contains(claim, "redenomination of the quote currency of a composite pair"));
         assertTrue(_contains(claim, "market-driven price moves of ANY expected size"));
-        // Composite pairs resolve their legs in termination claims too
-        assertTrue(_contains(claim, "Base leg feed ID (Pyth Pro): 9001. Quote leg feed ID (Pyth Pro, FX): 9002."));
+        // Composite pairs are named by their legs in termination claims too, never by their own ID
+        assertTrue(
+            _contains(
+                claim,
+                "Composite market (USD price = base leg DIVIDED by quote leg). "
+                "Base leg feed ID (Pyth Pro): 9001. Quote leg feed ID (Pyth Pro, FX): 9002."
+            )
+        );
+        assertFalse(_contains(claim, bytes(Strings.toHexString(uint256(compositeId)))));
         assertTrue(
             _contains(
                 claim,
@@ -247,7 +263,7 @@ contract CompositeFactoryTest is Test {
         vm.stopPrank();
 
         bytes memory claim = mockOOv3.claims(assertionId);
-        assertTrue(_contains(claim, "Composite feed ID (USD price = base leg MULTIPLIED by quote leg)"));
+        assertTrue(_contains(claim, "Composite market (USD price = base leg MULTIPLIED by quote leg)"));
         assertTrue(_contains(claim, "Quote leg inverted: false"));
     }
 

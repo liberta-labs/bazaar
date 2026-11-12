@@ -36,13 +36,27 @@ The per-chain file only helps if the RPC alias actually serves the chain the tar
 
 The lens and the terminator are pre-deployed against the predicted address because inlining their deployment in the factory constructor would push the factory's initcode past the EIP-3860 limit.
 
+Both steps run with `--slow`, so `forge` sends each transaction only after the previous one has confirmed and succeeded; a failed deployment stops the run instead of letting later transactions deploy against an address that holds no code.
+
+## Source verification
+
+Both steps pass `--verify`, which submits what they deploy to Etherscan's multichain API, so the source appears on Arbiscan; `ETHERSCAN_API_KEY` serves Arbitrum One and Arbitrum Sepolia alike. Step 2's contracts are submitted with the chain's recorded link flags, the same ones they were compiled with.
+
+Step 1 then runs `make verify-libs-arb-sepolia` (or `verify-libs-arb-mainnet`), which submits every library in the chain's record. The five that call `RiskParamsLib` carry its address in their bytecode, linked in by step 1 itself, so Etherscan can reproduce them only when the compile is given that address; the target submits them with `RiskParamsLib`'s recorded address and the other seven with no link flags. It skips any contract Etherscan already shows as verified, so it is safe to re-run on its own whenever a submission did not complete. For step 2, re-run the same `forge script` command with `--resume --verify`, which verifies without redeploying.
+
+Pairs are EIP-1167 clones of the `BazaarPair` implementation, so Arbiscan shows the implementation's verified source for each of them; nothing is submitted per pair.
+
 ## The Pyth Pro verifier
 
 On any chain but Anvil, before the first broadcast, `DeployBazaar` has the configured Pyth Pro verifier verify an update Pyth's signer signed (`RECORDED_PYTH_UPDATE`: BTC/USD and ETH/USD on the one-second channel) and requires it to hand back that update's payload unchanged. No probe of the verifier's functions can show that it trusts the key Pyth signs with and returns the payload in the layout `BazaarOracle` reads; a contract at the wrong address, a verifier that trusts no signer, or one that returns the payload in another layout stops the deployment there. If Pyth retires the key that signed the recorded update, replace it with any update from Pyth's archive.
 
 ## The bug-bounty recipient
 
-`BUG_BOUNTY_ADDRESS` must be set before deploying to any chain but Anvil; the script aborts before the first broadcast if it is missing, and prints the resolved address in the banner alongside USDC, Pyth and the OOv3. It receives 1% (`BUG_BOUNTY_TAX_BP`) of the integrator and insurance fee streams on every fill. The factory holds it `immutable` and copies it into every pair at listing, so there is no setter and no governance path — changing it means redeploying the factory and re-listing every pair. Anvil keeps an implicit default of the deploying account, since a local chain has no revenue to misdirect.
+`DeployBazaar` reads the recipient from `BUG_BOUNTY_ADDRESS`, aborts before the first broadcast on any chain but Anvil if it is missing, and prints the resolved address in the banner alongside USDC, Pyth and the OOv3. It receives 1% (`BUG_BOUNTY_TAX_BP`) of the integrator and insurance fee streams on every fill. The factory holds it `immutable` and copies it into every pair at listing, so there is no setter and no governance path — changing it means redeploying the factory and re-listing every pair. Anvil keeps an implicit default of the deploying account, since a local chain has no revenue to misdirect.
+
+Nothing is pushed to the recipient. Its fee share accrues in each pair's fee escrow and is collected by calling `claimFees()` on that pair, and the levy on insurer votes credits it insurance shares, which leave through the ordinary insurance withdrawal. The recipient therefore has to be an account that can make those calls, such as an EOA or a Safe; a contract that cannot would hold its share forever.
+
+Because the address can never change, the live `make` targets do not read it from one shared variable. Each chain has its own entry in `.env`, `ARB_SEPOLIA_BUG_BOUNTY_ADDRESS` and `ARB_MAINNET_BUG_BOUNTY_ADDRESS`, and each step-2 target passes only its own chain's to the script as `BUG_BOUNTY_ADDRESS`, refusing to run while it is empty; `deploy-arb-mainnet` also shows the address in its confirmation prompt. Leave a chain's entry empty until its recipient exists, and keep no plain `BUG_BOUNTY_ADDRESS` in `.env`: `forge` loads `.env` itself, so a `forge script` run outside `make` would pick it up.
 
 ## The genesis UMA identifier
 
@@ -54,7 +68,7 @@ On any chain but Anvil, before the first broadcast, `DeployBazaar` has the confi
 |---|---|
 | `ARBITRUM_MAINNET_RPC_URL`, `ARBITRUM_SEPOLIA_RPC_URL` | `foundry.toml` RPC endpoints |
 | `ACCOUNT`, `SENDER` | keystore account for `forge script` |
-| `BUG_BOUNTY_ADDRESS` | bug-bounty fee recipient — **required on live chains** |
+| `ARB_SEPOLIA_BUG_BOUNTY_ADDRESS`, `ARB_MAINNET_BUG_BOUNTY_ADDRESS` | bug-bounty fee recipient for each chain, passed by `deploy-arb-sepolia` / `deploy-arb-mainnet` as the script's `BUG_BOUNTY_ADDRESS` — **required on live chains** |
 | `ETHERSCAN_API_KEY` | contract verification on Arbiscan (an Etherscan key serves Arbitrum One and Arbitrum Sepolia alike) |
 | `SEPOLIA_OFFICIAL_USDC` | Arbitrum Sepolia only: `true` deploys against Circle's test USDC; unset or `false` deploys a mintable `TestnetUSDC` with a public faucet (see [Networks](../reference/networks.md)) |
 | `ANVIL_RPC_URL`, `ANVIL_PRIVATE_KEY`, `ANVIL_WALLET` | local Makefile targets |

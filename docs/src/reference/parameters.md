@@ -13,7 +13,7 @@ All constants live in `src/libraries/BazaarTypes.sol`, `src/libraries/RiskParams
 | `MAX_ACTIVE_LIMIT_ORDERS_PER_USER` | 32 (Limit + StopLimit; `IOC` and `FOK` limits never rest and take no slot); a creation that finds the set full first prunes its expired, canceled and filled entries |
 | `RESTING_BOUND_SLACK` | 64 units at 18 decimals (2 × `MAX_ACTIVE_LIMIT_ORDERS_PER_USER`) — added to the [resting-order tally's](../protocol/margin.md#the-resting-order-tally) bound, because the full reading rounds down order by order while the bound rounds down once per side |
 | TP/SL per position | 1 each |
-| `MAX_CANCELS_PER_CALL` | 200 |
+| `MAX_CANCELS_PER_CALL` | 34 (`MAX_ACTIVE_LIMIT_ORDERS_PER_USER` + 2) — every order one user can hold live: the resting Limit/StopLimit set plus a take-profit and a stop-loss |
 | `MAX_AMENDS_PER_CALL` | 32 — one batch can requote every resting order a user may hold; the batch is all or nothing, except for an amendment flagged [best-effort](../protocol/orders.md#amending) |
 | `MAX_WALK_STEPS` | 32 — ceiling on a walk's node budget (`MatchHints.maxSteps`; 0 selects the ceiling, which relayed orders and keeper-fired stops always run) and on the insertion-hint repair walk |
 | Insertion hints | up to 4 predecessor candidates (`MatchHints.pred..pred4`), outside the EIP-712 payload; `amendOrders` instead carries up to two per amendment inside its signed id word |

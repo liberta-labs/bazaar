@@ -242,6 +242,52 @@ contract CancelOrdersRelayerFeeGuardsTest is IntegrationBase {
         assertEq(_escrowOwed(relayerEoa), 0, "no fee accrued");
     }
 
+    /// @notice The fee is pulled before any order is canceled. A relayer simulates a call before
+    ///         sending it, but the signer can move its allowance or USDC before the call lands; the
+    ///         fee pull then fails ahead of the loop, so the unpaid call costs the relayer a short
+    ///         revert, a fraction of what the same call spends canceling every order once paid.
+    function test_relayedCancel_unpaidFeeRevertsBeforeTheCancels() public {
+        (address user, uint256 pk, address relayerEoa) = _actor("lateRevert");
+        uint256[] memory ids = _restingBids(user, BazaarTypes.MAX_ACTIVE_LIMIT_ORDERS_PER_USER);
+        (uint256 unpaid, uint256 paid) = _unpaidThenPaid(user, relayerEoa, ids, _buildRelayedCancel(user, pk, ids));
+
+        assertGt(_canceledBlock(ids[ids.length - 1]), 0, "the paid call cancels every order");
+        assertEq(_escrowOwed(relayerEoa), MetaTxLib.MAX_RELAYER_FEE, "the relayer is paid once");
+        assertLt(unpaid * 4, paid, "the unpaid call reverts before the loop");
+    }
+
+    /// @dev Send the signed cancel with no allowance for its fee (it reverts), then again once the
+    ///      wallet allows the fee; the gas each spent.
+    function _unpaidThenPaid(address user, address relayerEoa, uint256[] memory ids, CancelReq memory r)
+        internal
+        returns (uint256 unpaid, uint256 paid)
+    {
+        vm.expectRevert(
+            abi.encodeWithSelector(IERC20Errors.ERC20InsufficientAllowance.selector, address(pair), 0, _usdcFee())
+        );
+        unpaid = _cancelGas(relayerEoa, ids, r);
+        assertEq(_canceledBlock(ids[0]), 0, "the unpaid call cancels nothing");
+        _allowFees(user);
+        paid = _cancelGas(relayerEoa, ids, r);
+    }
+
+    /// @dev `n` resting bids of `user`, on a fresh 10k deposit.
+    function _restingBids(address user, uint256 n) internal returns (uint256[] memory ids) {
+        _deposit(user, 10_000 * BAZAAR_SCALE);
+        ids = new uint256[](n);
+        for (uint256 i; i < n; ++i) {
+            ids[i] = _placeLimit(user, true, BAZAAR_SCALE / 100, 45_000 * BAZAAR_SCALE);
+        }
+    }
+
+    /// @dev Gas the relayed cancel `r` spends, sent by `relayerEoa`.
+    function _cancelGas(address relayerEoa, uint256[] memory ids, CancelReq memory r) internal returns (uint256 used) {
+        used = gasleft();
+        vm.prank(relayerEoa);
+        pair.cancelOrders(ids, r.nonce, r.deadline, r.fee, r.sig, "");
+        used -= gasleft();
+    }
+
     /// @notice The wallet path is open to a signer with no ETH and no standing allowance: an
     ///         ERC-2612 permit for the fee rides along outside the signed payload.
     function test_relayedCancel_withPermit() public {

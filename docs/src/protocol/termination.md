@@ -81,7 +81,7 @@ Two further rules apply to every settlement price:
 
 ## Proposer-supplied text
 
-The UMA proposal takes one free-text argument — `proposeTermination(pair, category, lastTradingTs, reason)` — and it ends up inside the claim UMA voters read. The claim names the pair itself, by its pair ID and Pyth Pro feed IDs, and tells voters to identify the asset from those feeds, so the market's identity in the claim is never the proposer's word. Because the claim is the entire basis on which a human decides to dispute, the reason is treated as hostile input:
+The UMA proposal takes one free-text argument — `proposeTermination(pair, category, lastTradingTs, reason)` — and it ends up inside the claim UMA voters read. The claim names the pair itself, by its Pyth Pro feed IDs alone, written in decimal as Pyth's registry lists them (a composite by its two legs), and tells voters to identify the asset from those feeds, so the market's identity in the claim is never the proposer's word. Because the claim is the entire basis on which a human decides to dispute, the reason is treated as hostile input:
 
 - **Length**: `reason` is 1 to 1,000 bytes.
 - **Charset**: letters, digits, space, and `. , & / -`, plus `: ? = # % _ ~ +` so evidence URLs survive. Every other byte — including all non-ASCII, and **square brackets** — is rejected at submission.

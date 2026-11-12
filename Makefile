@@ -11,8 +11,11 @@ help:
 	@echo "  make deploy-pair-anvil        - Deploy a pair (FEED_ID=2 CONTINUOUS=true|false DESC=... [PRICE=2000])"
 	@echo "  make deploy-libs-arb-sepolia  - Step 1/2: deploy libraries to Arbitrum Sepolia"
 	@echo "  make deploy-arb-sepolia       - Step 2/2: deploy Bazaar to Arbitrum Sepolia"
+	@echo "  make verify-libs-arb-sepolia  - Verify the recorded Arbitrum Sepolia libraries (step 1 runs it)"
+	@echo "  make force-settle-arb-sepolia - Settle a Sepolia assertion now as the mock OOv3 owner (ASSERTION_ID=0x... [RESULT=true|false])"
 	@echo "  make deploy-libs-arb-mainnet  - Step 1/2: deploy libraries to Arbitrum Mainnet"
 	@echo "  make deploy-arb-mainnet       - Step 2/2: deploy Bazaar to Arbitrum Mainnet"
+	@echo "  make verify-libs-arb-mainnet  - Verify the recorded Arbitrum Mainnet libraries (step 1 runs it)"
 	@echo "  make set-price-anvil          - Store a test price on a pair (PAIR=0x... PRICE=2000)"
 	@echo "  make deposit-anvil            - Deposit collateral into a pair (PAIR=0x... AMOUNT=1000)"
 	@echo "  make create-order-anvil       - Create limit order (PAIR=0x... LIMIT_PRICE=2000 SIZE=0.01 IS_LONG=true)"
@@ -272,6 +275,42 @@ ARB_MAINNET_CHAIN_ID := 42161
 ARB_SEPOLIA_LIB_ARGS := deployments/$(ARB_SEPOLIA_CHAIN_ID)/libraries.args
 ARB_MAINNET_LIB_ARGS := deployments/$(ARB_MAINNET_CHAIN_ID)/libraries.args
 
+# The bug-bounty recipient is immutable in the factory and copied into every pair, so each chain has
+# its own variable in .env (ARB_SEPOLIA_BUG_BOUNTY_ADDRESS, ARB_MAINNET_BUG_BOUNTY_ADDRESS), and each
+# step-2 target passes only its own chain's to DeployBazaar as BUG_BOUNTY_ADDRESS. A target whose
+# variable is empty refuses to run, so one chain's recipient cannot reach another chain's factory
+# through a shared value left unchanged between deployments.
+#
+# Every live target runs with --slow: forge sends a transaction only after the previous one has
+# confirmed and succeeded. Without it, a run whose library or lens deployment failed could still send
+# the transactions after it, deploying contracts against an address that holds no code.
+
+# ---------- Library source verification ----------
+# Submits every library recorded in a chain's libraries.args to Etherscan for source verification.
+# Step 1 runs it after its own --verify, and it can be re-run alone at any time: forge verify-contract
+# skips a contract Etherscan already shows as verified.
+#
+# The libraries that call RiskParamsLib's public functions carry its address in their bytecode, linked
+# in by step 1 itself, so Etherscan reproduces them only when the compile is given that address: they
+# are submitted with RiskParamsLib's flag from the chain's record. The others are submitted with no
+# link flags, as step 1 compiled them. RISK_PARAMS_DEPENDENTS names the libraries whose artifacts carry RiskParamsLib's link
+# reference; a library that starts calling RiskParamsLib's public functions must be added to it.
+RISK_PARAMS_DEPENDENTS := InsuranceVaultLib AdlLib MatchingEngineLib TerminationLib VaultHealthLib
+
+# $(1): the chain's libraries.args record, $(2): its chain id.
+define verify_libs
+@test -f $(1) || { echo "ERROR: $(1) not found. Run step 1 on this chain first."; exit 1; }
+@failed=""; \
+for target in $$(grep -oE '[^ ]+:0x[0-9a-fA-F]{40}' $(1)); do \
+	lib=$${target%:*}; addr=$${target##*:}; name=$${lib##*:}; links=""; \
+	case " $(RISK_PARAMS_DEPENDENTS) " in *" $$name "*) \
+		links="--libraries $$(grep -oE '[^ ]+/RiskParamsLib\.sol:RiskParamsLib:0x[0-9a-fA-F]{40}' $(1))";; esac; \
+	echo "--- $$name at $$addr"; \
+	forge verify-contract $$addr $$lib --chain $(2) --watch $$links || failed="$$failed $$name"; \
+done; \
+if [ -n "$$failed" ]; then echo "Verification did not complete for:$$failed -- re-run to retry."; exit 1; fi
+endef
+
 # ---------- Arbitrum Sepolia ----------
 
 .PHONY: deploy-libs-arb-sepolia
@@ -283,7 +322,13 @@ deploy-libs-arb-sepolia:
 		--account $(ACCOUNT) \
 		--sender $(SENDER) \
 		--broadcast \
+		--slow \
 		--verify
+	@$(MAKE) --no-print-directory verify-libs-arb-sepolia
+
+.PHONY: verify-libs-arb-sepolia
+verify-libs-arb-sepolia:
+	$(call verify_libs,$(ARB_SEPOLIA_LIB_ARGS),$(ARB_SEPOLIA_CHAIN_ID))
 
 .PHONY: deploy-arb-sepolia
 deploy-arb-sepolia:
@@ -291,15 +336,55 @@ deploy-arb-sepolia:
 		echo "ERROR: $(ARB_SEPOLIA_LIB_ARGS) not found."; \
 		echo "Run 'make deploy-libs-arb-sepolia' first (step 1 of 2)."; \
 		exit 1; }
+	@test -n "$(ARB_SEPOLIA_BUG_BOUNTY_ADDRESS)" || { \
+		echo "ERROR: ARB_SEPOLIA_BUG_BOUNTY_ADDRESS is not set in .env."; \
+		echo "It becomes the immutable bug-bounty recipient of the Arbitrum Sepolia factory."; \
+		exit 1; }
 	@echo "Step 2/2: deploying Bazaar to Arbitrum Sepolia..."
+	BUG_BOUNTY_ADDRESS=$(ARB_SEPOLIA_BUG_BOUNTY_ADDRESS) \
 	EXPECTED_CHAIN_ID=$(ARB_SEPOLIA_CHAIN_ID) \
 	forge script script/DeployBazaar.s.sol \
 		--rpc-url arbitrum_sepolia \
 		--account $(ACCOUNT) \
 		--sender $(SENDER) \
 		--broadcast \
+		--slow \
 		--verify \
 		$$(cat $(ARB_SEPOLIA_LIB_ARGS))
+
+# Settles one assertion on the Arbitrum Sepolia mock OOv3 at once instead of after its liveness, with
+# RESULT (default true) as the verdict: a listing, a termination or an identifier upgrade alike. The
+# oracle calls the factory or terminator back as a normal settlement would, so an approved listing
+# deploys its pair in this transaction. Only the mock's owner can force-settle, and step 2 makes the
+# deploying account its owner, so the target refuses to send unless SENDER owns it. The oracle's
+# address is read from step 2's broadcast record unless OOV3 is given. Arbitrum One runs against
+# UMA's own OOv3, which has no such function, so there is no mainnet counterpart.
+ARB_SEPOLIA_DEPLOY_RECORD := broadcast/DeployBazaar.s.sol/$(ARB_SEPOLIA_CHAIN_ID)/run-latest.json
+
+.PHONY: force-settle-arb-sepolia
+force-settle-arb-sepolia:
+	@echo "$(ASSERTION_ID)" | grep -qE '^0x[0-9a-fA-F]{64}$$' || { \
+		echo "Usage: make force-settle-arb-sepolia ASSERTION_ID=0x<64 hex digits> [RESULT=true|false] [OOV3=0x...]"; \
+		exit 1; }
+	@case "$(or $(RESULT),true)" in true|false) ;; *) echo "ERROR: RESULT must be true or false."; exit 1;; esac
+	@OOV3_ADDR="$(OOV3)"; \
+	if [ -z "$$OOV3_ADDR" ]; then \
+		test -f $(ARB_SEPOLIA_DEPLOY_RECORD) || { \
+			echo "ERROR: $(ARB_SEPOLIA_DEPLOY_RECORD) not found. Run 'make deploy-arb-sepolia' first, or pass OOV3=0x..."; \
+			exit 1; }; \
+		OOV3_ADDR=$$(jq -r '[.transactions[] | select(.contractName == "OwnedMockOptimisticOracleV3") | .contractAddress][0] // empty' $(ARB_SEPOLIA_DEPLOY_RECORD)); \
+		test -n "$$OOV3_ADDR" || { \
+			echo "ERROR: $(ARB_SEPOLIA_DEPLOY_RECORD) records no OwnedMockOptimisticOracleV3. Pass OOV3=0x..."; \
+			exit 1; }; \
+	fi; \
+	OWNER=$$(cast call $$OOV3_ADDR "owner()(address)" --rpc-url arbitrum_sepolia) || exit 1; \
+	if [ "$$(echo $$OWNER | tr A-F a-f)" != "$$(echo $(SENDER) | tr A-F a-f)" ]; then \
+		echo "ERROR: the mock OOv3 at $$OOV3_ADDR is owned by $$OWNER, not SENDER ($(SENDER)). Only its owner can force-settle."; \
+		exit 1; fi; \
+	echo "Force-settling $(ASSERTION_ID) as $(or $(RESULT),true) on the mock OOv3 at $$OOV3_ADDR..."; \
+	cast send $$OOV3_ADDR "mockForceSettle(bytes32,bool)" $(ASSERTION_ID) $(or $(RESULT),true) \
+		--rpc-url arbitrum_sepolia \
+		--account $(ACCOUNT)
 
 # ---------- Arbitrum Mainnet ----------
 
@@ -313,7 +398,13 @@ deploy-libs-arb-mainnet:
 		--account $(ACCOUNT) \
 		--sender $(SENDER) \
 		--broadcast \
+		--slow \
 		--verify
+	@$(MAKE) --no-print-directory verify-libs-arb-mainnet
+
+.PHONY: verify-libs-arb-mainnet
+verify-libs-arb-mainnet:
+	$(call verify_libs,$(ARB_MAINNET_LIB_ARGS),$(ARB_MAINNET_CHAIN_ID))
 
 .PHONY: deploy-arb-mainnet
 deploy-arb-mainnet:
@@ -321,13 +412,20 @@ deploy-arb-mainnet:
 		echo "ERROR: $(ARB_MAINNET_LIB_ARGS) not found."; \
 		echo "Run 'make deploy-libs-arb-mainnet' first (step 1 of 2)."; \
 		exit 1; }
+	@test -n "$(ARB_MAINNET_BUG_BOUNTY_ADDRESS)" || { \
+		echo "ERROR: ARB_MAINNET_BUG_BOUNTY_ADDRESS is not set in .env."; \
+		echo "It becomes the immutable bug-bounty recipient of the Arbitrum One factory."; \
+		exit 1; }
 	@echo "Step 2/2: deploying Bazaar to Arbitrum MAINNET..."
+	@echo "Bug-bounty recipient (immutable once deployed): $(ARB_MAINNET_BUG_BOUNTY_ADDRESS)"
 	@read -p "Are you sure you want to deploy to mainnet? (y/N): " confirm && [ "$$confirm" = "y" ]
+	BUG_BOUNTY_ADDRESS=$(ARB_MAINNET_BUG_BOUNTY_ADDRESS) \
 	EXPECTED_CHAIN_ID=$(ARB_MAINNET_CHAIN_ID) \
 	forge script script/DeployBazaar.s.sol \
 		--rpc-url arbitrum_mainnet \
 		--account $(ACCOUNT) \
 		--sender $(SENDER) \
 		--broadcast \
+		--slow \
 		--verify \
 		$$(cat $(ARB_MAINNET_LIB_ARGS))

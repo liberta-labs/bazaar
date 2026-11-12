@@ -3437,13 +3437,24 @@ contract BazaarPairTest is Test {
 
     // ── Exceeds MAX_CANCELS_PER_CALL ──────────────────────────────────────
 
+    /// @notice The cap is every order one user can hold live: the resting Limit/StopLimit set plus a
+    ///         take-profit and a stop-loss. A list that size passes the length check (and fails on
+    ///         its dummy ids); one more is refused before any id is read.
     function testCancelOrders_RevertsExceedsMaxCancelsPerCall() public {
-        uint256[] memory ids = new uint256[](201);
-        for (uint256 i; i < 201; i++) {
+        uint256 cap = BazaarTypes.MAX_ACTIVE_LIMIT_ORDERS_PER_USER + 2;
+        uint256[] memory ids = new uint256[](cap + 1);
+        for (uint256 i; i < ids.length; i++) {
             ids[i] = i + 1; // dummy ids, revert fires before ownership check
         }
 
         vm.expectRevert(BazaarPair.BazaarPair__ExceedsMaxCancelsPerCall.selector);
+        vm.prank(user1);
+        btcPair.cancelOrders(ids, 0, 0, 0, "", "");
+
+        assembly {
+            mstore(ids, cap)
+        }
+        vm.expectRevert(BazaarPair.BazaarPair__RequestorIsNotOrderOwner.selector);
         vm.prank(user1);
         btcPair.cancelOrders(ids, 0, 0, 0, "", "");
     }

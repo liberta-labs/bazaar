@@ -250,7 +250,7 @@ of the checks that flag covers.
 
 ## Cancellation & cleanup
 
-- `cancelOrders(orderIds[], …)` — creator-only, up to 200 per call. Canceling unlinks the order
+- `cancelOrders(orderIds[], …)` — creator-only, up to 34 per call (every order one user can hold live: 32 resting Limit/StopLimit orders, a take-profit and a stop-loss). Canceling unlinks the order
   from the book in the same write, so no walk can ever fill it afterwards.
 - Expired orders are removed by whoever touches them first: the matching walk cancels-and-unlinks
   an expired maker on contact, a withdrawal sweeps the owner's set, as do a creation that finds the

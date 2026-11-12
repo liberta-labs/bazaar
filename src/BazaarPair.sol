@@ -1334,7 +1334,11 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
     // -------------------- Constants --------------------
     uint256 internal constant MIN_ORDER_AMOUNT = BazaarTypes.MIN_ORDER_AMOUNT; // min order size (5 USDC)
     uint256 internal constant MAX_SLIPPAGE_BP = BazaarTypes.MAX_SLIPPAGE_BP; // 10% max slippage for market-type orders
-    uint256 internal constant MAX_CANCELS_PER_CALL = 200;
+    // Every order one user can hold live at once: the resting Limit and StopLimit orders
+    // (MAX_ACTIVE_LIMIT_ORDERS_PER_USER) plus the position's take-profit and stop-loss. A dead
+    // order still holding a keeper bounty may also be listed, for its refund; more of those than
+    // fit take further calls.
+    uint256 internal constant MAX_CANCELS_PER_CALL = BazaarTypes.MAX_ACTIVE_LIMIT_ORDERS_PER_USER + 2;
 
     // -------------------- Functions --------------------
 
@@ -1497,6 +1501,15 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
             revert BazaarPair__ExceedsMaxCancelsPerCall();
         }
 
+        // Relayed call: the fee is pulled from the wallet into the escrow, never from the bucket
+        // or the vault, and before any order is canceled. A relayer sends the call only after
+        // simulating it, but the signer can still move its USDC or allowance before the call
+        // lands; the transfer then fails here, ahead of the loop, so the relayer pays for a short
+        // revert rather than for every cancel the loop would have run and unwound.
+        if (effRelayerFee > 0) {
+            _pullRelayerFee(user, effRelayerFee, permitData, MetaTxLib.CANCEL_ORDERS_TYPEHASH, nonce);
+        }
+
         uint64 currentBlock = _l2Block();
         for (uint256 i; i < orderIds.length; ++i) {
             if (orders[orderIds[i]].creator != user) {
@@ -1513,12 +1526,6 @@ contract BazaarPair is Initializable, ReentrancyGuardTransient {
                 pairId,
                 currentBlock
             );
-        }
-
-        // Relayed call: the fee is pulled from the wallet into the escrow, never from the bucket
-        // or the vault.
-        if (effRelayerFee > 0) {
-            _pullRelayerFee(user, effRelayerFee, permitData, MetaTxLib.CANCEL_ORDERS_TYPEHASH, nonce);
         }
     }
 

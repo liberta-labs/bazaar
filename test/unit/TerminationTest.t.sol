@@ -2724,8 +2724,8 @@ contract TerminationProposalTest is Test {
 
     /// @notice Evidence URLs survive the reason whitelist, and the claim fences the free text:
     ///         spliced exactly once, as the FINAL section, inside brackets the charset makes
-    ///         unforgeable. The contract names the pair itself, by pair ID, and the claim tells
-    ///         verifiers to identify the asset from its feed IDs.
+    ///         unforgeable. The contract names the pair itself, by its feed IDs alone, and the
+    ///         claim tells verifiers to identify the asset from them.
     function test_ProposalText_UrlEvidenceAcceptedAndClaimFenced() public {
         vm.startPrank(proposer);
         usdc.approve(address(terminator), type(uint256).max);
@@ -2740,14 +2740,15 @@ contract TerminationProposalTest is Test {
         bytes memory claim = MockOptimisticOracleV3(address(factory.oo())).claims(aid);
         bytes memory opening = bytes(
             string.concat(
-                "Termination proposal for the Bazaar trading pair with pair ID ",
-                Strings.toHexString(uint256(pair.pairId())),
-                " on "
+                "Termination proposal for the Bazaar trading pair on Arbitrum (chain ID ",
+                Strings.toString(block.chainid),
+                ") priced from the Pyth Pro feed IDs below. Pyth Pro verifier contract: "
             )
         );
         for (uint256 i = 0; i < opening.length; i++) {
-            assertEq(claim[i], opening[i], "claim must open with the contract-written pair ID");
+            assertEq(claim[i], opening[i], "claim must open with the contract-written pair identity");
         }
+        assertEq(_count(claim, "pair ID"), 0, "the pair ID equals the base feed ID and is not repeated in hex");
         assertEq(_count(claim, "Identify the pair's asset from the feed IDs listed above"), 1, "asset step missing");
     }
 

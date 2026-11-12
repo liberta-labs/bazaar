@@ -30,7 +30,7 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
         bool isContinuouslyTraded;
         uint256 seedAmount; // BAZAAR_SCALE (1e18), the insurance seed: the deposit less the UMA bond
         uint256 seedAmountUsdc; // seed in USDC decimals (1e6), held in factory until deployment
-        string description; // e.g. "AAPL on NASDAQ"
+        string description; // e.g. "Equity.US.AAPL/USD Apple Inc"
         bytes32 pairId;
         uint256 proposalTs;
         bool resolved;
@@ -415,8 +415,12 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
     /// @param isContinuouslyTraded True if asset trades 24/7 (crypto), false for assets with trading hours (stocks).
     ///        Must be false for composite (non-USD-quoted) pairs — FX rates are not live 24/7.
     /// @param totalAmount Total deposit in BAZAAR_SCALE (1e18). Minimum 4000 USDC. 1k goes to UMA bond, rest is seed.
-    /// @param description Human-readable asset description, e.g. "AAPL on NASDAQ". 1-200 bytes,
-    ///        restricted to letters, digits, space, and . , & / - (see _isValidDescription).
+    /// @param description Label naming the asset the base feed prices (for a composite, the base
+    ///        leg). The claim's standard form is that feed's symbol in the Pyth Pro registry,
+    ///        optionally followed by the asset's name, e.g. "Equity.US.AAPL/USD Apple Inc"; the
+    ///        claim fails on it only if it names no asset or plainly names a different one.
+    ///        1-200 bytes, restricted to letters, digits, space, and . , & / - (see
+    ///        _isValidDescription).
     /// @return assertionId The UMA assertion ID for tracking this proposal.
     function proposePairDeployment(
         bytes32 baseFeedId,
@@ -901,12 +905,13 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
         return true;
     }
 
-    /// @dev Builds the UMA claim for a pair deployment proposal. Composite feed IDs are
-    ///      resolved to their underlying Pyth legs so verifiers can check them against the
-    ///      Pyth Pro registry (a composite ID itself does not exist on Pyth). Raw feed IDs are
-    ///      written in decimal, the form that registry lists them in; the pair ID and a composite
-    ///      ID are written in hex. The numbered checks come from ClaimTextLib, so their text stays
-    ///      out of the factory's EIP-170 budget.
+    /// @dev Builds the UMA claim for a pair deployment proposal. The market is named only by
+    ///      Pyth Pro feed IDs, in decimal as the Pyth Pro registry lists them, so every ID a
+    ///      verifier reads is one they can look up there. A composite is written as its two legs
+    ///      and the direction they combine in: its own ID is a hash of those, under which Pyth
+    ///      publishes nothing. The pair ID is omitted because it equals the base feed ID. The
+    ///      numbered checks come from ClaimTextLib, so their text stays out of the factory's
+    ///      EIP-170 budget.
     function _buildDeploymentClaim(bytes32 baseFeedId, bool isContinuouslyTraded, string calldata description)
         internal
         view
@@ -919,11 +924,9 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
             feedSection = abi.encodePacked(". Base feed ID (Pyth Pro): ", Strings.toString(uint256(baseFeedId)));
         } else {
             feedSection = abi.encodePacked(
-                ". Composite feed ID (USD price = base leg ",
+                ". Composite market (USD price = base leg ",
                 legInvertQuote ? "DIVIDED by" : "MULTIPLIED by",
-                " quote leg): ",
-                Strings.toHexString(uint256(baseFeedId)),
-                ". Base leg feed ID (Pyth Pro, asset in its native currency): ",
+                " quote leg). Base leg feed ID (Pyth Pro, asset in its native currency): ",
                 Strings.toString(uint256(legBaseId)),
                 ". Quote leg feed ID (Pyth Pro, FX conversion to USD): ",
                 Strings.toString(uint256(legQuoteId)),
@@ -940,8 +943,6 @@ contract BazaarFactory is IOptimisticOracleV3CallbackRecipient, ReentrancyGuard 
                 DESCRIPTION_FENCE_OPEN,
                 description,
                 DESCRIPTION_FENCE_CLOSE,
-                ". Pair ID: ",
-                Strings.toHexString(uint256(baseFeedId)),
                 ". Pyth Pro verifier contract: ",
                 Strings.toHexString(address(oracle.pythLazer()))
             ),
