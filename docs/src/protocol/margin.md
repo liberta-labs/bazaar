@@ -15,17 +15,110 @@ non-continuous (stocks, FX): M = max(V, reopen-gap EMA)     + unload-slippage EM
 clamped to [2%, 40%]
 ```
 
-- **Volatility** is an EMA of annualized squared returns (τ = 5 days). Its multiplier is the only leg allowed past 3×: the curve is linear in *variance*, which holds margin-per-daily-σ roughly constant as vol rises — capping it at 3× would price 100% and 230% vol identically — and it is the only *ex-ante* leg, so it must carry regimes the reactive legs (which price realized damage) haven't caught up to yet.
-- **The asset-class split** is the closure prior. A 24/7 pair takes half the vol curve as its maintenance level; a session-bound pair takes the whole of it, because no keeper can interpose across a closure. The half rests on keepers being able to act at any moment, which an Arbitrum sequencer or oracle outage suspends. A 24/7 pair carries no gap term and no restart grace, so the first fresh price after an outage decides who is seized (see [Liquidations](liquidations.md)).
-- **Unload slippage** is a size-weighted, time-decayed EMA (τ = 3 days) of how far unload fills landed from the *oracle* — the execution cost of closing inherited inventory, which is a direct reading of how deep the book is at liquidation size. It **adds** rather than multiplies: a fill landing 3% past the oracle costs 3% of notional to get out of, in the same units as the level itself, and a position liquidated at the maintenance level is only actually closable if that level pays for both the move and the slippage. The same thin book therefore costs a calm market and a volatile one the same 3%. The term is self-limiting two ways: the next liquidation batch blends the estimate back down once fills stop landing that far from the oracle, and the value the curves read fades with the clock on its own, halving three days after the episode behind it and falling harmonically from there (a third at six days), so one bad episode cannot hold up a pair's margin after the book recovers. A later batch moves the fade's anchor toward the present only by its share of the reading, so evidence it merges into an older reading takes on part of that reading's age, and the reading is stored to a fraction of a basis point, so dust unloads can neither restart the fade nor round it away.
+### Volatility
 
-  Each fill is recorded within **[0, 5%]** (`LIQ_MAX_SLIPPAGE_BP`) before it is weighted. A fill *better* than the oracle counts as zero cost: that gain is already in the insurance fund, and letting it pull the reading negative would count it twice — once in the fund's balance, again by damping the response to the next real cost. It still carries its full weight, so a run of clean liquidations dilutes a later bad one rather than cancelling it with banked credit. The floor applies fill by fill because the likeliest source of such fills is stale bids left behind a moving oracle, which a fast market fills first — netting them against the fills behind them in the same walk would hide the thin book beyond. The 5% ceiling matches the unload bound: a fill can only land further from the oracle than that once the market sits more than 5% past the estates' bankruptcy price in the fund's favor, where the walk takes any maker that still beats it — a measure of the walk's latitude, not the cost of a forced exit.
+**Volatility** is an EMA of annualized squared returns (τ = 5 days). Its multiplier is the only leg allowed past 3×.
 
-  A batch is weighed against the evidence already accumulated or **1% of per-side open interest** (`LIQ_GAP_PRIOR_FLOOR_BP`), whichever is larger, so it moves the reading by its share of the book rather than by its share of what earlier batches happened to record. The unload is a forced taker filling at maker-chosen prices, and whoever liquidates an account can also be the maker the vault sells it to; weighed against earlier batches alone, the first batch on a pair would be copied in whole, and a dust estate bought back at the band edge for the cost of fees would set the pair's slippage, and with it every account's margin, for days. Against the floor a dust unload moves the reading by a fraction of a basis point, an estate worth x% of the book moves it x/(1+x) of the way, and many small unloads move it as one of their total size would. A genuine wave of liquidations on a pair with no history pays the same discount — 3% of the book filling at 4% slippage reads 3% — while the volatility leg rises in the same episode.
+<details>
+<summary>Why the volatility multiplier alone runs past 3×</summary>
 
-  What the market did *while the vault held the inventory* is deliberately not here. That is a price move, which the volatility and reopen legs already forecast, and it is the loss the [insurance fund](insurance.md) is sized for rather than the level a trader must hold — so it enters the fund target instead. Splitting the two keeps one episode from being charged twice, and keeps a single violent close from adding itself to the maintenance level without limit.
+The curve is linear in *variance*, which holds margin-per-daily-σ roughly constant as vol rises — capping it at 3× would price 100% and 230% vol identically — and it is the only *ex-ante* leg, so it must carry regimes the reactive legs (which price realized damage) haven't caught up to yet.
 
-- **The fade runs on a tradeable clock.** Both liquidation legs age only during stretches in which a liquidation could actually have arrived. The clock advances only as prices are stored: between two stores the readings hold still, and when the next price lands the time since the last one is judged — a gap under **12 h** counts as trading time, while a gap of 12 h or more is skipped as a closure and the fades' anchors are pushed forward across it. A liquidation runs on a price generated within the last minute, which its own call stores when it is newer than the stored one, so a 12-hour silence is time in which none happened; on a pair whose vault holds at least $1,250 of inventory, where the refresh bounty stores a price every ~5 minutes whenever the feed publishes, it is also time in which none could have. Without this, a weekend alone — 65.5 h against a 3-day time constant — would nearly halve a shortfall reading while the book was shut; over a full week a session pair's evidence would decay roughly five times too fast per tradeable hour, worst on exactly the pairs that cannot be liquidated across the gap. Holding the readings between stores matters as much as skipping the gap: a margin recompute taken mid-closure off the last stored price would otherwise come out below what the reopen restores, and the understated rate would reach the 24-hour lagged maintenance check below. The threshold sits above the longest session (6.5 h) and below the shortest closure (17.5 h overnight, 65.5 h weekend), so every real closure is caught. On a session pair where that cadence is off — less than $1,250 of inventory held, or the fund's free capital under that cadence's $5,000 floor — an open market can go 12 hours with nothing stored, so a quiet stretch around a closure is skipped whole, trading hours included, which errs toward holding a reading up rather than releasing it early. **Continuously traded pairs never skip a gap.** Their feed publishes around the clock and any liquidator can bring a fresh price, so a silence in the pair's own store is a quiet book rather than a closure — liquidations could have arrived and none did, which is exactly the evidence the fade reads — and every gap is counted as trading time. The case this gives up is a dark feed on a 24/7 pair, which ages the readings as though the market had traded: store silence alone cannot tell that outage from a quiet book, and treating every quiet stretch as an outage would freeze the fade on quiet books and make a silence just past 12 h age the readings less than one just short of it.
+</details>
+
+### The asset-class split
+
+**The asset-class split** is the closure prior.
+
+- **A 24/7 pair** takes half the vol curve as its maintenance level.
+- **A session-bound pair** takes the whole of it, because no keeper can interpose across a closure.
+
+The half rests on keepers being able to act at any moment, which an Arbitrum sequencer or oracle outage suspends. A 24/7 pair carries no gap term and no restart grace, so the first fresh price after an outage decides who is seized (see [Liquidations](liquidations.md)).
+
+### Unload slippage
+
+**Unload slippage** is a size-weighted, time-decayed EMA (τ = 3 days) of how far unload fills landed from the *oracle* — the execution cost of closing inherited inventory, which is a direct reading of how deep the book is at liquidation size. It **adds** rather than multiplies.
+
+<details>
+<summary>Why slippage adds rather than multiplies</summary>
+
+A fill landing 3% past the oracle costs 3% of notional to get out of, in the same units as the level itself, and a position liquidated at the maintenance level is only actually closable if that level pays for both the move and the slippage. The same thin book therefore costs a calm market and a volatile one the same 3%.
+
+</details>
+
+**The term is self-limiting two ways:** the next liquidation batch blends the estimate back down once fills stop landing that far from the oracle, and the value the curves read fades with the clock on its own, halving three days after the episode behind it and falling harmonically from there (a third at six days), so one bad episode cannot hold up a pair's margin after the book recovers.
+
+<details>
+<summary>Edge cases: how a later batch and dust unloads move the fade</summary>
+
+A later batch moves the fade's anchor toward the present only by its share of the reading, so evidence it merges into an older reading takes on part of that reading's age, and the reading is stored to a fraction of a basis point, so dust unloads can neither restart the fade nor round it away.
+
+</details>
+
+**Per-fill bounds.** Each fill is recorded within **[0, 5%]** (`LIQ_MAX_SLIPPAGE_BP`) before it is weighted. A fill *better* than the oracle counts as zero cost. It still carries its full weight, so a run of clean liquidations dilutes a later bad one rather than cancelling it with banked credit.
+
+<details>
+<summary>Why the floor is zero, fill by fill, and the ceiling 5%</summary>
+
+- **The zero floor.** The gain on a fill better than the oracle is already in the insurance fund, and letting it pull the reading negative would count it twice — once in the fund's balance, again by damping the response to the next real cost.
+- **The floor applies fill by fill** because the likeliest source of such fills is stale bids left behind a moving oracle, which a fast market fills first — netting them against the fills behind them in the same walk would hide the thin book beyond.
+- **The 5% ceiling** matches the unload bound: a fill can only land further from the oracle than that once the market sits more than 5% past the estates' bankruptcy price in the fund's favor, where the walk takes any maker that still beats it — a measure of the walk's latitude, not the cost of a forced exit.
+
+</details>
+
+**A batch is weighed** against the evidence already accumulated or **1% of per-side open interest** (`LIQ_GAP_PRIOR_FLOOR_BP`), whichever is larger, so it moves the reading by its share of the book rather than by its share of what earlier batches happened to record. Against the floor a dust unload moves the reading by a fraction of a basis point, an estate worth x% of the book moves it x/(1+x) of the way, and many small unloads move it as one of their total size would.
+
+<details>
+<summary>Why a batch is weighed against a floor, and what a genuine wave pays</summary>
+
+- **The attack the floor closes.** The unload is a forced taker filling at maker-chosen prices, and whoever liquidates an account can also be the maker the vault sells it to; weighed against earlier batches alone, the first batch on a pair would be copied in whole, and a dust estate bought back at the band edge for the cost of fees would set the pair's slippage, and with it every account's margin, for days.
+- **A genuine wave** of liquidations on a pair with no history pays the same discount — 3% of the book filling at 4% slippage reads 3% — while the volatility leg rises in the same episode.
+
+</details>
+
+**What the market did** *while the vault held the inventory* is deliberately not in this term. That is a price move, which the volatility and reopen legs already forecast, and it is the loss the [insurance fund](insurance.md) is sized for rather than the level a trader must hold — so it enters the fund target instead.
+
+<details>
+<summary>Why the holding-period move is kept out of this term</summary>
+
+Splitting the two keeps one episode from being charged twice, and keeps a single violent close from adding itself to the maintenance level without limit.
+
+</details>
+
+### The fade runs on a tradeable clock
+
+Both liquidation legs age only during stretches in which a liquidation could actually have arrived.
+
+- **The clock advances only as prices are stored.** Between two stores the readings hold still, and when the next price lands the time since the last one is judged.
+- **A gap under 12 h** counts as trading time.
+- **A gap of 12 h or more** is skipped as a closure and the fades' anchors are pushed forward across it.
+- **Continuously traded pairs never skip a gap**: every gap is counted as trading time.
+
+<details>
+<summary>Why closures are skipped, why the readings hold between stores, and why 12 hours</summary>
+
+- **What a 12-hour silence means.** A liquidation runs on a price generated within the last minute, which its own call stores when it is newer than the stored one, so a 12-hour silence is time in which none happened; on a pair whose vault holds at least $1,250 of inventory, where the refresh bounty stores a price every ~5 minutes whenever the feed publishes, it is also time in which none could have.
+- **What skipping prevents.** Without this, a weekend alone — 65.5 h against a 3-day time constant — would nearly halve a shortfall reading while the book was shut; over a full week a session pair's evidence would decay roughly five times too fast per tradeable hour, worst on exactly the pairs that cannot be liquidated across the gap.
+- **Holding the readings between stores** matters as much as skipping the gap: a margin recompute taken mid-closure off the last stored price would otherwise come out below what the reopen restores, and the understated rate would reach the 24-hour lagged maintenance check below.
+- **The threshold** sits above the longest session (6.5 h) and below the shortest closure (17.5 h overnight, 65.5 h weekend), so every real closure is caught.
+
+</details>
+
+<details>
+<summary>Edge case: a session pair whose refresh cadence is off</summary>
+
+On a session pair where the refresh bounty's ~5-minute cadence is off — less than $1,250 of inventory held, or the fund's free capital under that cadence's $5,000 floor — an open market can go 12 hours with nothing stored, so a quiet stretch around a closure is skipped whole, trading hours included, which errs toward holding a reading up rather than releasing it early.
+
+</details>
+
+<details>
+<summary>Why 24/7 pairs count every gap, and the case this gives up</summary>
+
+A continuously traded pair's feed publishes around the clock and any liquidator can bring a fresh price, so a silence in the pair's own store is a quiet book rather than a closure — liquidations could have arrived and none did, which is exactly the evidence the fade reads.
+
+The case this gives up is a dark feed on a 24/7 pair, which ages the readings as though the market had traded: store silence alone cannot tell that outage from a quiet book, and treating every quiet stretch as an outage would freeze the fade on quiet books and make a silence just past 12 h age the readings less than one just short of it.
+
+</details>
 
 ## Initial margin (IMR)
 
@@ -36,31 +129,141 @@ IMR = 2 × M × insurance multiplier   (1× → 3× as the fund goes target → 
 clamped to [4%, 80%]                 (25× down to 1.25× max leverage)
 ```
 
-**Insurance health** compares the fund to its [target ratio](insurance.md), and it is the one leg that is *not* part of the stress move. It reads the fund's current level rather than the market's risk, so it scales what traders are charged and never what the fund is sized to hold. Feeding it back into the target would close a loop with no stable resting point: a fund below target would raise the target, deepening its own measured shortfall.
+### Insurance health
 
-**Reopen-gap leg (non-continuous pairs only):** intraday variance says little about how far a stock jumps across a discontinuity, so the stress move learns them directly. Whenever a stored price ends a gap of **≥ 1 h** — overnight and weekend closures, trading-halt reopens, lunch/maintenance breaks — the |return| across the gap feeds a **peak-hold** estimator: the held value decays harmonically (τ = 130 days), then takes the max with the new observation, capped at 25%. The threshold's job is only to exclude routine on-chain quiet periods, whose returns the volatility EMA already prices; trades store prices on an active pair, and while the vault holds at least $1,250 of inventory and the fund more than $5,000 of free capital the refresh bounty holds the pair to a ~5-minute cadence, so an hour without a stored price on such a pair is a genuine market discontinuity, not keeper latency. On any other pair with no trades, stores can be a day apart (the bounty's heartbeat) or further once the fund's free capital reaches $1,000, so a gap there is not a clean closure: its return spans trading hours as well as any closure inside it, and can read above the closure's own jump, or below it where the session reversed the jump before the next store. Whoever ends such a gap chooses when, so a store timed at an intraday extreme reads that whole move as a gap; maintenance follows the raised rate only as the 24-hour lag catches up, which leaves holders that time to add collateral. The peak-hold composes with the volatility curve by max — the same reopen feeds both estimators, and max counts it once. Because the maintenance level *is* the stress move, a position at MMR survives an exact repeat of the worst observed gap up to the cap, and initial margin survives twice it. One severe earnings gap therefore lifts the pair's margin for months, while a mean-tracking EMA would average it away against dozens of quiet nights. τ is chosen against the recurrence interval the estimator has to remember rather than against any single event: a pair that gaps once a quarter still holds half its peak when the next one lands, so a repeating pattern survives its own cycle while a one-off keeps fading.
+**Insurance health** compares the fund to its [target ratio](insurance.md), and it is the one leg that is *not* part of the stress move. It reads the fund's current level rather than the market's risk, so it scales what traders are charged and never what the fund is sized to hold.
 
-The 25% cap bounds how far one demonstrated gap can suppress a pair on its own — it is the ceiling both on the maintenance level this leg can impose and on how long the decay takes to release it. It sits below the 40% stress-move ceiling deliberately: a cap-sized gap doubles to an IMR the fund-health multiplier can still lift, where a cap at the ceiling would arrive already saturated and leave a depleted fund no margin response at all. Past the cap the leg stops buying coverage and the backstop takes over — a repeat beyond it settles through [ADL](adl.md) at the estates' average bankruptcy price, which leaves the insurance fund whole, rather than being pre-funded by every position carrying the whole gap in margin for months. The same number reaches the fund target at full size.
+<details>
+<summary>Why insurance health is not fed back into the target</summary>
 
-**Warmup:** a new market's IMR is floored at **20%** (5× leverage; 40% for non-continuously traded pairs, which have no reopen-gap history yet) until it is 15 days old *and* has seen 25,000 price updates. Thin, young books don't get 25× leverage.
+Feeding it back into the target would close a loop with no stable resting point: a fund below target would raise the target, deepening its own measured shortfall.
 
-Both gates are needed because each is blind alone: calendar time buys nothing on a dormant pair, whose variance EMA cannot advance without stored prices, and a store count on its own can be run up in a burst by anyone willing to spam the permissionless refresh path. The 15 days is three time constants of the volatility EMA the floor is waiting on — that EMA starts at zero and approaches the truth from below, so releasing sooner would hand over a vol leg still understating the pair's real variance, in the same window where the slippage, drift and reopen legs are all still empty. The 25,000 is set near what the estimator can actually consume over that window (the variance EMA advances at most once a minute), so the gate tracks price history rather than transaction count.
+</details>
 
-IMR is what's checked at order creation, amendment and collateral withdrawal — always against **worst-case exposure**: current position plus resting orders in the worse direction, including the flip case, each resting order valued as the fill gate will value it: a bid at the oracle price, an ask at the larger of its limit and the oracle price. On top of it, every gate reserves what a fill debits from the same collateral before its own margin test (see [per-fill checks](matching.md#per-fill-checks)): the position's unrealized loss, the maker fee on each resting order, and, for a limit on the wrong side of the oracle price — an ask below it, a bid above it — the loss a fill at the limit books against the oracle price, `|limit − oracle| × size`. A bid above the oracle price is therefore reserved at IMR on its size at the oracle price plus its whole excess over it, which is what its fill charges. A `StopLimit` waiting outside the book arms at an oracle price it cannot know yet, at or past its trigger, so it is valued at the largest of its trigger, its limit and the oracle price and its loss is bounded by its limit's distance from its trigger; once armed it rests as a limit and is reserved like one. The point of the reserve is that an order admitted at the oracle price fills at full size there: without it a wrong-side order would rest under-reserved, and any taker sized past what its collateral affords would auto-cancel it for the cost of gas. Only what changes after an order rested — the oracle price, the margin rate, accrued funding — can leave it unaffordable. A stale oracle adds no surcharge — gap risk is already in the always-on IMR above — but it does gate *release*: a position holder's withdrawal requires a fresh price outright (see [the stale-price regime](oracle.md#the-stale-price-regime-market-hours)).
+### Reopen-gap leg (non-continuous pairs only)
+
+Intraday variance says little about how far a stock jumps across a discontinuity, so the stress move learns them directly.
+
+- **Trigger.** Whenever a stored price ends a gap of **≥ 1 h** — overnight and weekend closures, trading-halt reopens, lunch/maintenance breaks — the |return| across the gap feeds a **peak-hold** estimator.
+- **Estimator.** The held value decays harmonically (τ = 130 days), then takes the max with the new observation, capped at 25%.
+- **The peak-hold composes with the volatility curve by max** — the same reopen feeds both estimators, and max counts it once.
+
+<details>
+<summary>Why the gap threshold is 1 h, and what a gap reads on a pair without the refresh cadence</summary>
+
+The threshold's job is only to exclude routine on-chain quiet periods, whose returns the volatility EMA already prices; trades store prices on an active pair, and while the vault holds at least $1,250 of inventory and the fund more than $5,000 of free capital the refresh bounty holds the pair to a ~5-minute cadence, so an hour without a stored price on such a pair is a genuine market discontinuity, not keeper latency.
+
+On any other pair with no trades, stores can be a day apart (the bounty's heartbeat) or further once the fund's free capital reaches $1,000, so a gap there is not a clean closure: its return spans trading hours as well as any closure inside it, and can read above the closure's own jump, or below it where the session reversed the jump before the next store. Whoever ends such a gap chooses when, so a store timed at an intraday extreme reads that whole move as a gap; maintenance follows the raised rate only as the 24-hour lag catches up, which leaves holders that time to add collateral.
+
+</details>
+
+<details>
+<summary>What the peak-hold covers, and why τ is 130 days</summary>
+
+Because the maintenance level *is* the stress move, a position at MMR survives an exact repeat of the worst observed gap up to the cap, and initial margin survives twice it. One severe earnings gap therefore lifts the pair's margin for months, while a mean-tracking EMA would average it away against dozens of quiet nights. τ is chosen against the recurrence interval the estimator has to remember rather than against any single event: a pair that gaps once a quarter still holds half its peak when the next one lands, so a repeating pattern survives its own cycle while a one-off keeps fading.
+
+</details>
+
+<details>
+<summary>What the 25% cap bounds, what takes over past it, and why it sits below the 40% stress-move ceiling</summary>
+
+The 25% cap bounds how far one demonstrated gap can suppress a pair on its own — it is the ceiling both on the maintenance level this leg can impose and on how long the decay takes to release it. Past the cap the leg stops buying coverage and the backstop takes over — a repeat beyond it settles through [ADL](adl.md) at the estates' average bankruptcy price, which leaves the insurance fund whole, rather than being pre-funded by every position carrying the whole gap in margin for months. The same number reaches the fund target at full size.
+
+The cap sits below the 40% stress-move ceiling deliberately: a cap-sized gap doubles to an IMR the fund-health multiplier can still lift, where a cap at the ceiling would arrive already saturated and leave a depleted fund no margin response at all.
+
+</details>
+
+### Warmup
+
+A new market's IMR is floored at **20%** (5× leverage; 40% for non-continuously traded pairs, which have no reopen-gap history yet) until it is 15 days old *and* has seen 25,000 price updates. Thin, young books don't get 25× leverage.
+
+<details>
+<summary>Why both gates, and why 15 days and 25,000 updates</summary>
+
+- Both gates are needed because each is blind alone: calendar time buys nothing on a dormant pair, whose variance EMA cannot advance without stored prices, and a store count on its own can be run up in a burst by anyone willing to spam the permissionless refresh path.
+- The 15 days is three time constants of the volatility EMA the floor is waiting on — that EMA starts at zero and approaches the truth from below, so releasing sooner would hand over a vol leg still understating the pair's real variance, in the same window where the slippage, drift and reopen legs are all still empty.
+- The 25,000 is set near what the estimator can actually consume over that window (the variance EMA advances at most once a minute), so the gate tracks price history rather than transaction count.
+
+</details>
+
+### Where IMR is checked
+
+IMR is what's checked at order creation, amendment and collateral withdrawal — always against **worst-case exposure**: current position plus resting orders in the worse direction, including the flip case, each resting order valued as the fill gate will value it: a bid at the oracle price, an ask at the larger of its limit and the oracle price.
+
+On top of it, every gate reserves what a fill debits from the same collateral before its own margin test (see [per-fill checks](matching.md#per-fill-checks)):
+
+- the position's unrealized loss,
+- the maker fee on each resting order, and,
+- for a limit on the wrong side of the oracle price — an ask below it, a bid above it — the loss a fill at the limit books against the oracle price, `|limit − oracle| × size`. A bid above the oracle price is therefore reserved at IMR on its size at the oracle price plus its whole excess over it, which is what its fill charges.
+
+A `StopLimit` waiting outside the book arms at an oracle price it cannot know yet, at or past its trigger, so it is valued at the largest of its trigger, its limit and the oracle price and its loss is bounded by its limit's distance from its trigger; once armed it rests as a limit and is reserved like one.
+
+The point of the reserve is that an order admitted at the oracle price fills at full size there. Only what changes after an order rested — the oracle price, the margin rate, accrued funding — can leave it unaffordable.
+
+<details>
+<summary>Why the fill debit is reserved up front</summary>
+
+Without the reserve a wrong-side order would rest under-reserved, and any taker sized past what its collateral affords would auto-cancel it for the cost of gas.
+
+</details>
+
+A stale oracle adds no surcharge — gap risk is already in the always-on IMR above — but it does gate *release*: a position holder's withdrawal requires a fresh price outright (see [the stale-price regime](oracle.md#the-stale-price-regime-market-hours)).
 
 ### The resting-order tally
 
-The three gates do not read every resting order to reserve the set. Each account carries a tally over its active orders — total bid size, total ask size, the sum of size × limit on each side, the highest bid limit, the lowest ask limit, and a count of `StopLimit` orders still waiting for their trigger — none of which depends on the oracle price. From it a gate takes an **upper bound** on the set's reservation at the price it judges by: bids at that price from their total size, asks from their limit notional plus, when the lowest ask sits below the price, the shortfall to it, and the fill debit from the maker fee on the limit notionals plus the loss legs bounded the same way. When every bid rests at or below the price, every ask at or above it, and the tally has not drifted, the bound is the reservation but for two things: the maker fee, taken at the integrator-carrying rate on every order because the tally does not record which carry one, and a few units of rounding slack (`RESTING_BOUND_SLACK`). If the account clears the gate on the bound, the orders are not read. If it does not, or if the tally cannot bound the set — a waiting `StopLimit` is counted, a field has overflowed, or the tally has been marked invalid — the gate reads the set in full, and that reading alone decides; it also rewrites the tally from what it read.
+The three gates do not read every resting order to reserve the set.
 
-The tally never understates the set, which is what lets a pass on the bound stand in for a pass on the reading. Every order that joins the set is recorded at its whole size and limit; an amendment subtracts no more than the order's remaining leg at its old limit and adds the remaining leg at the new one; a cancel subtracts the remaining leg. Fills, expiry, the cancels of a liquidation or a deleverage, and a keeper arming a `StopLimit` do not touch it, so between readings it drifts above the set rather than below, and a refusal on the bound is never a verdict. The highest-bid and lowest-ask fields only ever widen between readings. A subtraction the tally cannot cover marks it invalid instead of writing it. Because the gate reads the set only when it must, an expired order the owner has not canceled stays in the set until a walk reaches it, a `sweepExpired` call, a withdrawal, an amendment whose gate has to read the set, or a full set at `createOrder`, which prunes before the cap is judged. A creation whose gate reads the set skips such an order without removing it. `BazaarPairLens.restingTally` returns an account's tally.
+- **Each account carries a tally** over its active orders — total bid size, total ask size, the sum of size × limit on each side, the highest bid limit, the lowest ask limit, and a count of `StopLimit` orders still waiting for their trigger — none of which depends on the oracle price. `BazaarPairLens.restingTally` returns an account's tally.
+- **From it a gate takes an upper bound** on the set's reservation at the price it judges by.
+- **If the account clears the gate on the bound**, the orders are not read.
+- **If it does not**, or if the tally cannot bound the set — a waiting `StopLimit` is counted, a field has overflowed, or the tally has been marked invalid — the gate reads the set in full, and that reading alone decides; it also rewrites the tally from what it read.
+- **Expired orders.** Because the gate reads the set only when it must, an expired order the owner has not canceled stays in the set until a walk reaches it, a `sweepExpired` call, a withdrawal, an amendment whose gate has to read the set, or a full set at `createOrder`, which prunes before the cap is judged. A creation whose gate reads the set skips such an order without removing it.
+
+<details>
+<summary>How the bound is computed, and how close it is to the reservation</summary>
+
+The bound is taken at the price the gate judges by: bids at that price from their total size, asks from their limit notional plus, when the lowest ask sits below the price, the shortfall to it, and the fill debit from the maker fee on the limit notionals plus the loss legs bounded the same way.
+
+When every bid rests at or below the price, every ask at or above it, and the tally has not drifted, the bound is the reservation but for two things: the maker fee, taken at the integrator-carrying rate on every order because the tally does not record which carry one, and a few units of rounding slack (`RESTING_BOUND_SLACK`).
+
+</details>
+
+<details>
+<summary>How the tally is kept so that it never understates the set</summary>
+
+- **The tally never understates the set**, which is what lets a pass on the bound stand in for a pass on the reading.
+- Every order that joins the set is recorded at its whole size and limit; an amendment subtracts no more than the order's remaining leg at its old limit and adds the remaining leg at the new one; a cancel subtracts the remaining leg.
+- Fills, expiry, the cancels of a liquidation or a deleverage, and a keeper arming a `StopLimit` do not touch the tally, so between readings it drifts above the set rather than below, and a refusal on the bound is never a verdict.
+- The highest-bid and lowest-ask fields only ever widen between readings.
+- A subtraction the tally cannot cover marks it invalid instead of writing it.
+
+</details>
 
 ## The retained-collateral floor
 
 Passing IMR is not sufficient to withdraw. While a position is open, the account must also keep a floor of margin in **collateral proper — cash, not equity**: `mmrBp` of current notional on continuously traded pairs, the full `imrBp` on session-bound ones. Unrealized profit does not count toward it.
 
-The floor does two jobs the IMR check alone cannot. It guarantees the fee that closes the position is always payable, since fees come out of collateral rather than out of equity. And it keeps margin in money that survives a reversal: paper profit evaporates in the same move it would need to buffer. The asset-class split follows from what liquidation can do — on a 24/7 market a keeper can interpose as the position deteriorates, so maintenance-level cash is enough; across a reopen gap no liquidation can interpose at all, which is why session-bound pairs hold the initial level instead.
+<details>
+<summary>Why the floor is held in cash, and why the level differs by asset class</summary>
 
-`BazaarPairLens.getMaxWithdrawable` returns the largest withdrawal both gates would accept, capped at what the deposits ledger holds. It returns 0 whenever the pair would refuse the withdrawal outright: from the limbo before a scheduled cutoff, or from any fixed settlement price, until finalize; during an ADL window for a position holder; for a position below maintenance at the price passed; on a USDC balance short of the books; and, for an account with a position or resting orders, on realized bad debt or a timed-out ADL auction past its deadline. The one refusal it cannot foresee is a position holder's withdrawal refused because the vault's liquidation exposure exceeds the fund before an ADL window has latched, which the lens does not compute.
+The floor does two jobs the IMR check alone cannot.
+
+- It guarantees the fee that closes the position is always payable, since fees come out of collateral rather than out of equity.
+- And it keeps margin in money that survives a reversal: paper profit evaporates in the same move it would need to buffer.
+
+The asset-class split follows from what liquidation can do — on a 24/7 market a keeper can interpose as the position deteriorates, so maintenance-level cash is enough; across a reopen gap no liquidation can interpose at all, which is why session-bound pairs hold the initial level instead.
+
+</details>
+
+`BazaarPairLens.getMaxWithdrawable` returns the largest withdrawal both gates would accept, capped at what the deposits ledger holds. It returns 0 whenever the pair would refuse the withdrawal outright:
+
+- from the limbo before a scheduled cutoff, or from any fixed settlement price, until finalize;
+- during an ADL window for a position holder;
+- for a position below maintenance at the price passed;
+- on a USDC balance short of the books; and,
+- for an account with a position or resting orders, on realized bad debt or a timed-out ADL auction past its deadline.
+
+The one refusal it cannot foresee is a position holder's withdrawal refused because the vault's liquidation exposure exceeds the fund before an ADL window has latched, which the lens does not compute.
 
 ## Maintenance margin (MMR) and the 24-hour grace
 
@@ -75,9 +278,34 @@ lagged       = the lowest rate recorded from 24 h before the price's timestamp t
              = the lowest rate the pair has recorded       (on a pair whose samples do not reach back 24 h yet)
 ```
 
-A *rising* requirement cannot liquidate anyone until it has held for 24 hours; a *falling* one helps immediately. Both halves matter: a rate that is only high at two instants a day apart — the kind a matched pair of accounts can produce by briefly inflating open interest — never reaches the threshold, because the samples in between stay low. The rule is the same for every position, however recently it opened, added or flipped: a threshold taken from the rate in force at the position's own fill would carry a spike that coincided with that fill into the position for a day, and a second spike could then seize it. Opening and adding still require the *current* IMR, so new exposure pays the live rate up front; only the maintenance threshold waits for a rise to hold. A fall counts from the moment it is recorded, without waiting for its hour to close: every recompute records the rate it sets, so a position opened while the rate is down is not judged at the day's older, higher rate the moment one recompute restores it. A pair younger than a day has no 24-hour window yet, and its shortened window still makes a rise hold for every rate the pair has recorded.
+- **A *rising* requirement** cannot liquidate anyone until it has held for 24 hours; a *falling* one helps immediately.
+- **The rule is the same for every position**, however recently it opened, added or flipped.
+- **Opening and adding still require the *current* IMR**, so new exposure pays the live rate up front; only the maintenance threshold waits for a rise to hold.
+- **A fall counts from the moment it is recorded**, without waiting for its hour to close: every recompute records the rate it sets, so a position opened while the rate is down is not judged at the day's older, higher rate the moment one recompute restores it.
 
-The 24 hours are counted back from the timestamp of the price the position is being valued against, not from the block the call lands in. The two are the same whenever the caller supplies a fresh price; they diverge on a closed-market pair falling back to the last stored price, and there the window still opens 24 hours before that price's timestamp. Both halves of the solvency test then describe the same instant, so a keeper cannot record an adverse price and wait for the sample window to roll onto a higher requirement before calling. The one exception is a stored price more than an hour old that refreshes have kept sampling past: once the ring no longer reaches back 24 hours from it, the window is everything the ring holds. No liquidation or ADL step runs on a price that old.
+<details>
+<summary>Why both halves matter, and why the rule ignores a position's age</summary>
+
+- **Both halves matter:** a rate that is only high at two instants a day apart — the kind a matched pair of accounts can produce by briefly inflating open interest — never reaches the threshold, because the samples in between stay low.
+- **A position's age.** A threshold taken from the rate in force at the position's own fill would carry a spike that coincided with that fill into the position for a day, and a second spike could then seize it.
+
+</details>
+
+<details>
+<summary>Where the window starts and why, and the one exception</summary>
+
+- **Where the window starts.** The 24 hours are counted back from the timestamp of the price the position is being valued against, not from the block the call lands in. The two are the same whenever the caller supplies a fresh price; they diverge on a closed-market pair falling back to the last stored price, and there the window still opens 24 hours before that price's timestamp.
+- **Why the price's timestamp.** Both halves of the solvency test then describe the same instant, so a keeper cannot record an adverse price and wait for the sample window to roll onto a higher requirement before calling.
+- **The one exception** is a stored price more than an hour old that refreshes have kept sampling past: once the ring no longer reaches back 24 hours from it, the window is everything the ring holds. No liquidation or ADL step runs on a price that old.
+
+</details>
+
+<details>
+<summary>Edge case: a pair younger than a day</summary>
+
+**Young pairs.** A pair younger than a day has no 24-hour window yet, and its shortened window still makes a rise hold for every rate the pair has recorded.
+
+</details>
 
 ## Solvency math
 
@@ -90,4 +318,6 @@ equity        = collateral + unrealizedPnl + fundingPnl
 isSolvent     = max(0, equity) ≥ effectiveMMR × currentNotional  AND  equity > 0
 ```
 
-Matching, withdrawals, liquidations, and ADL all call the same math with the same lagged-MMR inputs, with one difference that only ever favors the position: a liquidation also takes the current rate its own price gives, so a rate that has fallen since the last refresh protects a position from liquidation before the subsystems that read the stored rate see it. A position can therefore briefly be healthy to a liquidation and not yet to the others, never the reverse. The fill gate is the one stricter reader: it credits no unrealized gains, so a fill it admits as leaving the account above maintenance leaves it above maintenance for liquidation too.
+Matching, withdrawals, liquidations, and ADL all call the same math with the same lagged-MMR inputs, with one difference that only ever favors the position: a liquidation also takes the current rate its own price gives, so a rate that has fallen since the last refresh protects a position from liquidation before the subsystems that read the stored rate see it. A position can therefore briefly be healthy to a liquidation and not yet to the others, never the reverse.
+
+The fill gate is the one stricter reader: it credits no unrealized gains, so a fill it admits as leaving the account above maintenance leaves it above maintenance for liquidation too.

@@ -47,4 +47,23 @@ Even split three ways the budget is tight: `BazaarPair` sits right at the EIP-17
 
 ## Accounting invariant
 
-The pair tracks two ledgers — `totalCollateralDeposited` (D, the deposits ledger: every bucket's collateral plus the open positions' net unrealized PnL — the vault's inherited inventory included, whose loss reaches the ledger only when the inventory [exits](liquidations.md#exiting-the-inventory) — since realized PnL moves buckets but not the ledger) and `insuranceFundBalance` (I). All internal value movements (vault PnL, ADL credits, fee flows) are booked as transfers between ledgers — **I↔D**, or from either into the fee escrow below — never bare credits. Alongside them sits a third claim on the same cash: the [fee escrow](fees.md#how-payouts-are-paid) (E), the unclaimed total the pair owes third parties. Every verdict on vault health — run by every matching transaction that fills, liquidation, unload, ADL execution, price refresh, insurance redemption and priced withdrawal — re-checks `balanceOf(pair) ≥ I + D + E` within a 0.1% tolerance, ahead of the exposure verdict so a pending ADL window cannot defer it; a shortfall opens the [settlement window](termination.md) at the live price. A withdrawal that reads no price (a flat account's) runs the same comparison on its own and is refused while it fails, until the next priced flow — anyone can call `refreshPrice` — fixes the settlement price. Escrowed fees belong in that expectation exactly like principal and insurance — omitting them would let the fund look solvent on cash already owed away. This is the protocol's tamper-evident seal: if value ever leaks, the market freezes and settles pro-rata on the cash actually held rather than letting a first-mover drain it.
+The pair tracks two ledgers:
+
+- **`totalCollateralDeposited`** (D, the deposits ledger: every bucket's collateral plus the open positions' net unrealized PnL — the vault's inherited inventory included, whose loss reaches the ledger only when the inventory [exits](liquidations.md#exiting-the-inventory) — since realized PnL moves buckets but not the ledger).
+- **`insuranceFundBalance`** (I).
+
+All internal value movements (vault PnL, ADL credits, fee flows) are booked as transfers between ledgers — **I↔D**, or from either into the fee escrow below — never bare credits.
+
+Alongside them sits a third claim on the same cash: the [fee escrow](fees.md#how-payouts-are-paid) (E), the unclaimed total the pair owes third parties.
+
+- **The check.** Every verdict on vault health — run by every matching transaction that fills, liquidation, unload, ADL execution, price refresh, insurance redemption and priced withdrawal — re-checks `balanceOf(pair) ≥ I + D + E` within a 0.1% tolerance, ahead of the exposure verdict so a pending ADL window cannot defer it; a shortfall opens the [settlement window](termination.md) at the live price.
+- **Unpriced withdrawals.** A withdrawal that reads no price (a flat account's) runs the same comparison on its own and is refused while it fails, until the next priced flow — anyone can call `refreshPrice` — fixes the settlement price.
+
+This is the protocol's tamper-evident seal: if value ever leaks, the market freezes and settles pro-rata on the cash actually held rather than letting a first-mover drain it.
+
+<details>
+<summary>Why the fee escrow is part of the comparison</summary>
+
+Escrowed fees belong in that expectation exactly like principal and insurance — omitting them would let the fund look solvent on cash already owed away.
+
+</details>

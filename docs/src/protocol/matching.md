@@ -2,11 +2,14 @@
 
 Bazaar keeps its limit order book **on-chain and sorted**: two doubly-linked lists per pair,
 threaded through the orders themselves (`prevInBook`/`nextInBook`), with the heads in one storage
-slot. Bids sort by `limitPrice` DESC, asks ASC, ties by `prioritySeq` ASC — an order at an occupied
-price queues behind the orders already there, so price-time priority is a structural invariant,
-not a promise. `prioritySeq` is the order's id until the order joins its level late — an
-[amendment](orders.md#amending) sends it to the back, or a keeper arms a StopLimit, which enters the
-book only then — when it takes a fresh value from the same counter.
+slot.
+
+- **Sort order.** Bids sort by `limitPrice` DESC, asks ASC, ties by `prioritySeq` ASC — an order
+  at an occupied price queues behind the orders already there, so price-time priority is a
+  structural invariant, not a promise.
+- **`prioritySeq`** is the order's id until the order joins its level late — an
+  [amendment](orders.md#amending) sends it to the back, or a keeper arms a StopLimit, which enters
+  the book only then — when it takes a fresh value from the same counter.
 
 Matching happens **on arrival**, inside `createOrder` itself: the incoming order walks the
 opposing list from its head while it crosses, fills at each resting maker's limit price, and then
@@ -50,28 +53,34 @@ For each node, in order:
 
 Every cancellation writes its terminal stamp (`canceledBlock`; a complete fill writes
 `filledBlock`) and unlinks the order from the book atomically, so a canceled order is out of every
-walk's reach within its own transaction. A fired trigger order is the one taker that can leave its
-walk neither resting nor terminal: the node budget, its owner's own resting order at the head, or
-a fill its margin could not carry — and, for a StopLoss or TakeProfit, simply running out of
-crossing liquidity — leaves it live outside the book, with the fills it took standing, until its
-next execution or its owner's cancel. Short of a complete fill, only a position that is gone ends
-a TP/SL; a StopLimit that runs out of crossing liquidity rests what is left, or cancels it as dust
-under the $5 rule above. A StopLimit fired with less than the 240-block minimum lifetime left
-cannot rest, so what is left stays live outside the book like a TP/SL's (see
-[Orders](orders.md#order-types)).
+walk's reach within its own transaction.
+
+A fired trigger order is the one taker that can leave its walk neither resting nor terminal:
+
+- **What leaves it live.** The node budget, its owner's own resting order at the head, or a fill
+  its margin could not carry — and, for a StopLoss or TakeProfit, simply running out of crossing
+  liquidity — leaves it live outside the book, with the fills it took standing, until its next
+  execution or its owner's cancel.
+- **TP/SL.** Short of a complete fill, only a position that is gone ends a TP/SL.
+- **StopLimit.** A StopLimit that runs out of crossing liquidity rests what is left, or cancels it
+  as dust under the $5 rule above. A StopLimit fired with less than the 240-block minimum lifetime
+  left cannot rest, so what is left stays live outside the book like a TP/SL's (see
+  [Orders](orders.md#order-types)).
 
 ## Insertion hints
 
-Resting a remainder needs a position in the sorted list. The caller supplies up to four
-predecessor candidates (`MatchHints.pred..pred4`, computed off-chain from the live book); the
-contract verifies each against the actual neighbors and, if all are stale, repairs by walking from
-the first live candidate (or the head), capped at `MAX_WALK_STEPS` nodes. A wrong hint can only
-*fail* placement — never mis-place an order: a typed revert on your own `createOrder` (resubmit
-with fresh hints), and a silent per-order skip inside a keeper's `executeTriggeredOrders` batch, so
-one stale hint never reverts another owner's stop. Hints ride
-**outside** the EIP-712 payload, like `priceUpdate`: they are execution aids a relayer attaches at
-submission time, not signed intent. (`amendOrders` is the exception: its hints are packed into the
-signed words — see [Amending](orders.md#amending).)
+Resting a remainder needs a position in the sorted list.
+
+- **Candidates.** The caller supplies up to four predecessor candidates (`MatchHints.pred..pred4`,
+  computed off-chain from the live book); the contract verifies each against the actual neighbors
+  and, if all are stale, repairs by walking from the first live candidate (or the head), capped at
+  `MAX_WALK_STEPS` nodes.
+- **A wrong hint.** A wrong hint can only *fail* placement — never mis-place an order: a typed
+  revert on your own `createOrder` (resubmit with fresh hints), and a silent per-order skip inside
+  a keeper's `executeTriggeredOrders` batch, so one stale hint never reverts another owner's stop.
+- **Unsigned.** Hints ride **outside** the EIP-712 payload, like `priceUpdate`: they are execution
+  aids a relayer attaches at submission time, not signed intent. (`amendOrders` is the exception:
+  its hints are packed into the signed words — see [Amending](orders.md#amending).)
 
 ## Per-fill checks
 
@@ -82,26 +91,40 @@ never credited.
 
 - A fill that **adds exposure** (an open, an add, the new side of a flip) must leave that margin at
   or above IMR on the resulting notional. Fresh exposure is margined at the oracle price, with a
-  one-sided incipient-loss debit for the fill-vs-oracle gap. Creation reserves that debit and the
-  maker fee for every order that leaves the account's worst-case notional (the position plus its
-  resting orders in the worse direction, this order included) above the position's current
-  notional, and for every order of a flat account (see [initial margin](margin.md)), so such a
-  maker fails here only through what has changed since it rested — the oracle, the margin rate,
-  accrued funding. Any other order, such as a reduction with nothing resting behind it, rests with
-  no reserve at all, so whether its fill passes can depend on how much of it the taker takes.
+  one-sided incipient-loss debit for the fill-vs-oracle gap.
 - A fill that **reduces** a position must not leave bad debt, and must leave the remainder at or
   above IMR at the pair's current rate — or, failing that, with a margin-to-MMR ratio no lower
   than the account held before, whether the remainder ends above maintenance or under it.
-  Closing at the oracle price keeps that ratio (fees aside), so an account below IMR, even one
-  under maintenance, can still close through several makers as long as each fill's distance from
-  the oracle stays within the account's own margin rate. Admitting any remainder that covers MMR
-  instead would let a reduction sold at a deep discount to the owner's own second account carry
-  the band between IMR and MMR out of a position that stays open, margin the withdrawal gates
-  would have kept. A full close needs only to leave no bad debt, judged at its fill price:
-  liquidation is the only path that may realize a loss beyond collateral.
+  - Closing at the oracle price keeps that ratio (fees aside), so an account below IMR, even one
+    under maintenance, can still close through several makers as long as each fill's distance from
+    the oracle stays within the account's own margin rate.
+  - A full close needs only to leave no bad debt, judged at its fill price: liquidation is the
+    only path that may realize a loss beyond collateral.
 - A failing fill **auto-cancels** the order (stamped `canceledBlock`, unlinked, `OrderUpdated`
   emitted with `cancelReason` `Margin`); a fired trigger order taking the fill stays live outside
   the book instead. A user who drifted insolvent since creation cannot haunt the book.
+
+<details>
+<summary>How the reserve taken at creation decides which resting makers can fail</summary>
+
+Creation reserves the incipient-loss debit and the maker fee for every order that leaves the
+account's worst-case notional (the position plus its resting orders in the worse direction, this
+order included) above the position's current notional, and for every order of a flat account (see
+[initial margin](margin.md)), so such a maker fails here only through what has changed since it
+rested — the oracle, the margin rate, accrued funding. Any other order, such as a reduction with
+nothing resting behind it, rests with no reserve at all, so whether its fill passes can depend on
+how much of it the taker takes.
+
+</details>
+
+<details>
+<summary>Why a reduction's fallback is the account's own ratio, not MMR</summary>
+
+Admitting any remainder that covers MMR instead would let a reduction sold at a deep discount to
+the owner's own second account carry the band between IMR and MMR out of a position that stays
+open, margin the withdrawal gates would have kept.
+
+</details>
 
 ## Stale oracle
 

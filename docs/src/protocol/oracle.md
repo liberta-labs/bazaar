@@ -8,18 +8,44 @@ A raw feed ID is a Pyth Pro feed ID, a non-zero 32-bit integer, held in a `bytes
 
 ## Freshness
 
-A supplied Pyth price must have been generated within **3 s** of the block's timestamp, before or after it (`MAX_PRICE_STALENESS`), on every price-resolving entry point — order creation (and the arrival matching inside it), order amendment, trigger execution, liquidations, vault unloading, ADL, collateral withdrawal, insurance withdrawal, insurance deposit while the vault holds inventory, and `refreshPrice` — no matter who submits the transaction. A liquidation on a pair that is not continuously traded may also be judged at Pyth's latest price up to 1 minute old, proven by an update issued within those 3 s (see [Liquidations](liquidations.md)).
+A supplied Pyth price must have been generated within **3 s** of the block's timestamp, before or after it (`MAX_PRICE_STALENESS`), on every price-resolving entry point, no matter who submits the transaction.
 
-A price's age is counted from its feed's **feed update timestamp**, when Pyth generated it, not from the update's own timestamp. While a market is shut Pyth keeps issuing updates that carry the last price forward under the current time, and those read as stale, exactly as they should.
+- **Entry points.** Order creation (and the arrival matching inside it), order amendment, trigger execution, liquidations, vault unloading, ADL, collateral withdrawal, insurance withdrawal, insurance deposit while the vault holds inventory, and `refreshPrice`.
+- **A liquidation** on a pair that is not continuously traded may also be judged at Pyth's latest price up to 1 minute old, proven by an update issued within those 3 s (see [Liquidations](liquidations.md)).
+- **A price's age** is counted from its feed's **feed update timestamp**, when Pyth generated it, not from the update's own timestamp. While a market is shut Pyth keeps issuing updates that carry the last price forward under the current time, and those read as stale, exactly as they should.
+- **Which hours count as shut** is the feed's. Pyth Pro's US equity feeds publish through the pre-market (04:00–09:30 New York time), regular (09:30–16:00), post-market (16:00–20:00) and overnight (20:00–04:00) sessions, so a pair on one is priced around the clock on weekdays and stops only from Friday 20:00 to Sunday 20:00 and on market holidays.
 
-Which hours count as shut is the feed's. Pyth Pro's US equity feeds publish through the pre-market (04:00–09:30 New York time), regular (09:30–16:00), post-market (16:00–20:00) and overnight (20:00–04:00) sessions, so a pair on one is priced around the clock on weekdays and stops only from Friday 20:00 to Sunday 20:00 and on market holidays. Every update also names the session it was produced in (`marketSession`); the oracle does not read it, so a price from any session is as live as any other. Outside the regular session fewer publishers contribute, and the confidence they report can be close to zero, so the 2% cap says little about those prices.
+<details>
+<summary>Edge case: prices from outside the regular session, and what the confidence cap says about them</summary>
 
-Each of those entry points accepts a `priceUpdate` array of signed Pyth Pro updates, so a caller acts on a fresh price in one transaction. The pair has the supplied update verified, pays Pyth's fee from the ETH sent (`getUpdateFee(updates)`, per update) and refunds the rest, and stores the price when it is newer than the one it holds. The stored price is replaced only by one generated in a later second (for a composite, one whose older leg was), so a caller can move the pair's price forward but cannot have a call judged at a price from an earlier second than the stored one. An update must carry four properties for every feed the pair prices from — **price, exponent, confidence and feed update timestamp** — and one requested without any of them reverts, so leaving the confidence out cannot dodge the confidence cap. Pyth writes a property it has no value for as zero, so a confidence of zero is refused the same way. Extra properties and extra feeds are ignored, and a composite's two legs may arrive in one update or in two.
+Every update also names the session it was produced in (`marketSession`); the oracle does not read it, so a price from any session is as live as any other. Outside the regular session fewer publishers contribute, and the confidence they report can be close to zero, so the 2% cap says little about those prices.
+
+</details>
+
+### Supplying an update
+
+Each of those entry points accepts a `priceUpdate` array of signed Pyth Pro updates, so a caller acts on a fresh price in one transaction.
+
+- **Verification and fee.** The pair has the supplied update verified, pays Pyth's fee from the ETH sent (`getUpdateFee(updates)`, per update) and refunds the rest, and stores the price when it is newer than the one it holds.
+- **The stored price is replaced** only by one generated in a later second (for a composite, one whose older leg was), so a caller can move the pair's price forward but cannot have a call judged at a price from an earlier second than the stored one.
+- **An update must carry four properties** for every feed the pair prices from — **price, exponent, confidence and feed update timestamp** — and one requested without any of them reverts, so leaving the confidence out cannot dodge the confidence cap. Pyth writes a property it has no value for as zero, so a confidence of zero is refused the same way.
+- **Extra properties and extra feeds** are ignored, and a composite's two legs may arrive in one update or in two.
+
+### Callers who cannot meet the bound
 
 Three seconds is a bot's budget, not a human's: the update travels as calldata, so it is fixed at signing time, and wallet-confirmation latency alone normally exceeds the window. A caller who cannot submit that fast has two routes:
 
-- **Send an empty `priceUpdate`** and let the call resolve against the pair's own stored price, which is checked against the same 3 s bound at execution time. On an actively traded pair every priced call stores the price it carries, and the [refresh bounty](../guide/earning.md#keeper-bounties) pays keepers $0.10 to bring updates to pairs whose insurance fund holds more than $1,000 of free capital — every 5 minutes while the vault holds at least $1,250 of inventory and the fund more than $5,000, once a day otherwise; on a pair no one is refreshing the stored price falls outside the bound and the call reverts, or, on a pair that is not continuously traded, runs on the [stale fallback](#the-stale-price-regime-market-hours) where that entry point accepts it.
+- **Send an empty `priceUpdate`** and let the call resolve against the pair's own stored price, which is checked against the same 3 s bound at execution time.
+  - On an actively traded pair every priced call stores the price it carries.
+  - On a pair no one is refreshing the stored price falls outside the bound and the call reverts, or, on a pair that is not continuously traded, runs on the [stale fallback](#the-stale-price-regime-market-hours) where that entry point accepts it.
 - **Sign a meta-transaction** and let a relayer submit it. `priceUpdate` is not part of any EIP-712 payload, so the relayer attaches a fresh price at submission time and a signature minted earlier still lands on it. See [Meta-transactions](meta-transactions.md).
+
+<details>
+<summary>How often keepers are paid to refresh a pair's stored price</summary>
+
+The [refresh bounty](../guide/earning.md#keeper-bounties) pays keepers $0.10 to bring updates to pairs whose insurance fund holds more than $1,000 of free capital — every 5 minutes while the vault holds at least $1,250 of inventory and the fund more than $5,000, once a day otherwise.
+
+</details>
 
 Signed updates come from Pyth Pro's price stream, which needs a token from Pyth. The API key itself must stay on a server: a frontend either connects with short-lived tokens its backend mints from that key, or routes orders through a relayer that attaches the update.
 
@@ -27,41 +53,144 @@ Signed updates come from Pyth Pro's price stream, which needs a token from Pyth.
 
 Pyth publishes a confidence interval alongside every price. Bazaar consumes it two ways:
 
-- **Sanity gate** — any price with confidence > **2%** of spot is rejected outright (`MAX_CONFIDENCE_BP`). A band that wide means the publishers disagree enough that neither edge is a usable margin input, so the read fails rather than picking one.
-- **Directional brackets** — reads return `(spot, low = spot − conf, high = spot + conf)`. Collateral withdrawal values a long position at `low` and a short position at `high` (resting orders are reserved at spot) — you cannot withdraw against the optimistic edge of the confidence band. Liquidations and ADL deliberately use plain spot: the 2% gate is the conservatism there, and bracket-pricing forced closures would systematically favor one side.
+- **Sanity gate** — any price with confidence > **2%** of spot is rejected outright (`MAX_CONFIDENCE_BP`).
+- **Directional brackets** — reads return `(spot, low = spot − conf, high = spot + conf)`. Collateral withdrawal values a long position at `low` and a short position at `high` (resting orders are reserved at spot) — you cannot withdraw against the optimistic edge of the confidence band. Liquidations and ADL deliberately use plain spot.
 
-Non-positive prices are rejected on every path, never floored — operating on a zero price would mass-liquidate an entire side.
+Non-positive prices are rejected on every path, never floored.
+
+<details>
+<summary>Why the gate rejects outright, forced closures use spot, and no price is floored</summary>
+
+- **The sanity gate.** A band that wide means the publishers disagree enough that neither edge is a usable margin input, so the read fails rather than picking one.
+- **Liquidations and ADL at plain spot.** The 2% gate is the conservatism there, and bracket-pricing forced closures would systematically favor one side.
+- **Non-positive prices.** Operating on a zero price would mass-liquidate an entire side.
+
+</details>
 
 ## The stale-price regime (market hours)
 
-Equities and FX stop ticking when their venues close, and a perp on them cannot simply halt — funding, margin, and liquidations still need a price. Pairs listed as *not continuously traded* keep operating on the last price under tightened rules:
+Equities and FX stop ticking when their venues close, and a perp on them cannot simply halt — funding, margin, and liquidations still need a price. Pairs listed as *not continuously traded* keep operating on the last price under tightened rules.
 
-- Fill prices are confined to ±10% of the last stored price (`MAX_STALE_DEVIATION_BP`). Which side of the band is violated decides who dies: an arrival that would cross a maker priced out of band *away* from it is canceled and the maker stays (deep resting is legitimate gap positioning), while a maker priced out of band *toward* the arrival is itself canceled and the walk continues — otherwise one such order at the head would blockade that side for the whole closure. Non-crossing arrivals insert normally, and the book never rests crossed. See [Matching](matching.md#stale-oracle).
-- Market orders are rejected at creation and trigger execution reverts — both are priced off the oracle.
-- **Fills on the fallback do not move the mark.** The mark update judges a print against the index it was executed under — clamping the print around it and measuring the premium the print adds against it, dated to that moment — and the fallback's index describes an earlier moment. Admitting such a print would read the index's own move since then as premium and present it as freshly traded, so the first fresh store afterwards would charge that move as funding; a fill placed by withholding a price update could pick that charge. The mark resumes with the first fresh-priced fill. See [Funding](funding.md#mark-price).
-- **Liquidation never runs on the fallback.** Seizure takes a whole bucket, so a liquidation is judged at a fresh price or at Pyth's latest one, proven by an update issued within 3 s of the block and no more than 1 minute old (`MAX_LIQUIDATION_PRICE_AGE`); a call that brings no update reverts once the stored price has aged out. See [Liquidations](liquidations.md).
-- **Vault unloads wait for a fresh print.** Neither `liquidate()`'s inline unload nor `unloadVault` fills against the fallback. A maker who can see the reopen off-chain would take the vault's inventory at the frozen mark only when the reopen favours the fund, handing insurance LPs' gain to whoever sees the market first. A seizure on Pyth's latest price older than 3 s still happens; the inventory it creates stays in the vault until the first fresh print prices it. See [Liquidations](liquidations.md#exiting-the-inventory).
+- **The fallback price.** When no fresh price is available, a pair that is not continuously traded falls back to its own last stored price, which cleared the freshness gate and the confidence cap when it was stored; a continuously traded pair reverts.
+- **No older price is ever taken from a caller**: an update whose price was generated outside the 3 s bound is refused, so whoever submits a call cannot choose the mark it is judged against.
+- **A pair whose stored price is more than 21 days old** can be settled at that price by anyone ([stale-oracle termination](termination.md)); one `refreshPrice` call with a fresh update restarts those 21 days.
+
+### Trading on the fallback
+
+- **Fill band.** Fill prices are confined to ±10% of the last stored price (`MAX_STALE_DEVIATION_BP`).
+- **Non-crossing arrivals** insert normally, and the book never rests crossed. See [Matching](matching.md#stale-oracle).
+- **Market orders** are rejected at creation and trigger execution reverts — both are priced off the oracle.
+- **Fills on the fallback do not move the mark.** The mark resumes with the first fresh-priced fill. See [Funding](funding.md#mark-price).
 - Margin carries **no stale surcharge**: closure-gap risk is priced into the pair's always-on IMR instead — **twice the larger** of its vol curve and its own observed reopen gap (see [the stress move](margin.md#the-stress-move)) — so a fill needs the same IMR whether the oracle is fresh or stale.
-- **Position holders cannot withdraw collateral against the stale fallback.** Around a closure, off-chain venues (pre-market, 24/7 books) print the reopen hours before the oracle can, so releasing equity at the frozen mark would let a holder who is already dead at the real price withdraw down to an IMR computed at the stale one — converting their loss into vault deficit that a termination passes to the winning side. No margin *rate* closes that channel (a rate can't price information the oracle hasn't seen); withholding release does. While stale, the vault accepts deposits but releases no position-holder equity; flat and order-only accounts are unaffected, and withdrawals resume with the first fresh print.
-- **Insurance shares cannot be priced against the stale fallback either.** The fund is sized to absorb the reopen gap (the learned gap reaches its target at full size), so a redemption judged at the frozen mark would let an LP leave ahead of exactly the loss the fund exists to take. Deposits meet the same refusal, but only while the vault holds liquidated inventory — the one case where a deposit has to value something the frozen mark cannot see. Whichever way that inventory moved across the closure, pricing it at the frozen mark hands the difference to whoever can already see the reopen, and there is no conservative figure to charge a depositor instead, because a reopen can print anywhere. With the vault flat a deposit reads no price at all and stays open, so recapitalizing a drained fund is never blocked by market hours. Both resume with the first fresh print, and a pair whose feed has died releases its LPs once the stale-oracle termination settles it.
-- **[ADL](adl.md) refuses the fallback outright**, as does the timeout that would terminate a stuck auction. Settlement at a bucket's bankruptcy price is already immune — it runs off frozen values — but the health gate, the batch sizing, the executor reward and the [ranking of both cohorts](adl.md#the-auction) all read the live mark, and the reward is steerable through it alone. Blocking both together is what makes it safe to wait: neither can act on a closed venue, so the auction cannot be terminated out from under itself. They resume together at the reopen, where the first stored price gives the auction a 30-minute head start before termination becomes callable.
+
+<details>
+<summary>Which order is canceled when a maker is priced outside the band, and why</summary>
+
+**Which side of the band is violated decides who dies**: an arrival that would cross a maker priced out of band *away* from it is canceled and the maker stays (deep resting is legitimate gap positioning), while a maker priced out of band *toward* the arrival is itself canceled and the walk continues — otherwise one such order at the head would blockade that side for the whole closure.
+
+</details>
+
+<details>
+<summary>Why fills on the fallback do not move the mark</summary>
+
+The mark update judges a print against the index it was executed under — clamping the print around it and measuring the premium the print adds against it, dated to that moment — and the fallback's index describes an earlier moment. Admitting such a print would read the index's own move since then as premium and present it as freshly traded, so the first fresh store afterwards would charge that move as funding; a fill placed by withholding a price update could pick that charge.
+
+</details>
+
+### Liquidation, unloads and ADL
+
+- **Liquidation never runs on the fallback.** Seizure takes a whole bucket, so a liquidation is judged at a fresh price or at Pyth's latest one, proven by an update issued within 3 s of the block and no more than 1 minute old (`MAX_LIQUIDATION_PRICE_AGE`); a call that brings no update reverts once the stored price has aged out. See [Liquidations](liquidations.md).
+- **Vault unloads wait for a fresh print.** Neither `liquidate()`'s inline unload nor `unloadVault` fills against the fallback. A seizure on Pyth's latest price older than 3 s still happens; the inventory it creates stays in the vault until the first fresh print prices it. See [Liquidations](liquidations.md#exiting-the-inventory).
+- **[ADL](adl.md) refuses the fallback outright**, as does the timeout that would terminate a stuck auction. They resume together at the reopen, where the first stored price gives the auction a 30-minute head start before termination becomes callable.
+
+<details>
+<summary>Why vault unloads wait for a fresh print</summary>
+
+A maker who can see the reopen off-chain would take the vault's inventory at the frozen mark only when the reopen favours the fund, handing insurance LPs' gain to whoever sees the market first.
+
+</details>
+
+<details>
+<summary>Why ADL and its termination timeout are blocked together</summary>
+
+Settlement at a bucket's bankruptcy price is already immune — it runs off frozen values — but the health gate, the batch sizing, the executor reward and the [ranking of both cohorts](adl.md#the-auction) all read the live mark, and the reward is steerable through it alone. Blocking both together is what makes it safe to wait: neither can act on a closed venue, so the auction cannot be terminated out from under itself.
+
+</details>
+
+### Withdrawals and insurance
+
+- **Position holders cannot withdraw collateral against the stale fallback.** While stale, the vault accepts deposits but releases no position-holder equity; flat and order-only accounts are unaffected, and withdrawals resume with the first fresh print.
+- **Insurance shares cannot be priced against the stale fallback either.** Deposits meet the same refusal, but only while the vault holds liquidated inventory. With the vault flat a deposit reads no price at all and stays open, so recapitalizing a drained fund is never blocked by market hours. Both resume with the first fresh print, and a pair whose feed has died releases its LPs once the stale-oracle termination settles it.
+
+<details>
+<summary>Why position-holder equity is withheld rather than margined</summary>
+
+Around a closure, off-chain venues (pre-market, 24/7 books) print the reopen hours before the oracle can, so releasing equity at the frozen mark would let a holder who is already dead at the real price withdraw down to an IMR computed at the stale one — converting their loss into vault deficit that a termination passes to the winning side. No margin *rate* closes that channel (a rate can't price information the oracle hasn't seen); withholding release does.
+
+</details>
+
+<details>
+<summary>Why insurance redemptions, and deposits while the vault holds inventory, are refused</summary>
+
+- **Redemptions.** The fund is sized to absorb the reopen gap (the learned gap reaches its target at full size), so a redemption judged at the frozen mark would let an LP leave ahead of exactly the loss the fund exists to take.
+- **Deposits while the vault holds liquidated inventory.** That is the one case where a deposit has to value something the frozen mark cannot see. Whichever way that inventory moved across the closure, pricing it at the frozen mark hands the difference to whoever can already see the reopen, and there is no conservative figure to charge a depositor instead, because a reopen can print anywhere.
+
+</details>
+
+### The reopen
 
 Every reopen also teaches the pair's risk curve: the first stored price after a ≥ 1 h gap — a closure, a trading halt, or a market break — is compared against the last price before it, and the |return| feeds the reopen-gap peak-hold, which raises margin and the insurance target together.
 
-When no fresh price is available, a pair that is not continuously traded falls back to its own last stored price, which cleared the freshness gate and the confidence cap when it was stored; a continuously traded pair reverts. No older price is ever taken from a caller: an update whose price was generated outside the 3 s bound is refused, so whoever submits a call cannot choose the mark it is judged against. A pair whose stored price is more than 21 days old can be settled at that price by anyone ([stale-oracle termination](termination.md)); one `refreshPrice` call with a fresh update restarts those 21 days.
-
 ## Composite feeds
 
-Non-USD-quoted assets multiply or divide through an FX leg (`registerComposite(baseId, quoteId, invertQuote)`, permissionless, idempotent; legs must be raw Pyth Pro feed IDs — composites cannot nest). Bracket math pairs each leg's bound with the direction that moves the composite the same way, publish time is the *older* of the two legs, and both legs are confidence-checked — plus the *composed* bracket must itself sit within the 2% cap, because relative widths add under multiplication (1.8% + 0.15% passes; 1.2% + 1.2% fails). USDC itself is hardcoded to $1 — collateral is not oracle-priced.
+Non-USD-quoted assets multiply or divide through an FX leg (`registerComposite(baseId, quoteId, invertQuote)`, permissionless, idempotent; legs must be raw Pyth Pro feed IDs — composites cannot nest).
+
+- **Bracket math** pairs each leg's bound with the direction that moves the composite the same way.
+- **Publish time** is the *older* of the two legs.
+- **Both legs are confidence-checked** — plus the *composed* bracket must itself sit within the 2% cap, because relative widths add under multiplication (1.8% + 0.15% passes; 1.2% + 1.2% fails).
+- **USDC** itself is hardcoded to $1 — collateral is not oracle-priced.
 
 ## Historical proofs
 
-Both proofs read Pyth Pro's **one-second channel** (`fixed_rate@1000ms`), which issues one update per second, stamped on the second. Pyth's aggregation is deterministic, so there is one price per feed for a given tick, and whoever supplies the update chooses nothing. A quiet feed still gets an update every second: it carries the last price forward, and its feed update timestamp says when that price was generated. That is what lets a tick *prove* a feed produced nothing over a stretch.
+Both proofs read Pyth Pro's **one-second channel** (`fixed_rate@1000ms`), which issues one update per second, stamped on the second.
 
-`fetchPriceAtTick(baseFeedId, priceUpdate, tick)` reads the update stamped exactly `tick` and returns the price it carries: the feed's most recent price as of that second, which for a quiet feed is the last price it produced, carried forward. An update from another channel or another second reverts, as does one that leaves out the price or the exponent, or carries no price at all. Nothing else is read, so nothing a requester adds or leaves out changes the result. A composite's legs may arrive in one update or in one each. No confidence cap applies, because with one candidate a cap could only refuse it; only a non-positive price is rejected. It exists for adjudication: a [scheduled termination](termination.md#supplying-the-settlement-prints) under UMA's rule settles at the tick stamped at the cutoff.
+<details>
+<summary>How a one-second tick proves a price, or a quiet stretch</summary>
 
-`fetchChainedMedian(baseFeedId, priceUpdate, firstTarget, maxPublishTime, spacing, count)` proves `count` samples in a chain and returns the median price. The first sample is the **earliest tick carrying a price generated at or after `firstTarget`**, and each later one the earliest carrying a price generated at or after `spacing` past the tick of the sample before — for a composite, the later of its two legs'. A sample is proven one of two ways: the tick stamped with the target itself, carrying a price generated at or after it, is its own proof; otherwise two consecutive ticks are supplied, the first at or after the target and still carrying a price from before it (the feed was quiet from the target up to there), the second, one second later, carrying a price generated at or after the target. Each target after the first is computed from the tick just verified, never taken from the caller, so the set is fixed by the feed's history and a set built from other ticks, in another order, or one sample short is refused. `priceUpdate` holds, for each sample in turn, the base leg's one or two updates and then, for a composite, the quote leg's. Every update is verified in a Pyth call of its own, so the fee is `getUpdateFee(priceUpdate.length)` and the value sent must equal it exactly. A vote-scheduled termination that UMA has not upheld settles this way, over five samples ten minutes apart.
+Pyth's aggregation is deterministic, so there is one price per feed for a given tick, and whoever supplies the update chooses nothing. A quiet feed still gets an update every second: it carries the last price forward, and its feed update timestamp says when that price was generated. That is what lets a tick *prove* a feed produced nothing over a stretch.
+
+</details>
+
+### The price at a tick
+
+`fetchPriceAtTick(baseFeedId, priceUpdate, tick)` reads the update stamped exactly `tick` and returns the price it carries: the feed's most recent price as of that second, which for a quiet feed is the last price it produced, carried forward.
+
+- **An update from another channel or another second** reverts, as does one that leaves out the price or the exponent, or carries no price at all.
+- **Nothing else is read**, so nothing a requester adds or leaves out changes the result.
+- **A composite's legs** may arrive in one update or in one each.
+- **No confidence cap applies**, because with one candidate a cap could only refuse it; only a non-positive price is rejected.
+- **Use.** It exists for adjudication: a [scheduled termination](termination.md#supplying-the-settlement-prints) under UMA's rule settles at the tick stamped at the cutoff.
+
+### The chained median
+
+`fetchChainedMedian(baseFeedId, priceUpdate, firstTarget, maxPublishTime, spacing, count)` proves `count` samples in a chain and returns the median price.
+
+- **The first sample** is the **earliest tick carrying a price generated at or after `firstTarget`**, and each later one the earliest carrying a price generated at or after `spacing` past the tick of the sample before — for a composite, the later of its two legs'.
+- **Each target after the first** is computed from the tick just verified, never taken from the caller, so the set is fixed by the feed's history and a set built from other ticks, in another order, or one sample short is refused.
+- **Order of updates.** `priceUpdate` holds, for each sample in turn, the base leg's one or two updates and then, for a composite, the quote leg's.
+- **Fee.** Every update is verified in a Pyth call of its own, so the fee is `getUpdateFee(priceUpdate.length)` and the value sent must equal it exactly.
+- **Use.** A vote-scheduled termination that UMA has not upheld settles this way, over five samples ten minutes apart.
+
+<details>
+<summary>How each sample is proven</summary>
+
+A sample is proven one of two ways: the tick stamped with the target itself, carrying a price generated at or after it, is its own proof; otherwise two consecutive ticks are supplied, the first at or after the target and still carrying a price from before it (the feed was quiet from the target up to there), the second, one second later, carrying a price generated at or after the target.
+
+</details>
 
 ## What the oracle trusts
 
-`PythLazer` accepts an update signed by any signer Pyth currently trusts, and Pyth administers that signer set and can upgrade the contract. A price is therefore as trustworthy as Pyth's signing keys: the 3 s bound and the 2% confidence cap are read from the same signed payload and do not defend against a forged one. When Pyth retires a signer, updates it signed stop verifying, which is why every settlement path that needs an archived update also has a stored-price fallback. If Pyth replaces the contract, pairs cannot verify prices any more and wind down through a [termination](termination.md) on the verifier-migration ground.
+`PythLazer` accepts an update signed by any signer Pyth currently trusts, and Pyth administers that signer set and can upgrade the contract. A price is therefore as trustworthy as Pyth's signing keys: the 3 s bound and the 2% confidence cap are read from the same signed payload and do not defend against a forged one.
+
+- **When Pyth retires a signer**, updates it signed stop verifying, which is why every settlement path that needs an archived update also has a stored-price fallback.
+- **If Pyth replaces the contract**, pairs cannot verify prices any more and wind down through a [termination](termination.md) on the verifier-migration ground.

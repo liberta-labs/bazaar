@@ -104,3 +104,23 @@ html.ayu .part-title {
     color: #f5c518;
     opacity: 0.85;
 }
+
+/* Collapsed blocks that hold a rule's rationale and edge cases. The rule itself
+   stays in the page body, and the reader opens the block under it for the
+   reasoning. Unscoped so every theme in the picker gets them; the colors are the
+   ones each theme already defines for block quotes. */
+.content details {
+    margin: 0.6em 0 1.2em;
+    padding: 0.5em 1em;
+    border-left: 3px solid var(--quote-border);
+    background: var(--quote-bg);
+}
+
+.content details > summary {
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.content details[open] > summary {
+    margin-bottom: 0.6em;
+}

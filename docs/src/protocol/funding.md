@@ -4,22 +4,157 @@ Funding tethers the perp's traded price to its index. Bazaar's implementation ha
 
 ## Mark price
 
-The mark is built from the prices at which **standing offers to trade against the index** were taken. The pair keeps two tallies of those fills and reads their ratio:
-
-- A fill enters the mark only when its *resting* side stood on the far side of the index — a **bid above it, or an ask below it** — and in proportion to how long that order had rested at its current price and size: full weight once it has stood for **40 L2 blocks** (`MAKER_EXPOSURE_BLOCKS`, about ten seconds), pro rata before that, and nothing at all for an order taken in the block it was placed. A print by itself costs nothing: two accounts under one owner can print any admissible price for a fee, so a print is no evidence of where the market clears. A resting order on the far side of the index is different — it is a promise anyone may take at a profit against the index, so one that stood untaken says something, and the longer it stood the more. An ask above the index or a bid below it can rest at no risk, and a print against one shows nothing a fill's own two parties could not have arranged between themselves, so it leaves the mark alone. The weight is what turns "resting" into "exposed": an order placed and taken in one block was never on offer to anyone else. Exposure is counted in blocks rather than seconds because a block is one chance for another transaction to land — an order that rested through a sequencer gap was on offer to nobody. The window is short because what it buys is the time a watcher has to take a quote resting away from fair before its owner can take it back at full weight: on a watched pair a quote at the band edge is taken within a block or two, on an unwatched one no window helps, and a longer window would discount the fills that say the most — the bids above the index that an active pair takes within seconds.
-- A fill counts at **no more premium than its resting order stood at when it entered the book**. Entering the book also stamps the order with how far on the far side of the index it stood then — a bid's distance above the index or an ask's below it, in millionths of the index, rounded up and capped at the ±4% band (`restedPremiumPpm`) — and the fill enters the mark at the smaller of its own premium and that stamp. An order that entered on the near side or at the index is stamped zero and never counts, even once the index has moved through it: until then it was a safe quote, and its owner could take it from a second account in the very transaction that stores the move, before anyone else could. An order that entered on the far side counts the premium it offered there, never what a later move of the index adds to it. The stamp is taken only against a fresh index: an order that enters the book on a session pair's stale fallback is stamped zero, since the stored price it would be measured against is from an earlier moment and the order was not on offer at the distance it would read. It counts once re-quoted against a fresh price: repriced or grown, since an amendment that changes neither leaves the order as it was. What a stamp can still overstate is bounded by how far the index moves within `MAX_PRICE_STALENESS`, the age a fresh index may have.
-- Both stamps — the block and the premium — are written whenever an order enters the book at a price and size: on creation, when a StopLimit arms, and on an [amendment](orders.md#amending) that changes the price or raises the size. A size reduction keeps them, since what remains was there all along.
-- Fills that do not qualify neither move the mark nor its clock nor count toward its volume, so they cannot dilute the fills that do.
-- **Two tallies.** Each qualifying fill adds its exposure-weighted notional to a **volume tally**, and that notional times its premium over the index to a **premium tally**. The mark's premium is the premium tally divided by the larger of the volume tally and a floor (below). While the volume stands above the floor, that ratio is the volume-weighted average premium of the recent qualifying fills: a market that keeps trading 1% over the index reads 1%, not a fraction of it. It is a ratio rather than a blend because a blend that fades between fills balances each fill's pull against the fade and settles at half of a steady premium however much is traded. Standing above the floor takes a stream: a fill moves the line's anchor (below) only by its share of the volume, so fills that arrive more than about six and a half minutes apart let the volume fade under the floor between them, and the reading is then the volume's share of the premium — about 75% at ten-minute gaps, 37.5% at twenty, a quarter for a fill on a spent line — rather than the whole of it.
-- **The floor.** The volume the premium tally is read over is floored at **2% of per-side open-interest notional** (`VOLUME_FLOOR_BP`, taken on the larger side and counting the vault's inherited inventory). The volume tally is fed only by prior qualifying fills, so without the floor a pair with no other traders would let one account supply the entire denominator and read its own print in full. Denominating the floor in open interest keeps it scale-free — funding transfers a percentage of open interest, so the size an exposed quote needs before it reads in full is measured in the same units as what moving the mark is worth, on pairs of any size. A quote smaller than the floor reads its own share of its premium: the floor sets how large an exposed quote has to be to matter, the weight sets how long it has to stand.
-- **One call, a quarter.** One matching call may add at most **25%** (`MAX_ALPHA`) of the volume it is weighed against — the larger of the current volume tally and the floor — so no call, however large, moves the reading more than a quarter of the way to its print. The volume a call records is clipped the same way, so the tallies stay a weighted average of what was admitted. The cap is not what prices an attack: an attacker's cost is the notional left exposed on the far side, and the cap only splits a given admission into more calls. It bounds one anomalous print, and it sets how often fills must arrive for the volume to stand (below). A fill against no volume and no open interest — one that closed the pair's last positions — has nothing to be weighed against and is not recorded.
-- Before a fill enters the tallies, its print is clamped to **±4% of the index** (`MAX_MARK_DEVIATION_BP`) — an implausible fill price can't be injected into the mark, and since the reading is a weighted average of clamped prints, the mark never sits further than that band from the index.
-- The mark is held as a **premium over the index** — a signed fraction of it — and read as the index of the moment carried by that premium. A move of the index therefore moves the mark with it: funding is charged on the premiums prints traded at, each measured against the index of its moment (stored within `MAX_PRICE_STALENESS` of the fill, below), and never on the index's moves after it. Held as a price instead, the mark would keep the index level of its last print for the rest of the hour, so a falling index would read as a premium and a rising one as a discount, and honest prints in a trending market would charge funding the wrong way.
-- **The fade.** Both tallies run in a **straight line to zero that ends 1 hour after their anchor** (`MARK_DECAY_PERIOD`). While the volume stands above the floor the fade leaves the ratio alone, so a premium **holds** after trading stops until the volume fades under the floor, then fades with the premium tally; a line that never stood above the floor fades from its anchor. The hold is what a book-reading venue does while its quotes rest, and what any fade of the ratio itself between fills would give back as the halving above. A fill moves the anchor toward the present only by its share of the volume: what was there keeps its age, and only the volume the fill adds starts a fresh hour. A fill on a spent mark gets the full hour, a dust fill on a live one buys less than a second of the clock and so moves it not at all, and a fill against the premium adds volume and takes premium away in the same share, so it extends the line exactly as much as it dilutes it. A premium is therefore gone within an hour of the last fill that added volume, and a train of dust prints can neither hold a premium up nor hold funding away from the index.
-- The pair stores the tallies' values at their anchor, which can predate the last fill, so the stored values are not ones anyone traded at. `BazaarPairLens.markPrice` evaluates them at the current block, over the floor the pair's open interest sets, and carries the reading on the last stored index, the way funding reads it.
-- A print enters the mark only while the index it was judged against is **fresh** — stored within `MAX_PRICE_STALENESS` (3 s) of the fill, which a fill priced off a fresh oracle tick always is. Fills on a non-continuously-traded pair's stale fallback (see [Oracle](oracle.md#the-stale-price-regime-market-hours)) leave the mark and its clock untouched. The update clamps the print around the index and measures the premium the print adds against it, dated to the fill, so a print judged against an index from an earlier moment would read the index's whole move since then as premium, and the clock would present it as freshly traded; the next store would then charge it as funding — the fallback can be reached by withholding a price update, so that would let whoever placed a dust fill choose the sign and size of the next interval's funding. Admission keys on the stored price's age rather than on whether the caller supplied an update; the two coincide, and the age cannot be argued with. Withholding an update keeps a caller's own print out of the mark, which moves nothing — moving the mark takes a print against the live index.
+The mark is built from the prices at which **standing offers to trade against the index** were taken. The pair keeps two tallies of those fills and reads their ratio.
 
 Only funding reads this mark. Where other pages value a position, a loss or the vault's inventory "at the mark", they mean the oracle price the call resolves — the index — not this ratio.
+
+### Which fills count
+
+A fill enters the mark only when its *resting* side stood on the far side of the index — a **bid above it, or an ask below it** — and in proportion to how long that order had rested at its current price and size:
+
+- **Full weight** once it has stood for **40 L2 blocks** (`MAKER_EXPOSURE_BLOCKS`, about ten seconds).
+- **Pro rata** before that.
+- **Nothing at all** for an order taken in the block it was placed.
+
+<details>
+<summary>Why only resting orders on the far side count, and why by how long they rested</summary>
+
+- A print by itself costs nothing: two accounts under one owner can print any admissible price for a fee, so a print is no evidence of where the market clears.
+- A resting order on the far side of the index is different — it is a promise anyone may take at a profit against the index, so one that stood untaken says something, and the longer it stood the more.
+- An ask above the index or a bid below it can rest at no risk, and a print against one shows nothing a fill's own two parties could not have arranged between themselves, so it leaves the mark alone.
+- The weight is what turns "resting" into "exposed": an order placed and taken in one block was never on offer to anyone else.
+
+</details>
+
+<details>
+<summary>Why exposure is counted in blocks, and why the window is short</summary>
+
+- **Exposure is counted in blocks rather than seconds** because a block is one chance for another transaction to land — an order that rested through a sequencer gap was on offer to nobody.
+- **The window is short** because what it buys is the time a watcher has to take a quote resting away from fair before its owner can take it back at full weight: on a watched pair a quote at the band edge is taken within a block or two, on an unwatched one no window helps, and a longer window would discount the fills that say the most — the bids above the index that an active pair takes within seconds.
+
+</details>
+
+### The premium a fill counts at
+
+A fill counts at **no more premium than its resting order stood at when it entered the book**.
+
+- **Entering the book also stamps the order** with how far on the far side of the index it stood then — a bid's distance above the index or an ask's below it, in millionths of the index, rounded up and capped at the ±4% band (`restedPremiumPpm`) — and the fill enters the mark at the smaller of its own premium and that stamp.
+- **An order that entered on the near side or at the index** is stamped zero and never counts, even once the index has moved through it.
+- **An order that entered on the far side** counts the premium it offered there, never what a later move of the index adds to it.
+- **The stamp is taken only against a fresh index**: an order that enters the book on a session pair's stale fallback is stamped zero. It counts once re-quoted against a fresh price: repriced or grown, since an amendment that changes neither leaves the order as it was.
+- **Both stamps** — the block and the premium — are written whenever an order enters the book at a price and size: on creation, when a StopLimit arms, and on an [amendment](orders.md#amending) that changes the price or raises the size. A size reduction keeps them, since what remains was there all along.
+
+<details>
+<summary>Why near-side and stale-fallback orders are stamped zero, and what a stamp can still overstate</summary>
+
+- **Near side or at the index.** Until the index has moved through it, such an order was a safe quote, and its owner could take it from a second account in the very transaction that stores the move, before anyone else could.
+- **Stale fallback.** The stored price the order would be measured against is from an earlier moment and the order was not on offer at the distance it would read.
+- **What a stamp can still overstate** is bounded by how far the index moves within `MAX_PRICE_STALENESS`, the age a fresh index may have.
+
+</details>
+
+### Two tallies
+
+Each qualifying fill adds its exposure-weighted notional to a **volume tally**, and that notional times its premium over the index to a **premium tally**. Fills that do not qualify neither move the mark nor its clock nor count toward its volume, so they cannot dilute the fills that do.
+
+The mark's premium is the premium tally divided by the larger of the volume tally and a floor (below).
+
+While the volume stands above the floor, that ratio is the volume-weighted average premium of the recent qualifying fills: a market that keeps trading 1% over the index reads 1%, not a fraction of it.
+
+<details>
+<summary>Why a ratio rather than a blend</summary>
+
+A blend that fades between fills balances each fill's pull against the fade and settles at half of a steady premium however much is traded.
+
+</details>
+
+<details>
+<summary>How the reading behaves when fills arrive minutes apart</summary>
+
+Standing above the floor takes a stream: a fill moves the line's anchor (below) only by its share of the volume, so fills that arrive more than about six and a half minutes apart let the volume fade under the floor between them, and the reading is then the volume's share of the premium — about 75% at ten-minute gaps, 37.5% at twenty, a quarter for a fill on a spent line — rather than the whole of it.
+
+</details>
+
+### The floor
+
+The volume the premium tally is read over is floored at **2% of per-side open-interest notional** (`VOLUME_FLOOR_BP`, taken on the larger side and counting the vault's inherited inventory).
+
+A quote smaller than the floor reads its own share of its premium: the floor sets how large an exposed quote has to be to matter, the weight sets how long it has to stand.
+
+<details>
+<summary>Why a floor, and why it is denominated in open interest</summary>
+
+- **Why a floor.** The volume tally is fed only by prior qualifying fills, so without the floor a pair with no other traders would let one account supply the entire denominator and read its own print in full.
+- **Denominating the floor in open interest** keeps it scale-free — funding transfers a percentage of open interest, so the size an exposed quote needs before it reads in full is measured in the same units as what moving the mark is worth, on pairs of any size.
+
+</details>
+
+### One call, a quarter
+
+One matching call may add at most **25%** (`MAX_ALPHA`) of the volume it is weighed against — the larger of the current volume tally and the floor — so no call, however large, moves the reading more than a quarter of the way to its print.
+
+- **A fill against no volume and no open interest** — one that closed the pair's last positions — has nothing to be weighed against and is not recorded.
+
+<details>
+<summary>How the recorded volume is clipped, why the cap is not what prices an attack, and what it is for</summary>
+
+The volume a call records is clipped the same way, so the tallies stay a weighted average of what was admitted.
+
+The cap is not what prices an attack: an attacker's cost is the notional left exposed on the far side, and the cap only splits a given admission into more calls. It bounds one anomalous print, and it sets how often fills must arrive for the volume to stand (below).
+
+</details>
+
+### The print band
+
+Before a fill enters the tallies, its print is clamped to **±4% of the index** (`MAX_MARK_DEVIATION_BP`) — an implausible fill price can't be injected into the mark, and since the reading is a weighted average of clamped prints, the mark never sits further than that band from the index.
+
+### Held as a premium over the index
+
+The mark is held as a **premium over the index** — a signed fraction of it — and read as the index of the moment carried by that premium. A move of the index therefore moves the mark with it: funding is charged on the premiums prints traded at, each measured against the index of its moment (stored within `MAX_PRICE_STALENESS` of the fill, below), and never on the index's moves after it.
+
+<details>
+<summary>Why a premium rather than a price</summary>
+
+Held as a price instead, the mark would keep the index level of its last print for the rest of the hour, so a falling index would read as a premium and a rising one as a discount, and honest prints in a trending market would charge funding the wrong way.
+
+</details>
+
+### The fade
+
+Both tallies run in a **straight line to zero that ends 1 hour after their anchor** (`MARK_DECAY_PERIOD`).
+
+- While the volume stands above the floor the fade leaves the ratio alone, so a premium **holds** after trading stops until the volume fades under the floor, then fades with the premium tally; a line that never stood above the floor fades from its anchor.
+- **A fill moves the anchor** toward the present only by its share of the volume: what was there keeps its age, and only the volume the fill adds starts a fresh hour.
+- **A premium is therefore gone within an hour** of the last fill that added volume, and a train of dust prints can neither hold a premium up nor hold funding away from the index.
+
+<details>
+<summary>Why the premium holds, and how single fills move the anchor</summary>
+
+- **The hold** is what a book-reading venue does while its quotes rest, and what any fade of the ratio itself between fills would give back as the halving above.
+- **Single fills.** A fill on a spent mark gets the full hour, a dust fill on a live one buys less than a second of the clock and so moves it not at all, and a fill against the premium adds volume and takes premium away in the same share, so it extends the line exactly as much as it dilutes it.
+
+</details>
+
+### Reading the mark
+
+The pair stores the tallies' values at their anchor, which can predate the last fill, so the stored values are not ones anyone traded at. `BazaarPairLens.markPrice` evaluates them at the current block, over the floor the pair's open interest sets, and carries the reading on the last stored index, the way funding reads it.
+
+### Prints need a fresh index
+
+A print enters the mark only while the index it was judged against is **fresh** — stored within `MAX_PRICE_STALENESS` (3 s) of the fill, which a fill priced off a fresh oracle tick always is.
+
+- **Fills on a non-continuously-traded pair's stale fallback** (see [Oracle](oracle.md#the-stale-price-regime-market-hours)) leave the mark and its clock untouched.
+
+<details>
+<summary>Why a print judged against a stale index is kept out, and why admission keys on the stored price's age</summary>
+
+The update clamps the print around the index and measures the premium the print adds against it, dated to the fill, so a print judged against an index from an earlier moment would read the index's whole move since then as premium, and the clock would present it as freshly traded; the next store would then charge it as funding — the fallback can be reached by withholding a price update, so that would let whoever placed a dust fill choose the sign and size of the next interval's funding.
+
+Admission keys on the stored price's age rather than on whether the caller supplied an update; the two coincide, and the age cannot be argued with.
+
+Withholding an update keeps a caller's own print out of the mark, which moves nothing — moving the mark takes a print against the live index.
+
+</details>
 
 ## Funding rate
 
@@ -34,15 +169,48 @@ continuously traded      0.1%/h         ÷ 40
 
 Longs pay shorts when mark > index and vice versa.
 
-`BazaarPairLens.fundingRate` reads three figures at the current block: the rate the mark implies now, the rate a price stored now would charge for the window since the index last accrued (the window's average, below), and the funding index that charge would leave. A front end can show live funding from the first two, and each position's unrealized funding between stores from the third. The projection is carried on the last stored index, while the next store charges on its own, so the projected index is exact for a store at an unchanged price. Once the settlement price is fixed or the scheduled cutoff has passed the pair stores no further price, and the view reports no rate and the stored index.
+### Reading the rate
 
-The two pairings exist because a session-bound pair accrues funding only while its oracle is fresh — roughly a fifth of the week — so matching a 24/7 pair's corrective force per calendar week takes a higher ceiling per accruing hour. Neither number is chosen independently: each dampener is *derived* from its own ceiling against the shared ±4% band, so a mark sitting exactly at the band edge yields exactly that ceiling and the clamp is never reached from strictly inside the band. Declaring band, rate and dampener independently is what would leave a stretch of the band over which funding is already saturated and stops responding to further mark movement — the region a manipulated mark aims for. The two land at comparable calendar horizons anyway: 8 accruing hours is a little over a day on a session pair, 40 a little under two on a continuous one.
+`BazaarPairLens.fundingRate` reads three figures at the current block:
+
+- the rate the mark implies now,
+- the rate a price stored now would charge for the window since the index last accrued (the window's average, below), and
+- the funding index that charge would leave.
+
+A front end can show live funding from the first two, and each position's unrealized funding between stores from the third.
+
+- **The projection** is carried on the last stored index, while the next store charges on its own, so the projected index is exact for a store at an unchanged price.
+- **Once the settlement price is fixed or the scheduled cutoff has passed** the pair stores no further price, and the view reports no rate and the stored index.
+
+### Ceiling and dampener
+
+Neither number is chosen independently: each dampener is *derived* from its own ceiling against the shared ±4% band, so a mark sitting exactly at the band edge yields exactly that ceiling and the clamp is never reached from strictly inside the band.
 
 A ceiling and a dampener are never mixed across pair types, so the choice changes how hard funding pulls, never how far the mark may sit from index.
 
-**Each store charges its window's average.** When a fresh price is stored, the window since the previous store, as the [oracle-gap guards](#oracle-gap-guards) bound it, accrues at the time-average of the premium the mark read across it — exact, since the reading is flat while the volume stands above the floor and a straight line once it is under it. Charging the window at its closing reading instead would miss most of a premium that fades inside the window, and all of one whose line ran out before the store, which on a quiet pair with stores half an hour apart is the common case. The floor the average is read over is sized from the open interest and index at the store.
+<details>
+<summary>Why two pairings, and why each dampener is derived</summary>
+
+- **The two pairings exist** because a session-bound pair accrues funding only while its oracle is fresh — roughly a fifth of the week — so matching a 24/7 pair's corrective force per calendar week takes a higher ceiling per accruing hour.
+- **Declaring band, rate and dampener independently** is what would leave a stretch of the band over which funding is already saturated and stops responding to further mark movement — the region a manipulated mark aims for.
+- **The two land at comparable calendar horizons** anyway: 8 accruing hours is a little over a day on a session pair, 40 a little under two on a continuous one.
+
+</details>
+
+### What each store charges
+
+When a fresh price is stored, the window since the previous store, as the [oracle-gap guards](#oracle-gap-guards) bound it, accrues at the time-average of the premium the mark read across it — exact, since the reading is flat while the volume stands above the floor and a straight line once it is under it.
 
 The rate accrues into a cumulative **funding index denominated in price units** (rate × index price, 1e18), so a position's funding PnL is simply `Δindex × size` — no per-position bookkeeping between touches.
+
+<details>
+<summary>Why the window's average rather than its closing reading, and how the floor it is read over is sized</summary>
+
+Charging the window at its closing reading instead would miss most of a premium that fades inside the window, and all of one whose line ran out before the store, which on a quiet pair with stores half an hour apart is the common case.
+
+The floor the average is read over is sized from the open interest and index at the store.
+
+</details>
 
 ## Settlement
 
@@ -53,4 +221,9 @@ Funding settles to cash **exactly once — when position shares close** (includi
 - Latest oracle tick more than **12 hours** after the last funding accrual (a market closed overnight or over a weekend, or a pair with nothing stored that long): the accrual window restarts at the new tick — no funding accrues over the dark period.
 - Latest oracle tick more than **30 minutes** after the last funding accrual: pre-tick accrual is limited to the 30 minutes before the tick.
 
+<details>
+<summary>What both guards bound, and what they do not make trustworthy</summary>
+
 Both guards bound how much elapsed time a reopening market may charge at once. Neither makes the mark itself trustworthy at the reopen — that is the reference-age gate above, which keeps a mark formed while the index was frozen from being read as current once it returns.
+
+</details>

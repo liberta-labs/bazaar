@@ -38,7 +38,13 @@ External dependencies on Arbitrum One:
 | `BazaarPairLens` | `0xe312AB284aCCC358dd49e4C66B20E618e4f5B931` | 328418558 |
 | `BazaarPair` implementation | `0xfb3bF4205E181f436f778BcAC21Df9a1c20556A3` | 328418554 |
 
-Markets are discoverable from the factory as on mainnet (`getAllPairs()` / `getPairAddress(pairId)`). The testnet's [subgraph](https://github.com/liberta-labs/bazaar/tree/master/subgraph), which indexes its markets, orders, positions and history, is served by Subgraph Studio at `https://api.studio.thegraph.com/query/1764016/bazaar-arbitrum-sepolia/version/latest`.
+Markets are discoverable from the factory as on mainnet (`getAllPairs()` / `getPairAddress(pairId)`). The testnet's [subgraph](https://github.com/liberta-labs/bazaar/tree/master/subgraph), which indexes its markets, orders, positions and history, is published on The Graph Network:
+
+| Endpoint | URL |
+|---|---|
+| Subgraph ID | `Ho7ManQoDpxu9dHN1D9JcYYBmtuCbDUeMAsFmy2d6Tdg` ([Graph Explorer](https://thegraph.com/explorer/subgraphs/Ho7ManQoDpxu9dHN1D9JcYYBmtuCbDUeMAsFmy2d6Tdg?view=Query&chain=arbitrum-one)) |
+| Network gateway (API key in an `Authorization: Bearer` header) | `https://gateway.thegraph.com/api/subgraphs/id/Ho7ManQoDpxu9dHN1D9JcYYBmtuCbDUeMAsFmy2d6Tdg` |
+| Studio development endpoint (keyless, rate-limited) | `https://api.studio.thegraph.com/query/1764016/bazaar-arbitrum-sepolia/version/latest` |
 
 The twelve external libraries, as recorded in `deployments/421614/libraries.args` by deploy step 1:
 

@@ -6,38 +6,262 @@ Perpetuals on real-world assets need an exit ramp: feeds get decommissioned, com
 
 | Path | Trigger | Gate |
 |---|---|---|
-| **Scheduled** (UMA) | A cessation event, already occurred or officially scheduled with a fixed date (an announced-but-unapproved merger or a contemplated split is not grounds): delisting, oracle decommission, structural change (splits, spinoffs, special dividends > 5%, redenominations), or Pyth verifier migration | $1,000 bond, 12 h UMA liveness; the proposal declares one of the four categories as a number the contract renders into the claim; `lastTradingTs` must be ≥ 2 h in the future (the insurer vote's minimum lead); acceptance alone enforces it as proposed only when it was ≥ 12 h (the liveness) out, so an undisputed claim is accepted before its cutoff and the price there is still unknowable — an event that has already happened is proposed at that earliest enforceable cutoff — while a nearer cutoff is met as proposed only through the insurer vote every claim opens on its own cutoff; without the vote, the claim is accepted after its cutoff, which then moves to 7 s after acceptance, as for any late acceptance. Acceptance is final: nothing can withdraw, delay or cancel it. A later UMA proposal with an earlier cutoff or an insurer vote can bring it forward, and the stale-oracle and autonomous paths end the pair at once. Each acceptance can only move the cutoff earlier, so two proposals settled while both cutoffs are still ahead resolve to the earlier one whichever settles first; one settled after its own cutoff lands 7 s after the settle, as a first acceptance would, and only if that is still earlier |
-| **Stale oracle** | The pair has stored no price for **21 days** — objectively provable on-chain, no UMA needed; one `refreshPrice` with a fresh update restarts the 21 days | none; anyone |
-| **Insurer vote** | Matured insurance shares voting yes reach **60%** of the share snapshot, no later than one hour before the cutoff. Every UMA termination claim opens a vote on its own cutoff; a bare proposal names a cutoff with no claim behind it | Claim-backed: the claim's UMA bond, nothing more; bare: $1,000 bond (forfeited to the fund if the vote fails) and a mature stake to file. 4-day share maturity at the opening of the vote window, the listing seed included; a bare cutoff sits **2 h to 14 days** after the proposal, a claim's vote opens 14 days before its cutoff, so every vote has at least an hour; any number of proposals per pair. A vote-scheduled pair settles under the verdict on its claim; a bare vote or a rejected claim costs the yes-voters a 13-day lock and a levy ([below](#settlement-price-discipline)) |
+| **Scheduled** (UMA) | A cessation event, already occurred or officially scheduled with a fixed date | $1,000 bond, 12 h UMA liveness, cutoff ≥ 2 h ahead |
+| **Stale oracle** | The pair has stored no price for **21 days** | none; anyone |
+| **Insurer vote** | Matured insurance shares voting yes reach **60%** of the share snapshot, no later than one hour before the cutoff | Claim-backed: the claim's UMA bond, nothing more; bare: $1,000 bond and a mature stake |
 | **Autonomous** | Realized bad debt (`deficit > 0`), ADL timeout (24 h, plus a 30 min fresh-priced runway — see [ADL](adl.md)), or books-vs-balance shortfall | none — self-executing inside the health check |
-
-The autonomous path fixes the settlement price at the live price mid-transaction and opens the same settlement window as every other path, rather than terminating on the spot. Freezing withdrawals instantly is precisely what the insolvency check needs, and routing through the window means those positions get the same per-user settlement as a planned wind-down. A books-vs-balance shortfall takes the same route: the missing cash simply shows up in the payout ratios at finalize.
 
 Market-driven price moves are explicitly *not* valid termination grounds — anticipated volatility is tradeable risk, not a structural event.
 
+### Scheduled (UMA)
+
+- **Grounds.** One of four categories: delisting, oracle decommission, structural change (splits, spinoffs, special dividends > 5%, redenominations), or Pyth verifier migration. An announced-but-unapproved merger or a contemplated split is not grounds. The proposal declares its category as a number the contract renders into the claim.
+- **Cutoff.** `lastTradingTs` must be ≥ 2 h in the future (the insurer vote's minimum lead).
+  - **≥ 12 h out** (the liveness): acceptance alone enforces it as proposed. An undisputed claim is accepted before its cutoff, and the price there is still unknowable. An event that has already happened is proposed at this earliest enforceable cutoff.
+  - **Nearer than 12 h**: met as proposed only through the [insurer vote](#insurer-vote) every claim opens on its own cutoff. Without the vote, the claim is accepted after its cutoff, which then moves to 7 s after acceptance, as for any [late acceptance](#the-cutoff-and-limbo).
+- **Acceptance is final.** Nothing can withdraw, delay or cancel it. A later UMA proposal with an earlier cutoff or an insurer vote can bring it forward, and the stale-oracle and autonomous paths end the pair at once.
+- **Bond.** Quoted from `requiredTerminationBond()` rather than the $1,000 constant: UMA derives its own minimum from an owner-settable final fee, so the constant is a floor that tracks upward.
+
+<details>
+<summary>Edge case: two accepted proposals</summary>
+
+Each acceptance can only move the cutoff earlier, so two proposals settled while both cutoffs are still ahead resolve to the earlier one whichever settles first. One settled after its own cutoff lands 7 s after the settle, as a first acceptance would, and only if that is still earlier.
+
+</details>
+
+### Stale oracle
+
+- **Trigger.** No stored price for 21 days — objectively provable on-chain, no UMA needed. One `refreshPrice` with a fresh update restarts the 21 days. An update that only carries an old price forward is not fresh and stores nothing.
+- **Price.** The pair settles at its own last stored price, and the 21-day gate is enforced against that price's age.
+- **Refused once a vote-set cutoff has passed.** That pair settles through `terminateScheduledPair`, whose own last resort reaches the same stored price with the vote's outcome stamped.
+
+<details>
+<summary>Why the stored price is the evidence</summary>
+
+Pyth Pro keeps nothing on-chain to probe, so the stored price is the evidence: a pair stores one whenever a call lands on it with a fresh update, and `refreshPrice` lets anyone make such a call, so a pair on a live feed stays out of reach for as long as anyone with a stake in it refreshes it once in 21 days.
+
+</details>
+
+### Insurer vote
+
+An insurer-vote termination is scheduled, not fixed: a vote that reaches its threshold sets a cutoff, not a price.
+
+- **Two kinds of proposal.** Every UMA termination claim opens a vote on its own cutoff the moment it is filed, for the claim's UMA bond and nothing more. An insurer with a mature stake may also file a **bare** proposal that names a cutoff with no claim behind it, for a $1,000 bond that is forfeited to the fund if the vote fails.
+- **Timing.** A bare cutoff sits **2 h to 14 days** after the proposal. A claim's vote opens 14 days before its cutoff, or at filing when that is nearer. Voting and the latch both close **one hour before the cutoff**, so every vote has at least an hour.
+- **Who votes.** Shares with 4-day maturity at the opening of the vote window, the listing seed included. A claim's snapshot is taken at the first touch once the window is open — the filing itself, or else the first vote — so a claim filed months ahead is counted against the supply of the fortnight before its cutoff.
+- **Latch.** The moment the vote reaches 60% of the snapshot, anyone may execute it — in the same block the votes land if a single holder has them. The pair is then scheduled to stop trading at that cutoff, or its existing schedule is pulled earlier to it.
+- **Independence.** Any number of proposals per pair; the earliest scheduled cutoff wins, and a verified UMA cutoff earlier than a pending insurer schedule pulls it in. A proposal that never reaches the threshold blocks nothing.
+- **Locks.** Votes are never withdrawn. A voted share stays locked against insurance withdrawal until its proposal's cutoff or the pair's, whichever comes first; a failed proposal releases it sooner only while the pair carries no cutoff. The same shares may back several proposals at once, at most eight live ones per voter on a pair.
+- **Cost.** A vote-scheduled pair settles under the verdict on its claim. A bare vote or a rejected claim costs the yes-voters a 13-day lock and a levy ([below](#what-a-vote-scheduled-pair-settles-at)).
+
+<details>
+<summary>Why the latch closes an hour early, and why proposals are independent</summary>
+
+- The price at the cutoff is never in sight when the pair is scheduled, so a coalition cannot file staggered proposals and decide at each cutoff, with the price known, whether to settle.
+- Because a proposal that never reaches the threshold blocks nothing, the only way to make a pair settle later than the honest majority wants is to be that majority.
+
+</details>
+
+<details>
+<summary>Edge cases: a claim rejected mid-vote, a recapitalized fund</summary>
+
+- A claim rejected before its vote has latched ends the vote, and its votes are released as a failed proposal's are.
+- A proposal belongs to the share generation its snapshot was taken in. If the fund is drained and recapitalized while it is open, its votes and snapshot count shares that no longer exist, so it is voided, a bare bond refunded, and its votes lock nothing. A cutoff it already scheduled stands.
+
+</details>
+
+### Autonomous
+
+The autonomous path fixes the settlement price at the live price mid-transaction and opens the same [settlement window](#the-settlement-window) as every other path, rather than terminating on the spot. A books-vs-balance shortfall takes the same route: the missing cash simply shows up in the payout ratios at finalize.
+
+<details>
+<summary>Why it goes through the window</summary>
+
+Freezing withdrawals instantly is precisely what the insolvency check needs, and routing through the window means those positions get the same per-user settlement as a planned wind-down.
+
+</details>
+
 ## Settlement price discipline
 
-Acceptance freezes the pair's price feed at the cutoff — `lastTradingTs`, or 7 s after acceptance when `lastTradingTs` is sooner than that — and the pair then settles at the **price Pyth's one-second update stamped `ts` carries: the feed's most recent price as of that second** — a signed historical update, verified on-chain, never a number typed into the proposal. Pyth's one-second channel issues one update per second, on the second, so there is exactly one for the cutoff: whoever settles chooses nothing, an update from another second or another channel is refused, and a composite needs every leg's price at that tick (see [Supplying the settlement prints](#supplying-the-settlement-prints)). A quiet feed's update carries its last price forward, so the cutoff's update prices a feed that produced nothing on that second too, at the last price it did produce: a market that is shut at the cutoff settles at its close. For the first 12 hours after the cutoff only that update settles the pair (bad or empty data cannot force a fallback while a real price may exist); after the grace, a call without it, or with one that carries no price, falls back to the pair's last stored price so a market can never strand un-terminated. The grace matches the proposal liveness because it answers the same question — how long an interested party needs to notice a termination and act — and it has to carry that alone: posting the update costs gas plus the Pyth fee and pays nothing, while waiting the grace out and calling with empty calldata costs only gas, so whichever side the stale mark favors has the cheaper action. It is not longer because limbo freezes withdrawals, matching and liquidation until the price is fixed; posting the update ends limbo immediately, so the length only ever delays the fallback. Trading, matching, liquidation, deposits and withdrawals halt **6 s before** the scheduled timestamp (`LIMBO_LEAD`, two freshness windows of `MAX_PRICE_STALENESS`). A fill executes at the maker's price whatever price its transaction carries, so a trader who has seen the settlement price can pick off every quote on the wrong side of it, and a live feed generates the price the cutoff's update carries within a moment of the cutoff. A call may carry a price generated up to one window ahead of its block's timestamp, so with one window of lead the last block that trades could act on a price generated a second before the cutoff; with two it can act on none generated later than a window and a second before it. The lead stays that short because no position can be liquidated during it; once the price is fixed, the live liquidation engine is off entirely and positions change only through settlement at that frozen price.
+| How the pair was ended | It settles at |
+|---|---|
+| UMA acceptance, or a vote whose claim UMA upheld | the price Pyth's one-second update stamped at the cutoff carries ([UMA's rule](#umas-rule-the-cutoffs-update)) |
+| A vote whose claim UMA rejected, a claim with no verdict in time, or a bare vote | the median of five Pyth prices chained from the cutoff ([the chain rule](#the-chain-rule)) |
+| Stale oracle | the pair's last stored price |
+| Autonomous | the live price in the terminating transaction |
 
-Binding the price to a signed Pyth update stops a proposer *inventing* a number, and requiring a cutoff that acceptance alone enforces to sit at least the liveness in the future stops them *choosing* one: the price at `lastTradingTs` is unknown when the proposal is filed, so no historical price can be shopped. A cutoff nearer than that, down to the insurer vote's two-hour lead, is enforced as proposed only by the vote, whose latch closes an hour before the cutoff with the price still unknowable; if nobody votes it through, the claim is accepted after its cutoff and moved like any late acceptance, below. Reading the cutoff's own update does the same for whoever settles, who would otherwise pick among the prices generated around the cutoff with all of them already public. A proposal accepted after its cutoff — a disputed one resolving at the DVM days later, an expired one nobody settled at its cutoff, or one whose cutoff was nearer than the liveness and that no vote carried — is scheduled 7 s after acceptance instead (the limbo lead plus a second, so limbo starts one second after the acceptance block, which keeps the margin from the cutoff that every last trading block keeps): nothing halts the market before acceptance, so the book has traded at live prices past the proposed cutoff while the price at that cutoff was public, and settling there would price every position opened since against a known answer. A cutoff less than 7 s away at acceptance is moved out the same way. An event that has already happened — a feed that went dark, an asset already delisted — is proposed at the earliest cutoff the contract accepts; the cutoff's update then carries the feed's last price, and if Pyth issues no update carrying a price for the feed at that second, the pair settles once the grace elapses at its last stored price, the last fresh, confidence-checked price the pair itself recorded. A feed dead for more than 21 days can also be terminated through the stale-oracle path without any proposal.
+### The cutoff and limbo
 
-An insurer-vote termination is scheduled, not fixed. Every UMA termination claim opens a vote on its own cutoff the moment it is filed, and an insurer with a mature stake may also file a bare proposal that names a cutoff with no claim behind it. A bare cutoff sits at least two hours out, which leaves even the shortest vote an hour before it closes; a claim's vote opens fourteen days before its cutoff, or at filing when that is nearer, and its snapshot is taken at the first touch once the window is open — the filing itself, or else the first vote — so a claim filed months ahead is counted against the supply of the fortnight before its cutoff. The moment the vote reaches 60% of the snapshot — anyone may execute it, in the same block the votes land if a single holder has them — the pair is scheduled to stop trading at that cutoff, or its existing schedule is pulled earlier to it. Voting and the latch both close **one hour before the cutoff**: the price at the cutoff is never in sight when the pair is scheduled, so a coalition cannot file staggered proposals and decide at each cutoff, with the price known, whether to settle. Proposals are independent — any number per pair, the earliest scheduled cutoff wins, and a verified UMA cutoff earlier than a pending insurer schedule pulls it in — so a proposal that never reaches the threshold blocks nothing, and the only way to make a pair settle later than the honest majority wants is to be that majority. Votes are never withdrawn: a voted share stays locked against insurance withdrawal until its proposal's cutoff or the pair's, whichever comes first, and a failed proposal releases it sooner only while the pair carries no cutoff. The same shares may back several proposals at once, at most eight live ones per voter on a pair.
+- **Cutoff.** Acceptance freezes the pair's price feed at the cutoff — `lastTradingTs`, or 7 s after acceptance when `lastTradingTs` is sooner than that.
+- **Limbo.** Trading, matching, orders, liquidation, deposits, withdrawals and ADL halt **6 s before** the cutoff (`LIMBO_LEAD`, two freshness windows of `MAX_PRICE_STALENESS`). The price refresh no longer runs the health check, so nothing can settle the book at the frozen pre-cutoff mark instead.
+- **Late acceptance.** A proposal accepted after its cutoff is scheduled 7 s after acceptance instead (the limbo lead plus a second). That covers a disputed proposal resolving at the DVM days later, an expired one nobody settled at its cutoff, and one whose cutoff was nearer than the liveness and that no vote carried. A cutoff less than 7 s away at acceptance is moved out the same way.
 
-What a vote-scheduled pair settles at depends on the verdict on the claim behind it, stamped when the price is fixed. A claim UMA upholds settles under UMA's own rule at the vote's cutoff — the price the cutoff's update carries, or the stored price once 12 hours pass without that update — because every category UMA upholds is a break in the feed's continuity after which the next print is no price at all. Those 12 hours count from the cutoff or, if it is later, from when the verdict became known: the end of the claim's 12-hour liveness if nobody disputed it, or the moment its result is recorded on-chain if someone did — by `settleTerminationProposal`, by the settlement call itself, or by anyone settling the assertion on UMA directly. Until then the settlement waits on the verdict and nobody can post the update, so a grace counted from the cutoff alone could run out before anyone had the chance, leaving whoever settles first after a late verdict to choose between the update and the stored price. A disputed verdict recorded by a settlement call that then fails is rolled back with it, so the stored price is reachable only 12 hours after a recording that stands. Nothing is costed: the lock on the yes-voters lifts with the verdict. A claim UMA rejects settles under the **chain rule** — the median of five Pyth prices chained from the cutoff, described next — its yes-voters stay locked for the 13-day withdrawal cooldown after the fix, the cooldown a redemption on the live pair would have served, and they forfeit half of every share they voted. A bare vote, or a claim with no verdict 14 days after it was filed, settles and locks the same way and forfeits half of the dissent fraction of the voted shares — the share of the snapshot that did not vote yes — and never less than a tenth of them, so a bare 60% pays a fifth and a unanimous shutdown, a holder of the whole fund included, still pays a tenth: ending a market with no judge has a base price that only a claim UMA upholds escapes. The forfeited shares are credited at redemption to the bug bounty address, the same address that takes the [bug bounty tax](fees.md) on trading fees; it redeems them like any other holder, so the price every other holder redeems at is untouched whatever order they leave in, and no voter or abstainer can recapture a forfeit. An unjudged vote whose schedule met a cutoff UMA verified — one it pulled in, or one accepted after it — no more than the fourteen days a vote may act in after its own, is not costed: UMA confirmed the event it moved the halt ahead of. A verified cutoff months out vouches for nothing about a halt tomorrow, so a vote that pulls a far schedule in is costed like any other. While the verdict is pending the fix waits, holding the pair in limbo past its cutoff: settling first at the pre-event price and penalizing the voters later could never make whole the traders that print shortchanged if the claim proved false. A claim rejected before its vote has latched ends the vote, and its votes are released as a failed proposal's are.
+<details>
+<summary>Why limbo starts 6 s early, and no earlier</summary>
 
-**The chain rule.** A vote-scheduled pair whose claim UMA has not upheld — a rejected claim, a claim with no verdict in time, or a bare vote — settles at the **median of five Pyth prices chained from the cutoff**: the first comes from the earliest one-second update carrying a price generated at or after the cutoff, and each later one from the earliest carrying a price generated at least **10 minutes** after the update before it (`SETTLEMENT_SAMPLE_COUNT`, `SETTLEMENT_SAMPLE_SPACING`). Every sample is proven against its own target, which the contract computes from the update it has just verified for the sample before: the update stamped on the target, carrying a price generated at or after it, proves itself; a later one is proven by the update a second before it, which still carries a price from before the target and so shows the feed was quiet in between. The five samples are therefore fixed by the feed's history, and whoever settles cannot choose which prices count — other updates, the same ones in another order, or fewer than five samples are all refused. The proposer chose the cutoff, so a single price there would be the cheapest in the market to lean on; the median costs at least three samples to move. Measuring each target from the previous sample, rather than from the cutoff, keeps the samples apart when the feed goes quiet: a cutoff at a session's close yields the closing price and then prices from the reopen onward, so the median is a price from the reopened session rather than the close, and never the opening price repeated five times. For a composite pair each sample is one proven update per leg, composed, and the next target is measured from the later of the two legs. Five samples ten minutes apart span at least 40 minutes of printing, so the pair cannot settle sooner than that after the cutoff.
+- A fill executes at the maker's price whatever price its transaction carries, so a trader who has seen the settlement price can pick off every quote on the wrong side of it, and a live feed generates the price the cutoff's update carries within a moment of the cutoff.
+- A call may carry a price generated up to one window ahead of its block's timestamp, so with one window of lead the last block that trades could act on a price generated a second before the cutoff; with two it can act on none generated later than a window and a second before it.
+- The lead stays that short because no position can be liquidated during it. Once the price is fixed, the live liquidation engine is off entirely and positions change only through settlement at that frozen price.
 
-The chain rule has no grace, and no stored-price fallback until its last resort opens: 21 days after the cutoff, or 12 hours after a capping UMA cutoff (below) if that is sooner. A cutoff that falls in a closed session therefore settles on prints from the reopen, so the fund cannot pick a cutoff after the close and settle at a pre-news price unless UMA has judged the event real. Once the last resort opens, a call that brings no valid chain — none at all included — settles at the stored price, so whoever calls first then decides between a chain and the stored price; by then anyone who wanted the chain has had that long to post it, and without the fallback a signer Pyth has since retired, an archival gap, or a feed that went dark before producing five samples would freeze the pair for good. An insurer cutoff that meets a termination UMA has accepted — a vote that pulls the UMA schedule earlier, or a UMA acceptance that lands after the insurer schedule and so leaves the earlier insurer cutoff in place — still halts trading first, but every sample of its chain must be stamped **no later than UMA's cutoff** (`umaCutoffCap`). The cap is the cutoff UMA verified, whenever the claim is settled: a claim settled after its own cutoff still caps at that cutoff, not at the moment it was settled, so when someone chooses to settle it cannot decide whether a chain's later samples count. A claim whose cutoff precedes the insurer cutoff caps nothing if it resolves after the pair has halted: the pair traded through that event before it stopped, so no price on the near side of it is left to keep. The cap binds only once the claim is accepted: a chain that fixes the price before then is final. A later UMA acceptance can only tighten the bound, since its cutoff must beat the one in force, and one earlier than the insurer cutoff that resolves before the pair halts pulls the schedule in under UMA's rule. If no such chain exists — including when the feed prints for less than 40 minutes between the two cutoffs — the pair settles at its stored price once UMA's cutoff is 12 hours old, or once the insurer cutoff is 21 days old if that comes sooner. UMA has verified an event the market can see coming, so without the cap a coalition could vote a cutoff into the closed session ahead of it and settle every position at post-event reopen prints instead of the pre-event price UMA's own rule falls back to. When the claim upheld is the one behind the vote itself, its cutoff becomes the UMA cutoff in force, which a later claim must beat. A proposal belongs to the share generation its snapshot was taken in: if the fund is drained and recapitalized while it is open, its votes and snapshot count shares that no longer exist, so it is voided, a bare bond refunded, and its votes lock nothing. A cutoff it already scheduled stands. From 6 s before the cutoff the pair is frozen for settlement: matching, orders, liquidation, deposits, withdrawals and ADL all wait, and the price refresh no longer runs the health check, so nothing can settle the book at the frozen pre-cutoff mark instead.
+</details>
 
-A stale-oracle termination settles at the pair's own last stored price, and the 21-day gate is enforced against that price's age. Pyth Pro keeps nothing on-chain to probe, so the stored price is the evidence: a pair stores one whenever a call lands on it with a fresh update, and `refreshPrice` lets anyone make such a call, so a pair on a live feed stays out of reach for as long as anyone with a stake in it refreshes it once in 21 days. An update that only carries an old price forward is not fresh and stores nothing. It is refused once a vote-set cutoff has passed: that pair settles through `terminateScheduledPair`, whose own last resort reaches the same stored price with the vote's outcome stamped.
+<details>
+<summary>Why a late acceptance moves the cutoff</summary>
 
-A pair that never stored a price — its feed died before any trade or refresh recorded one — settles at a nominal price of 1 (the smallest the contract accepts) on every path that would otherwise fall back to the stored price, and the stale-oracle path ages it from its creation instead. Every price a pair resolves is one it stores or the one it already holds, so such a pair has only ever been marked at zero and the nominal price values its book exactly as its own mark did. Without it there would be no exit at all: a live pair pays insurers only against a fresh price, so the fund, the listing seed included, would stay locked for good. Aging from creation keeps the same path from ending a new listing before it has had 21 days to be priced.
+Nothing halts the market before acceptance, so the book has traded at live prices past the proposed cutoff while the price at that cutoff was public, and settling there would price every position opened since against a known answer. The 7 s is the limbo lead plus a second, so limbo starts one second after the acceptance block, which keeps the margin from the cutoff that every last trading block keeps.
 
-The proposer of a UMA termination whose acceptance schedules the pair earns 0.1% of the pair's insurance fund (capped at $100 and at the fund's free capital), credited to their claimable balance on the pair and withdrawn with `claimFees()` — a bounty for noticing dead markets. It is paid once per pair, to the first acceptance that schedules it: a later one that brings the cutoff forward earns nothing, so re-proposing an event a second earlier pays no one. An acceptance that only caps an earlier insurer cutoff pays nothing: the insurers had already ended the market. A cutoff the insurers latched before the claim behind it resolved pays nothing either: the vote scheduled the pair, not the acceptance. The bond is quoted from `requiredTerminationBond()` rather than the $1,000 constant: UMA derives its own minimum from an owner-settable final fee, so the constant is a floor that tracks upward.
+</details>
+
+### UMA's rule: the cutoff's update
+
+The pair settles at the **price Pyth's one-second update stamped at the cutoff carries: the feed's most recent price as of that second** — a signed historical update, verified on-chain, never a number typed into the proposal.
+
+- **Exactly one update for the cutoff.** Pyth's one-second channel issues one update per second, on the second, so whoever settles chooses nothing. An update from another second or another channel is refused, and a composite needs every leg's price at that tick (see [Supplying the settlement prints](#supplying-the-settlement-prints)).
+- **A quiet feed's update** carries its last price forward, so the cutoff's update prices a feed that produced nothing on that second too, at the last price it did produce: a market that is shut at the cutoff settles at its close.
+- **12 h grace.** For the first 12 hours after the cutoff only that update settles the pair (bad or empty data cannot force a fallback while a real price may exist). After the grace, a call without it, or with one that carries no price, falls back to the pair's last stored price so a market can never strand un-terminated.
+
+<details>
+<summary>Edge case: an event that has already happened</summary>
+
+An event that has already happened — a feed that went dark, an asset already delisted — is proposed at the earliest cutoff the contract accepts. The cutoff's update then carries the feed's last price; if Pyth issues no update carrying a price for the feed at that second, the pair settles once the grace elapses at its last stored price, the last fresh, confidence-checked price the pair itself recorded. A feed dead for more than 21 days can also be terminated through the stale-oracle path without any proposal.
+
+</details>
+
+<details>
+<summary>Why nobody can shop for a price</summary>
+
+- Binding the price to a signed Pyth update stops a proposer *inventing* a number.
+- Requiring a cutoff that acceptance alone enforces to sit at least the liveness in the future stops them *choosing* one: the price at `lastTradingTs` is unknown when the proposal is filed, so no historical price can be shopped.
+- A cutoff nearer than that, down to the insurer vote's two-hour lead, is enforced as proposed only by the vote, whose latch closes an hour before the cutoff with the price still unknowable. If nobody votes it through, the claim is accepted after its cutoff and moved like any late acceptance.
+- Reading the cutoff's own update does the same for whoever settles, who would otherwise pick among the prices generated around the cutoff with all of them already public.
+
+</details>
+
+<details>
+<summary>Why the grace is 12 hours</summary>
+
+The grace matches the proposal liveness because it answers the same question — how long an interested party needs to notice a termination and act — and it has to carry that alone: posting the update costs gas plus the Pyth fee and pays nothing, while waiting the grace out and calling with empty calldata costs only gas, so whichever side the stale mark favors has the cheaper action. It is not longer because limbo freezes withdrawals, matching and liquidation until the price is fixed; posting the update ends limbo immediately, so the length only ever delays the fallback.
+
+</details>
+
+### What a vote-scheduled pair settles at
+
+It depends on the verdict on the claim behind the vote, stamped when the price is fixed.
+
+| Verdict | Settlement | Yes-voters' lock | Yes-voters' forfeit |
+|---|---|---|---|
+| UMA upholds the claim | [UMA's rule](#umas-rule-the-cutoffs-update) at the vote's cutoff | lifts with the verdict | none |
+| UMA rejects the claim | [the chain rule](#the-chain-rule) | the 13-day withdrawal cooldown after the fix | half of every share they voted |
+| Bare vote, or a claim with no verdict 14 days after it was filed | the chain rule | the same 13 days | half of the dissent fraction of the voted shares, and never less than a tenth of them |
+
+- **Dissent fraction.** The share of the snapshot that did not vote yes. A bare 60% pays a fifth, and a unanimous shutdown, a holder of the whole fund included, still pays a tenth.
+- **Forfeited shares** are credited at redemption to the bug bounty address, the same address that takes the [bug bounty tax](fees.md) on trading fees. It redeems them like any other holder, so the price every other holder redeems at is untouched whatever order they leave in, and no voter or abstainer can recapture a forfeit.
+- **While the verdict is pending** the fix waits, holding the pair in limbo past its cutoff.
+- **An upheld claim's 12 h grace** counts from the cutoff or, if it is later, from when the verdict became known.
+
+<details>
+<summary>Why the outcome depends on the verdict</summary>
+
+- **Upheld claims use UMA's rule** because every category UMA upholds is a break in the feed's continuity after which the next print is no price at all.
+- **The 13 days** are the cooldown a redemption on the live pair would have served.
+- **The floor of a tenth**: ending a market with no judge has a base price that only a claim UMA upholds escapes.
+- **The fix waits for the verdict** because settling first at the pre-event price and penalizing the voters later could never make whole the traders that print shortchanged if the claim proved false.
+
+</details>
+
+<details>
+<summary>Edge cases: the uncosted vote, and when an upheld claim's grace starts</summary>
+
+- **A vote that is not costed.** An unjudged vote whose schedule met a cutoff UMA verified — one it pulled in, or one accepted after it — no more than the fourteen days a vote may act in after its own, is not costed: UMA confirmed the event it moved the halt ahead of. A verified cutoff months out vouches for nothing about a halt tomorrow, so a vote that pulls a far schedule in is costed like any other.
+- **When the verdict became known.** The end of the claim's 12-hour liveness if nobody disputed it, or the moment its result is recorded on-chain if someone did — by `settleTerminationProposal`, by the settlement call itself, or by anyone settling the assertion on UMA directly.
+- **Why the grace counts from there.** Until then the settlement waits on the verdict and nobody can post the update, so a grace counted from the cutoff alone could run out before anyone had the chance, leaving whoever settles first after a late verdict to choose between the update and the stored price.
+- **A failed settlement call.** A disputed verdict recorded by a settlement call that then fails is rolled back with it, so the stored price is reachable only 12 hours after a recording that stands.
+
+</details>
+
+### The chain rule
+
+A vote-scheduled pair whose claim UMA has not upheld — a rejected claim, a claim with no verdict in time, or a bare vote — settles at the **median of five Pyth prices chained from the cutoff** (`SETTLEMENT_SAMPLE_COUNT`, `SETTLEMENT_SAMPLE_SPACING`).
+
+- **Samples.** The first comes from the earliest one-second update carrying a price generated at or after the cutoff, and each later one from the earliest carrying a price generated at least **10 minutes** after the update before it.
+- **No choice for the settler.** The five samples are fixed by the feed's history: other updates, the same ones in another order, or fewer than five samples are all refused.
+- **Composites.** Each sample is one proven update per leg, composed, and the next target is measured from the later of the two legs.
+- **Earliest settlement.** Five samples ten minutes apart span at least 40 minutes of printing, so the pair cannot settle sooner than that after the cutoff.
+- **A cutoff that falls in a closed session** settles on prints from the reopen.
+- **Last resort.** The chain rule has no grace, and no stored-price fallback until its last resort opens: 21 days after the cutoff, or 12 hours after a [capping UMA cutoff](#the-uma-cutoff-cap) if that is sooner. From then, a call that brings no valid chain — none at all included — settles at the stored price, so whoever calls first decides between a chain and the stored price.
+
+<details>
+<summary>How each sample is proven</summary>
+
+Every sample is proven against its own target, which the contract computes from the update it has just verified for the sample before. The update stamped on the target, carrying a price generated at or after it, proves itself; a later one is proven by the update a second before it, which still carries a price from before the target and so shows the feed was quiet in between.
+
+</details>
+
+<details>
+<summary>Why a chained median, and why a last resort</summary>
+
+- **Median.** The proposer chose the cutoff, so a single price there would be the cheapest in the market to lean on; the median costs at least three samples to move.
+- **Chained from the previous sample, not from the cutoff.** This keeps the samples apart when the feed goes quiet: a cutoff at a session's close yields the closing price and then prices from the reopen onward, so the median is a price from the reopened session rather than the close, and never the opening price repeated five times.
+- **No early fallback.** Because a closed-session cutoff settles on reopen prints, the fund cannot pick a cutoff after the close and settle at a pre-news price unless UMA has judged the event real.
+- **Last resort.** By the time it opens, anyone who wanted the chain has had that long to post it, and without the fallback a signer Pyth has since retired, an archival gap, or a feed that went dark before producing five samples would freeze the pair for good.
+
+</details>
+
+### The UMA cutoff cap
+
+An insurer cutoff that meets a termination UMA has accepted — a vote that pulls the UMA schedule earlier, or a UMA acceptance that lands after the insurer schedule and so leaves the earlier insurer cutoff in place — still halts trading first, but every sample of its chain must be stamped **no later than UMA's cutoff** (`umaCutoffCap`).
+
+If no such chain exists — including when the feed prints for less than 40 minutes between the two cutoffs — the pair settles at its stored price once UMA's cutoff is 12 hours old, or once the insurer cutoff is 21 days old if that comes sooner.
+
+<details>
+<summary>Why the cap exists</summary>
+
+UMA has verified an event the market can see coming, so without the cap a coalition could vote a cutoff into the closed session ahead of it and settle every position at post-event reopen prints instead of the pre-event price UMA's own rule falls back to.
+
+</details>
+
+<details>
+<summary>Edge cases: which cutoff caps, and when</summary>
+
+- **The cap is the cutoff UMA verified, whenever the claim is settled.** A claim settled after its own cutoff still caps at that cutoff, not at the moment it was settled, so when someone chooses to settle it cannot decide whether a chain's later samples count.
+- **A claim whose cutoff precedes the insurer cutoff caps nothing if it resolves after the pair has halted.** The pair traded through that event before it stopped, so no price on the near side of it is left to keep.
+- **The cap binds only once the claim is accepted.** A chain that fixes the price before then is final.
+- **A later UMA acceptance can only tighten the bound**, since its cutoff must beat the one in force. One earlier than the insurer cutoff that resolves before the pair halts pulls the schedule in under UMA's rule.
+- **When the claim upheld is the one behind the vote itself**, its cutoff becomes the UMA cutoff in force, which a later claim must beat.
+
+</details>
+
+### A pair that never stored a price
+
+A pair whose feed died before any trade or refresh recorded a price settles at a nominal price of 1 (the smallest the contract accepts) on every path that would otherwise fall back to the stored price. The stale-oracle path ages it from its creation instead.
+
+<details>
+<summary>Why a nominal price, and why aging from creation</summary>
+
+- Every price a pair resolves is one it stores or the one it already holds, so such a pair has only ever been marked at zero and the nominal price values its book exactly as its own mark did.
+- Without it there would be no exit at all: a live pair pays insurers only against a fresh price, so the fund, the listing seed included, would stay locked for good.
+- Aging from creation keeps the same path from ending a new listing before it has had 21 days to be priced.
+
+</details>
+
+### The proposer's bounty
+
+The proposer of a UMA termination whose acceptance schedules the pair earns **0.1% of the pair's insurance fund**, capped at $100 and at the fund's free capital — a bounty for noticing dead markets. It is credited to their claimable balance on the pair and withdrawn with `claimFees()`.
+
+It is paid once per pair, to the first acceptance that schedules it. These acceptances earn nothing:
+
+- **One that brings an existing cutoff forward**, so re-proposing an event a second earlier pays no one.
+- **One that only caps an earlier insurer cutoff**: the insurers had already ended the market.
+- **One whose cutoff the insurers latched before the claim behind it resolved**: the vote scheduled the pair, not the acceptance.
 
 ### Supplying the settlement prints
 
-`terminateScheduledPair(pair, priceUpdate)` is permissionless and needs signed Pyth Pro updates as calldata. Pyth keeps no prices on-chain, so every settlement price is submitted as an archived update and verified on the spot. All of them come from Pyth's **one-second channel** (`fixed_rate@1000ms`), which issues one update per second stamped on the second, and Pyth's REST API returns the signed update for any past second: ask for the price at a timestamp (in microseconds, a multiple of 1,000,000) on that channel in the `evm` format, with the properties `price`, `exponent` and `feedUpdateTimestamp` for each of the pair's feeds. `feedUpdateTimestamp` is when the price in the update was generated: equal to the update's own timestamp when Pyth produced a price on that second, earlier when the price is carried forward from before. Submit the updates with the Pyth fee in ETH, `BazaarOracle.getUpdateFee(updates.length)`; any excess is refunded.
+`terminateScheduledPair(pair, priceUpdate)` is permissionless and needs signed Pyth Pro updates as calldata. Pyth keeps no prices on-chain, so every settlement price is submitted as an archived update and verified on the spot.
+
+- **Channel.** All updates come from Pyth's **one-second channel** (`fixed_rate@1000ms`), which issues one update per second stamped on the second.
+- **Fetching.** Pyth's REST API returns the signed update for any past second: ask for the price at a timestamp (in microseconds, a multiple of 1,000,000) on that channel in the `evm` format, with the properties `price`, `exponent` and `feedUpdateTimestamp` for each of the pair's feeds.
+- **`feedUpdateTimestamp`** is when the price in the update was generated: equal to the update's own timestamp when Pyth produced a price on that second, earlier when the price is carried forward from before.
+- **Fee.** Submit the updates with the Pyth fee in ETH, `BazaarOracle.getUpdateFee(updates.length)`; any excess is refunded.
 
 `settlementRule(pair)` on the terminator says which rule applies and what to fetch. It returns `(rule, firstTarget, latestPublishTs, lastResortTs, verdictDeadline)`:
 
@@ -48,9 +272,15 @@ The proposer of a UMA termination whose acceptance schedules the pair earns 0.1%
 | `SETTLE_AWAIT_VERDICT` (3) | the vote that set the cutoff waits for UMA's verdict on its claim | nothing yet. Once UMA can resolve the claim, `settleTerminationProposal(id)` records the verdict, and `terminateScheduledPair` records it itself: an undisputed claim past its liveness, or a disputed one the DVM has ruled on. If no verdict has been recorded by `verdictDeadline`, the view reports `SETTLE_CHAIN`, but a DVM ruling the call records still decides the rule (see step 1 below) |
 | `SETTLE_NOTHING` (0) | no cutoff is scheduled, or the price is already fixed | nothing |
 
-Under `SETTLE_TICK` and `SETTLE_CHAIN`, once `lastResortTs` has passed a call with no updates at all settles the pair at its stored price: 12 hours after the cutoff under UMA's rule, or after the verdict became known for a vote whose claim UMA upheld, if that is later; 21 days after it under the chain rule, or 12 hours after a UMA cutoff the schedule met if that is sooner. Until then only the proven updates settle the pair, so empty or bad data cannot force the fallback while real prices may exist.
+Under `SETTLE_TICK` and `SETTLE_CHAIN`, once `lastResortTs` has passed a call with no updates at all settles the pair at its stored price: the end of the [12 h grace](#umas-rule-the-cutoffs-update) under UMA's rule, or of the [last resort](#the-chain-rule) under the chain rule. Until then only the proven updates settle the pair.
 
-**Ending a market under the chain rule, step by step.**
+Two further rules apply to every settlement price:
+
+- **Composite pairs need every leg proven** for each price, each leg on its own. Under UMA's rule that is the cutoff's update for both legs; under the chain rule each leg has its own earliest second and its own one or two updates.
+- **No confidence cap applies**, and the updates need not carry a confidence. Each price has exactly one candidate, so a cap could only refuse it. A wide price settles as it is, and only a non-positive price is rejected.
+
+<details>
+<summary>Step by step: ending a market under the chain rule</summary>
 
 1. **Wait for the cutoff, then record any verdict.** `pair.scheduledTerminationTs()` is the cutoff `T`; nothing settles until a block after it. If a claim-backed vote set the cutoff (`insurerScheduleId(pair)` is its assertion id), call `settleTerminationProposal(id)` first: the view cannot see a verdict the DVM has reached until someone records it, and `terminateScheduledPair` would apply that verdict instead. A revert there just means UMA cannot resolve the claim yet. If the claim was disputed and the DVM upheld it, recording the verdict starts its 12-hour grace, so have the cutoff's update ready first, or submit it to `terminateScheduledPair` directly, which records the verdict and settles in one call. Then check `settlementRule(pair)` returns `SETTLE_CHAIN` (2), and note `firstTarget` (= `T`) and `latestPublishTs`. If it returns `SETTLE_TICK` (1) instead, UMA upheld the claim: submit the cutoff's update as the table above describes, before `lastResortTs`.
 2. **Find the first sample.** For each leg of the pair's feed (a composite pair has two legs: `BazaarOracle.composites(baseFeedId)` lists them), fetch the update stamped `T`. If its `feedUpdateTimestamp` is at or after `T`, that one update is the sample. If it is earlier, the feed was quiet at the cutoff: find the first later second whose update has a `feedUpdateTimestamp` at or after `T` (the value never goes backwards from one second to the next, so a binary search over seconds finds it) and take **two** updates, that second's and the one a second before it.
@@ -59,9 +289,23 @@ Under `SETTLE_TICK` and `SETTLE_CHAIN`, once `lastResortTs` has passed a call wi
 5. **Submit.** Order the updates sample by sample: for each sample the base leg's one or two updates, then for a composite the quote leg's one or two. Call `terminateScheduledPair{value: fee}(pair, updates)` with `fee = BazaarOracle.getUpdateFee(updates.length)`. The call verifies all five samples, fixes the settlement price at their median, and opens the [settlement window](#the-settlement-window).
 6. **If no chain can be built** — the feed died before producing five samples, the archive cannot serve an update, or a UMA cutoff leaves too little room — wait until `lastResortTs`, then call `terminateScheduledPair(pair, [])` with no updates: the pair settles at its stored price.
 
-For example, take a US equity pair whose cutoff is Friday 19:55:00 New York time. Pyth Pro prices US equities through the pre-market, regular, post-market and overnight sessions, so the feed goes quiet only between the post-market close at Friday 20:00 and the overnight open at Sunday 20:00. The first sample is the update stamped 19:55:00, generated on that second. The second target is 20:05:00; the update stamped there still carries the last price generated before 20:00, and so does every update until the first new price on Sunday evening, say in the update stamped Sunday 20:00:02, so the second sample is two updates: Sunday 20:00:01, still carrying Friday's price, and Sunday 20:00:02. The remaining targets are 20:10:02, 20:20:02 and 20:30:02, one update each, and the set of six can be submitted from just after 20:30:02 on Sunday. Its median is one Friday price and four from the first half hour of Sunday's overnight session, not the Friday price alone and not the reopening price alone.
+</details>
 
-What a refused call means:
+<details>
+<summary>Worked example: a US equity pair with a Friday cutoff</summary>
+
+Take a US equity pair whose cutoff is Friday 19:55:00 New York time. Pyth Pro prices US equities through the pre-market, regular, post-market and overnight sessions, so the feed goes quiet only between the post-market close at Friday 20:00 and the overnight open at Sunday 20:00.
+
+1. The first sample is the update stamped 19:55:00, generated on that second.
+2. The second target is 20:05:00. The update stamped there still carries the last price generated before 20:00, and so does every update until the first new price on Sunday evening, say in the update stamped Sunday 20:00:02. The second sample is therefore two updates: Sunday 20:00:01, still carrying Friday's price, and Sunday 20:00:02.
+3. The remaining targets are 20:10:02, 20:20:02 and 20:30:02, one update each.
+
+The set of six can be submitted from just after 20:30:02 on Sunday. Its median is one Friday price and four from the first half hour of Sunday's overnight session, not the Friday price alone and not the reopening price alone.
+
+</details>
+
+<details>
+<summary>Troubleshooting: what a refused call means</summary>
 
 - **`BazaarOracle__SampleNotProven(feedId, target, tick)`**: the update stamped `tick` does not prove a sample for `target` — it is before the target, it is later than the target without the quiet update before it, the update offered as quiet carries a price generated at or after the target, or the two are not consecutive seconds. Samples out of order produce it too. Re-derive each target from the previous sample's second as in step 3.
 - **`BazaarOracle__SampleTooLate(feedId, tick, maxPublishTime)`**: a sample is stamped after `latestPublishTs`.
@@ -74,10 +318,7 @@ What a refused call means:
 - **`BazaarPairTerminator__InsufficientPythFee(provided, required)`**: the ETH sent is below `getUpdateFee(updates.length)`; send at least that.
 - **`invalid signer`** (from Pyth): the update was signed by a key Pyth no longer trusts. Nothing can make it verify again; the pair settles at its stored price once `lastResortTs` has passed.
 
-Two further rules apply to every settlement price:
-
-- **Composite pairs need every leg proven** for each price, each leg on its own. Under UMA's rule that is the cutoff's update for both legs; under the chain rule each leg has its own earliest second and its own one or two updates.
-- **No confidence cap applies**, and the updates need not carry a confidence. Each price has exactly one candidate, so a cap could only refuse it. A wide price settles as it is, and only a non-positive price is rejected.
+</details>
 
 ## Proposer-supplied text
 
@@ -85,47 +326,140 @@ The UMA proposal takes one free-text argument — `proposeTermination(pair, cate
 
 - **Length**: `reason` is 1 to 1,000 bytes.
 - **Charset**: letters, digits, space, and `. , & / -`, plus `: ? = # % _ ~ +` so evidence URLs survive. Every other byte — including all non-ASCII, and **square brackets** — is rejected at submission.
-- **Placement**: the contract writes every field and instruction block itself, then splices `reason` last, between square-bracket fences that label it untrusted proposer text and mark where it ends. The charset is what makes those fences unforgeable, so the colon the URL set admits is defused structurally: no proposer string can close the fence, resume the contract's voice, or add a criterion.
+- **Placement**: the contract writes every field and instruction block itself, then splices `reason` last, between square-bracket fences that label it untrusted proposer text and mark where it ends.
 - **Category**: a numbered argument, not part of the reason. The contract renders it into the claim as the one category the proposal claims, so the category is the proposer's declaration rather than the voters' inference, and no reason text can blur it. The claim tells voters the evidence must establish the declared category, and that grounds also fitting another category, such as a delisting that also ends the feed, do not invalidate it: every category is held to the same cutoff floor.
+
+<details>
+<summary>Why the fences cannot be forged</summary>
+
+The charset is what makes those fences unforgeable, so the colon the URL set admits is defused structurally: no proposer string can close the fence, resume the contract's voice, or add a criterion.
+
+</details>
 
 The listing claim applies the [same discipline](listing.md) to its `description`.
 
 ## The settlement window
 
-Every path is **two-stage**. The terminator first *fixes* the settlement price (`fixSettlementPrice`), which opens the **settlement window**; `finalizeTermination` is allowed once **every position has been settled** at that price — the pair knows, because open interest reaches zero — or, as an escape hatch, **14 days** after the fix. Trading, orders, ADL, deposits, and **all** withdrawals (collateral and insurance alike) are frozen while the window is open, so nobody exits ahead of the accounting. The pair also stores no further price once the settlement price is fixed, so the funding index every settlement reads stays where the fix left it. A tick from before the cutoff is still fresh for three seconds after it, and storing one between two settlements would credit the positions settled after it with funding that those settled before it never paid, out of the insurers' residual.
+Every path is **two-stage**:
 
-The window exists to do one job: **mark every open position to the final price before anyone is paid.** `liquidate()` becomes the settlement entry point — anyone may pass a list of addresses, with no price update and no ETH, because the settlement price is already fixed (this is what makes it work on dead feeds). Settling is pure accounting and harmless to the target: it needs no solvency threshold, because marking a position at a price that will never change cannot alter what its owner is owed. Settling someone else's position earns a **$0.05** tip (`TERMINAL_SETTLEMENT_TIP`), escrowed for `claimFees()` like every keeper reward: the settled position pays it from whatever collateral its settlement leaves it, charged like a trading fee, and insurance tops up what the collateral cannot cover when the position is worth at least **$5** at the settlement price. A smaller position pays only what its own collateral covers: fills can leave positions that small with no collateral at no cost, so an insurance top-up would pay a tip out of the insurers' residual for every such account. Settling your own position is free. One batched call clears a book.
+1. **Fix.** The terminator fixes the settlement price (`fixSettlementPrice`), which opens the **settlement window**.
+2. **Finalize.** `finalizeTermination` is allowed once **every position has been settled** at that price — the pair knows, because open interest reaches zero — or, as an escape hatch, **14 days** after the fix.
+
+While the window is open:
+
+- Trading, orders, ADL, deposits, and **all** withdrawals (collateral and insurance alike) are frozen, so nobody exits ahead of the accounting.
+- The pair stores no further price, so the funding index every settlement reads stays where the fix left it.
+
+<details>
+<summary>Why the pair stores no price after the fix</summary>
+
+A tick from before the cutoff is still fresh for three seconds after it, and storing one between two settlements would credit the positions settled after it with funding that those settled before it never paid, out of the insurers' residual.
+
+</details>
+
+### Settling positions
+
+The window exists to do one job: **mark every open position to the final price before anyone is paid.**
+
+- **`liquidate()` becomes the settlement entry point** — anyone may pass a list of addresses, with no price update and no ETH, because the settlement price is already fixed (this is what makes it work on dead feeds). One batched call clears a book.
+- **Harmless to the target.** Settling is pure accounting: it needs no solvency threshold, because marking a position at a price that will never change cannot alter what its owner is owed.
+- **Tip.** Settling someone else's position earns **$0.05** (`TERMINAL_SETTLEMENT_TIP`), escrowed for `claimFees()` like every keeper reward. The settled position pays it from whatever collateral its settlement leaves it, charged like a trading fee, and insurance tops up what the collateral cannot cover when the position is worth at least **$5** at the settlement price. A smaller position pays only what its own collateral covers. Settling your own position is free.
 
 Each settled position does one of two things:
 
 - **A loser's** realized loss is deducted from their collateral. Any loss exceeding their collateral is tallied as **bad debt**.
 - **A winner's** profit is registered as a **claim**, the per-user figure paid at the frozen profit ratio.
 
-Neither touches the deposits ledger. That is deliberate: the ledger obeys an identity the live protocol maintains at every step — the sum of every bucket's collateral, plus the open positions' unrealized PnL, plus the value of the vault's inherited inventory, equals the ledger less any ledger arrears plus any pre-termination deficit — and finalize derives what traders are owed from that identity. It holds only while settlement leaves the ledger alone.
+Neither touches the deposits ledger.
 
-Why any of this is necessary: liquidation only fires on observed live ticks, but termination events are precisely discontinuities — delistings, mergers, feed deaths. A position that gaps from healthy to deeply insolvent on the final print was never liquidatable at that price. Without a settlement pass, its bad debt is invisible, and winners get promised 100% of a pot that cannot pay them — a first-come-first-served drain.
+<details>
+<summary>Why a settlement pass is needed at all</summary>
 
-Gating finalize on completeness rather than on a clock is what makes the payout exact, and the gate cannot be held hostage: nobody can withdraw until finalize, settling is permissionless and tipped, the order of settlement cannot change anyone's outcome, and settlement cannot revert for a position that exists. Every open position is a paying target for a keeper, and every winner with a payout waiting has a second reason to sweep the whole book rather than just their own position: a bankrupt position settled before finalize has its shortfall booked before the ratios are frozen, so it is charged to the insurers' residual, and shared across every registered winner at one ratio if that runs out; settled after finalize, the same shortfall can only be shared among the holders who have not withdrawn yet. The 14-day escape hatch only bounds the case where nobody settles at all.
+Liquidation only fires on observed live ticks, but termination events are precisely discontinuities — delistings, mergers, feed deaths. A position that gaps from healthy to deeply insolvent on the final print was never liquidatable at that price. Without a settlement pass, its bad debt is invisible, and winners get promised 100% of a pot that cannot pay them — a first-come-first-served drain.
+
+</details>
+
+<details>
+<summary>Why finalize is gated on completeness, and why the gate cannot be held hostage</summary>
+
+Gating finalize on completeness rather than on a clock is what makes the payout exact. The 14-day escape hatch only bounds the case where nobody settles at all.
+
+- Nobody can withdraw until finalize, settling is permissionless and tipped, the order of settlement cannot change anyone's outcome, and settlement cannot revert for a position that exists.
+- Every open position is a paying target for a keeper.
+- Every winner with a payout waiting has a second reason to sweep the whole book rather than just their own position. A bankrupt position settled before finalize has its shortfall booked before the ratios are frozen, so it is charged to the insurers' residual, and shared across every registered winner at one ratio if that runs out. Settled after finalize, the same shortfall can only be shared among the holders who have not withdrawn yet.
+
+</details>
+
+<details>
+<summary>Why settlement leaves the ledger alone, and why small positions get no top-up</summary>
+
+- **The ledger** obeys an identity the live protocol maintains at every step — the sum of every bucket's collateral, plus the open positions' unrealized PnL, plus the value of the vault's inherited inventory, equals the ledger less any ledger arrears plus any pre-termination deficit — and finalize derives what traders are owed from that identity. It holds only while settlement leaves the ledger alone.
+- **The $5 threshold.** Fills can leave positions that small with no collateral at no cost, so an insurance top-up would pay a tip out of the insurers' residual for every such account.
+
+</details>
 
 ## The settlement waterfall
 
 At `finalizeTermination` the pair computes, once and for all:
 
-1. **The total owed to traders**, from the ledger identity. With every position settled the unrealized term is zero, so `owed = ledger − ledger arrears + deficit + bad debt − inventory value at the settlement price`: the sum of every bucket's collateral plus every registered claim, without summing over accounts. The ledger arrears are what the deposits ledger owes the insurance fund — a seizure or vault gain the ledger could only partly pay because winners had already withdrawn the cash — so they are cash the ledger holds that no bucket claims; subtracting them keeps that cash out of the reserved principal and lets it reach the insurers' residual. The vault's inherited inventory is retired here — its loss is its counterparties' gain and its gain their loss, both already inside the buckets and claims.
+1. **The total owed to traders**, from the ledger identity: `owed = ledger − ledger arrears + deficit + bad debt − inventory value at the settlement price`. That is the sum of every bucket's collateral plus every registered claim, without summing over accounts.
 2. **The pot**: the USDC balance less the fee escrow.
-3. **Two frozen ratios.** Principal is senior: if the pot covers `owed − claims`, the principal ratio is 100% and the profit ratio is `min(100%, (pot − principal) / claims)`. If cash cannot even cover principal — only a books-vs-balance gap gets there — principal is paid pro-rata on the pot and profits pay nothing. Both ratios are stored at 18 decimals and rounded down, so a payout falls short of its exact share by about one wei per dollar. If positions finalize did not wait for are so far underwater that their negative equity exceeds the principal every other account holds (registered claims are not netted against it), principal is zero and the excess is carried; their settlement consumes that carry before crediting anything to the ledger, so only the part of a shortfall that offset real entitlements is ever credited.
-4. **The insurance fund becomes the residual**: the pot less what the two ratios pay out on the totals. The ratios' rounding remainder (dust) therefore belongs to the insurers rather than sitting in the contract with no owner.
+3. **Two frozen ratios.** Principal is senior: if the pot covers `owed − claims`, the principal ratio is 100% and the profit ratio is `min(100%, (pot − principal) / claims)`. If cash cannot even cover principal — only a books-vs-balance gap gets there — principal is paid pro-rata on the pot and profits pay nothing.
+4. **The insurance fund becomes the residual**: the pot less what the two ratios pay out on the totals.
 
-Withdrawals then pay **collateral × principal ratio + claim × profit ratio**. `withdrawCollateral` takes its amount in collateral units: the first withdrawal credits the registered claim at the profit ratio into collateral, and every withdrawal pays its amount times the principal ratio. `BazaarPairLens.getMaxWithdrawable` returns the largest amount it accepts, the same view as before termination, and `getTerminalEntitlement` the cash that amount pays. Three properties follow:
+<details>
+<summary>Notes on each term</summary>
+
+- **Unrealized PnL.** With every position settled the unrealized term of the identity is zero, which is why it is absent from `owed`.
+- **Ledger arrears** are what the deposits ledger owes the insurance fund — a seizure or vault gain the ledger could only partly pay because winners had already withdrawn the cash — so they are cash the ledger holds that no bucket claims. Subtracting them keeps that cash out of the reserved principal and lets it reach the insurers' residual.
+- **Inventory.** The vault's inherited inventory is retired here — its loss is its counterparties' gain and its gain their loss, both already inside the buckets and claims. It is valued at the settlement price from the liquidated traders' original entry, **including the funding leg**, matching how the coverage ratio and the ADL gate value it. Dropping that leg would let the inventory's funding obligation vanish while its counterparties still collected theirs.
+- **Rounding.** Both ratios are stored at 18 decimals and rounded down, so a payout falls short of its exact share by about one wei per dollar. The ratios' rounding remainder (dust) therefore belongs to the insurers rather than sitting in the contract with no owner.
+- **Negative equity beyond all principal.** If positions finalize did not wait for are so far underwater that their negative equity exceeds the principal every other account holds (registered claims are not netted against it), principal is zero and the excess is carried. Their settlement consumes that carry before crediting anything to the ledger, so only the part of a shortfall that offset real entitlements is ever credited.
+
+</details>
+
+### Withdrawals
+
+Withdrawals pay **collateral × principal ratio + claim × profit ratio**.
+
+- `withdrawCollateral` takes its amount in collateral units: the first withdrawal credits the registered claim at the profit ratio into collateral, and every withdrawal pays its amount times the principal ratio.
+- `BazaarPairLens.getMaxWithdrawable` returns the largest amount it accepts, the same view as before termination, and `getTerminalEntitlement` the cash that amount pays.
+
+Three properties follow:
 
 - **Principal is reserved at every moment**, with no deadline. Your deposit, minus your own trading losses, is never at risk from someone else's bankruptcy — and it doesn't expire if you never show up.
-- **Insurance is junior to every trader.** Because the fund is whatever remains after traders are paid, it absorbs bad debt, the pre-termination deficit and the inventory's loss before any winner is cut, and inherits the inventory's gain — whether or not each item was tallied. The one exception is the settlement tip insurance tops up before finalize (up to `TERMINAL_SETTLEMENT_TIP`, $0.05, for a position worth at least $5 whose own collateral cannot pay it): it is credited to the fee escrow, which finalize takes off the pot first, so when the pot cannot pay every trader in full it reduces the traders' ratios rather than the insurers' residual.
+- **Insurance is junior to every trader.** Because the fund is whatever remains after traders are paid, it absorbs bad debt, the pre-termination deficit and the inventory's loss before any winner is cut, and inherits the inventory's gain — whether or not each item was tallied.
 - **Profit shortfalls are shared at one uniform percentage** across every registered winner, regardless of who withdraws first.
 
-If finalize ran through the escape hatch, a position it did not wait for settles on its owner's first withdrawal (or when anyone settles it through `liquidate`). Its equity was already inside the total owed at collateral plus PnL, so a solvent position realizes to exactly that figure; a bankrupt one was counted below zero, so the insurers' residual funds its shortfall as far as it goes, and that funded amount moves into the ledger. Whatever the residual cannot fund is credited to the ledger as well, and both ratios are derived again, by the rule finalize used, on the entitlements still unpaid: the principal the ledger still owes, the registered claims not yet credited, and the cash the old ratios reserved for them (`TerminalRatiosRefrozen` reports the new ratios, and `getTerminalEntitlement` reads them). Everyone who has not withdrawn yet is then paid at the ratios the cash still in the contract supports, the fee escrow stays whole, and no withdrawal is refused for lack of cash. That is what finalize would have paid had the position been settled in time only if nobody withdrew in between: what earlier withdrawals took at the higher ratios cannot be recovered, so it falls on the holders still in, principal as well as profits — the case the completeness gate exists to prevent — but no withdrawal can take more than the ledger holds while a position is still open: that excess is the open positions' loss, which the ledger receives only when they settle, so it is refused with what the ledger can pay (`CollateralLib__LedgerShortfall`), and settling them releases the rest. Settling a bankrupt straggler after finalize earns the settler the same tip, from whatever residual its shortfall left (all-or-nothing, and only if the position was worth at least $5 at the settlement price); a solvent straggler pays none, since finalize already reserved its equity in full and settling it harms nobody.
+<details>
+<summary>The one exception to insurance being junior: the settlement tip</summary>
 
-Insurers cannot exit ahead of that settlement. After an escape-hatch finalize, `executeInsuranceWithdrawal` reverts (`InsuranceVaultLib__SweepIncomplete`) while any position is still open, until **14 days** beyond the escape hatch (`INSURER_SWEEP_GRACE`, so 28 days after the fix at the latest). Settling is permissionless, so an LP releases the gate by settling the remaining positions themselves, collecting the tip on any bankrupt one — an indexer lists them from `PositionBucketUpdated` events; the grace only bounds the case where nobody does.
+The settlement tip insurance tops up before finalize (up to `TERMINAL_SETTLEMENT_TIP`, $0.05, for a position worth at least $5 whose own collateral cannot pay it) is credited to the fee escrow, which finalize takes off the pot first. When the pot cannot pay every trader in full it therefore reduces the traders' ratios rather than the insurers' residual.
 
-A pair terminates exactly once; insurance LPs' withdrawal gates open at finalize — after an escape-hatch finalize, once the remaining positions are settled or the grace elapses — and their shares redeem against the residual. Finalize retires the vault's inventory and releases the collateral earmarked against it in the same step, so the residual is redeemable in full: with no inventory left to value, [share pricing](insurance.md) collapses to the residual over the supply, reads no mark, and needs no price update.
+</details>
 
-> **Note on inherited inventory.** The inventory is valued at the settlement price from the liquidated traders' original entry, **including the funding leg** — matching how the coverage ratio and the ADL gate value it. Dropping that leg would let the inventory's funding obligation vanish while its counterparties still collected theirs.
+### After an escape-hatch finalize
+
+A position finalize did not wait for settles on its owner's first withdrawal, or when anyone settles it through `liquidate`.
+
+- **A solvent straggler** realizes to exactly the figure already inside the total owed, collateral plus PnL. It pays no tip, since finalize already reserved its equity in full and settling it harms nobody.
+- **A bankrupt straggler** was counted below zero, so the insurers' residual funds its shortfall as far as it goes, and that funded amount moves into the ledger. Whatever the residual cannot fund is credited to the ledger as well, and both ratios are derived again, by the rule finalize used, on the entitlements still unpaid. `TerminalRatiosRefrozen` reports the new ratios, and `getTerminalEntitlement` reads them.
+- **Its settler's tip** is the same tip, from whatever residual its shortfall left: all-or-nothing, and only if the position was worth at least $5 at the settlement price.
+- **Withdrawals while a position is still open** cannot take more than the ledger holds. One that asks for more is refused with what the ledger can pay (`CollateralLib__LedgerShortfall`), and settling the open positions releases the rest.
+- **Insurers cannot exit ahead of that settlement.** `executeInsuranceWithdrawal` reverts (`InsuranceVaultLib__SweepIncomplete`) while any position is still open, until **14 days** beyond the escape hatch (`INSURER_SWEEP_GRACE`, so 28 days after the fix at the latest). Settling is permissionless, so an LP releases the gate by settling the remaining positions themselves, collecting the tip on any bankrupt one — an indexer lists them from `PositionBucketUpdated` events. The grace only bounds the case where nobody does.
+
+<details>
+<summary>Who bears a shortfall that is settled late</summary>
+
+- **What the ratios are re-derived on**: the principal the ledger still owes, the registered claims not yet credited, and the cash the old ratios reserved for them.
+- **The result.** Everyone who has not withdrawn yet is then paid at the ratios the cash still in the contract supports, the fee escrow stays whole, and no withdrawal is refused for lack of cash.
+- **The cost.** That is what finalize would have paid had the position been settled in time only if nobody withdrew in between. What earlier withdrawals took at the higher ratios cannot be recovered, so it falls on the holders still in, principal as well as profits — the case the completeness gate exists to prevent.
+- **Why a withdrawal is capped at the ledger while positions are open.** The excess is the open positions' loss, which the ledger receives only when they settle.
+
+</details>
+
+### Insurance after finalize
+
+A pair terminates exactly once. Insurance LPs' withdrawal gates open at finalize — after an escape-hatch finalize, once the remaining positions are settled or the grace elapses — and their shares redeem against the residual.
+
+Finalize retires the vault's inventory and releases the collateral earmarked against it in the same step, so the residual is redeemable in full: with no inventory left to value, [share pricing](insurance.md) collapses to the residual over the supply, reads no mark, and needs no price update.

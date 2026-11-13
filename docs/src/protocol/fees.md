@@ -27,14 +27,47 @@ All trading fees are charged per fill, on notional, deducted from each side's co
 
 Rewards funded from the insurance fund are capped at its **free capital** — the balance less the seizure earmarked against inventory the vault still holds — so no keeper is ever paid out of collateral that backs an open estate. A fund holding nothing but earmarks pays nothing; the [reserve](insurance.md) may pay.
 
-Four of these carry gates. The trigger bounty is the owner's own money, escrowed from their wallet when the order is placed; an execution earns only the share it fills, and whatever is left when the order ends unexecuted returns to the owner. The settlement tip is never paid for settling your own position, and after finalize only a bankrupt straggler earns it: a solvent one changes no ledger, so settling it is free. The unload reward's flat floor is granted only when the call unloads at least **$1,250** of notional (where 2 bp overtakes it) or clears the inventory, so slicing one unload into many earns no premium — the 2 bp rate itself is paid on any amount. The refresh bounty pays only when the call stores a *newer* Pyth update, and only while the fund's free capital exceeds **$1,000**. How often it pays follows what the fund has at stake and can spare: at most once per **5 minutes** while the vault holds at least **$1,250** of inventory and free capital exceeds **$5,000**, since the health check a refresh runs is what opens an ADL window when that inventory drifts past the trigger on a book too thin to trade, and otherwise once per **day**, a heartbeat that keeps a quiet pair's stored price well inside the 21-day [stale-termination](termination.md) line. The floors differ because the costs do: inventory nobody bids for can hold the fast cadence on at $28.80 a day, while the heartbeat costs $36.50 a year, so its floor only has to stop it running a small fund down to nothing, and it sits under the $3,000 listing seed so a market listed at the minimum earns it from the start. Inventory rather than open interest sets the cadence because inventory costs something to create: a long and a short parked in two wallets clear any open-interest floor for nothing but the margin they lock, and would otherwise draw the fast cadence from a dormant pair indefinitely. It buys freshness where it protects someone, not a faucet.
+Four of these carry gates.
 
-The two flat keeper payouts also shrink for positions worth less than the **$5** order minimum: there the $0.05 liquidation reward is capped at the account's own equity, and the settlement tip at what the position's own collateral covers. The order minimum bounds orders, not positions. A reduce sized just under the position, or a small partial fill of a resting order, can leave a position that small with no collateral at no cost, so an uncapped flat payout would pay out of insurance once per such account. At $5 and above nothing changes, because the maintenance margin on such a position already covers either payout.
+- **Trigger bounty.** The trigger bounty is the owner's own money, escrowed from their wallet when the order is placed; an execution earns only the share it fills, and whatever is left when the order ends unexecuted returns to the owner.
+- **Settlement tip.** The settlement tip is never paid for settling your own position, and after finalize only a bankrupt straggler earns it: a solvent one changes no ledger, so settling it is free.
+- **Unload reward.** The unload reward's flat floor is granted only when the call unloads at least **$1,250** of notional (where 2 bp overtakes it) or clears the inventory, so slicing one unload into many earns no premium — the 2 bp rate itself is paid on any amount.
+- **Refresh bounty.** The refresh bounty pays only when the call stores a *newer* Pyth update, and only while the fund's free capital exceeds **$1,000**. How often it pays follows what the fund has at stake and can spare: at most once per **5 minutes** while the vault holds at least **$1,250** of inventory and free capital exceeds **$5,000**, and otherwise once per **day**, a heartbeat that keeps a quiet pair's stored price well inside the 21-day [stale-termination](termination.md) line.
 
-What a fund that cannot pay in full does depends on the reward. The liquidation, unload, ADL and proposer rewards are **trimmed** to the free capital that is there — the work is done either way, and a keeper who seized a position or sold inventory has already committed the gas, so paying what can be paid keeps the incentive pointing the right way. The two rewards that gate instead of trimming are the ones whose work is optional: the refresh bounty simply stops at its $1,000 floor, and the terminal settlement tip's insurance leg is all-or-nothing on top of whatever the settled position itself paid.
+<details>
+<summary>Why the refresh bounty has two cadences and two floors</summary>
+
+- **Why inventory earns the fast cadence.** The health check a refresh runs is what opens an ADL window when that inventory drifts past the trigger on a book too thin to trade.
+- **Why the floors differ.** The floors differ because the costs do: inventory nobody bids for can hold the fast cadence on at $28.80 a day, while the heartbeat costs $36.50 a year, so its floor only has to stop it running a small fund down to nothing, and it sits under the $3,000 listing seed so a market listed at the minimum earns it from the start.
+- **Why inventory, not open interest.** Inventory rather than open interest sets the cadence because inventory costs something to create: a long and a short parked in two wallets clear any open-interest floor for nothing but the margin they lock, and would otherwise draw the fast cadence from a dormant pair indefinitely.
+
+It buys freshness where it protects someone, not a faucet.
+
+</details>
+
+The two flat keeper payouts also shrink for positions worth less than the **$5** order minimum: there the $0.05 liquidation reward is capped at the account's own equity, and the settlement tip at what the position's own collateral covers. At $5 and above nothing changes, because the maintenance margin on such a position already covers either payout.
+
+<details>
+<summary>Why the flat payouts are capped below $5</summary>
+
+The order minimum bounds orders, not positions. A reduce sized just under the position, or a small partial fill of a resting order, can leave a position that small with no collateral at no cost, so an uncapped flat payout would pay out of insurance once per such account.
+
+</details>
+
+What a fund that cannot pay in full does depends on the reward.
+
+- **Trimmed.** The liquidation, unload, ADL and proposer rewards are **trimmed** to the free capital that is there — the work is done either way, and a keeper who seized a position or sold inventory has already committed the gas, so paying what can be paid keeps the incentive pointing the right way.
+- **Gated.** The two rewards that gate instead of trimming are the ones whose work is optional: the refresh bounty simply stops at its $1,000 floor, and the terminal settlement tip's insurance leg is all-or-nothing on top of whatever the settled position itself paid.
 
 ## How payouts are paid
 
 Nothing above is pushed. Every amount the protocol owes a third party — the rewards in this table, integrator fees, the bug-bounty tax and relayer fees — is **accrued to the recipient's claimable balance on the pair** (`FeeAccrued(pairId, recipient, amount)` is emitted per accrual) and withdrawn with `claimFees()`; the lens's `claimableFees(pair, who)` reads what is owed and the escrow's total. One claim per pair sweeps every kind of payout at once. For the cross-pair question — which pairs owe me enough to be worth a claim — the lens has `getClaimableFees(pairs[], who)` for a chosen list and `getClaimableFeesAll(who)` for every pair under the factory.
 
-The pull design is what lets every payer stay safe: no liquidation, ADL step, price refresh, fill or relayed call ever runs a token transfer to a third party, so a recipient that cannot receive USDC (a blacklisted keeper, a reverting contract) can block nothing — it simply never claims, and the cash sits reserved. The escrow's total is a liability the pair reserves alongside the deposits ledger and the insurance fund in every books-vs-cash check and in the terminal pot, and `claimFees()` stays open in every pair state, termination included.
+The escrow's total is a liability the pair reserves alongside the deposits ledger and the insurance fund in every books-vs-cash check and in the terminal pot, and `claimFees()` stays open in every pair state, termination included.
+
+<details>
+<summary>Why payouts are pulled rather than pushed</summary>
+
+The pull design is what lets every payer stay safe: no liquidation, ADL step, price refresh, fill or relayed call ever runs a token transfer to a third party, so a recipient that cannot receive USDC (a blacklisted keeper, a reverting contract) can block nothing — it simply never claims, and the cash sits reserved.
+
+</details>

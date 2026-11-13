@@ -14,10 +14,28 @@ Each function takes a `(nonce, deadline, relayerFee, signature)` tuple, and ever
 | Domain | name `"BazaarPair"`, version `"1"`, chainId, verifying contract (re-derived if chainId changes — fork protection) |
 | Nonces | strictly sequential per user, kept separately on each pair (`metaTxNonces(user)`) |
 | Deadline | must not be passed, and at most **10 s** in the future (`MAX_DEADLINE_WINDOW`) — a signature cannot be warehoused |
-| Relayer fee | ≤ **$1** per action, charged at its USDC floor: the signed fee is rounded down to USDC's 6-decimal precision before it is pulled or netted, so the relayer's credit is exactly the USDC the pair received, and a fee below one micro-USDC charges nothing. Netted from the payout on withdrawals, pulled from the user's wallet alongside deposits, and pulled from the wallet on its own for order create/cancel/amend, insurance-withdrawal requests, and a withdrawal that pays nothing out — the first, locking `executeInsuranceWithdrawal` call, or a redemption or terminal withdrawal worth zero (a withdrawal paying more than zero but no more than the fee reverts). Each relayed call pays whoever submits it, so a lock and its paying call can go through different relayers. In every case the fee stays in the pair as the relayer's claimable balance, accrued per call and withdrawn with `claimFees()` in any pair state. Never charged to bucket collateral: margin backing a position leaves only through `withdrawCollateral` and its gates |
-| Price staleness | the same 3 s bound as every other path — but `priceUpdate` sits outside the signed payload, so the relayer attaches a fresh price at submission and an earlier signature still lands on it. On a session pair a relayer can instead leave a trigger order on the stale fallback, which keeps a trigger the live price already meets from arming on arrival; firing it itself in the same block earns nothing, since an execution in that block on an order the stale fallback left unarmed pays the bounty to the owner |
+| Relayer fee | ≤ **$1** per action, charged at its USDC floor; the rules follow the table |
+| Price staleness | the same 3 s bound as every other path — but `priceUpdate` sits outside the signed payload, so the relayer attaches a fresh price at submission and an earlier signature still lands on it |
 
-Typed structs exist for `depositCollateral`, `withdrawCollateral`, `createOrder`, `cancelOrders`, `amendOrders` (one `uint256[]` of word triples — an id word carrying the order id and its optional insertion hints, the new price and the new size per amendment — hashed as EIP-712 hashes an array; the hints are signed too, so a relayer cannot refresh them), `depositToInsurance`, `requestInsuranceWithdrawal`, `executeInsuranceWithdrawal`. `createOrder` signs the order spec but not its `MatchHints`: like `priceUpdate`, the relayer attaches insertion hints at submission (each verified on-chain against the real neighbours), and a relayed order always walks the protocol-default step budget, since only the signer may bound how much of their order executes. `BazaarPairLens.getEip712Constants()` and `getTypehashes()` expose everything an integrator needs to build signatures.
+<details>
+<summary>Edge case: a relayer leaving a trigger order on the stale fallback</summary>
+
+On a session pair a relayer can instead leave a trigger order on the stale fallback, which keeps a trigger the live price already meets from arming on arrival; firing it itself in the same block earns nothing, since an execution in that block on an order the stale fallback left unarmed pays the bounty to the owner.
+
+</details>
+
+The relayer fee:
+
+- **Cap and rounding.** ≤ **$1** per action, charged at its USDC floor: the signed fee is rounded down to USDC's 6-decimal precision before it is pulled or netted, so the relayer's credit is exactly the USDC the pair received, and a fee below one micro-USDC charges nothing.
+- **Where it is taken.** Netted from the payout on withdrawals, pulled from the user's wallet alongside deposits, and pulled from the wallet on its own for order create/cancel/amend, insurance-withdrawal requests, and a withdrawal that pays nothing out — the first, locking `executeInsuranceWithdrawal` call, or a redemption or terminal withdrawal worth zero (a withdrawal paying more than zero but no more than the fee reverts).
+- **Who is paid.** Each relayed call pays whoever submits it, so a lock and its paying call can go through different relayers. In every case the fee stays in the pair as the relayer's claimable balance, accrued per call and withdrawn with `claimFees()` in any pair state.
+- **Never bucket collateral.** Never charged to bucket collateral: margin backing a position leaves only through `withdrawCollateral` and its gates.
+
+Building the signature:
+
+- **Typed structs** exist for `depositCollateral`, `withdrawCollateral`, `createOrder`, `cancelOrders`, `amendOrders` (one `uint256[]` of word triples — an id word carrying the order id and its optional insertion hints, the new price and the new size per amendment — hashed as EIP-712 hashes an array; the hints are signed too, so a relayer cannot refresh them), `depositToInsurance`, `requestInsuranceWithdrawal`, `executeInsuranceWithdrawal`.
+- **`createOrder`** signs the order spec but not its `MatchHints`: like `priceUpdate`, the relayer attaches insertion hints at submission (each verified on-chain against the real neighbours), and a relayed order always walks the protocol-default step budget, since only the signer may bound how much of their order executes.
+- **Constants.** `BazaarPairLens.getEip712Constants()` and `getTypehashes()` expose everything an integrator needs to build signatures.
 
 ## Type strings
 
@@ -38,4 +56,10 @@ Each field is the call's argument of the same name — for `CreateOrder`, the fi
 
 ## Permit
 
-The functions that take a `permitData` execute it best-effort before the pull — approval and action in one signature. For the deposits the permit covers the deposit plus fee; for `createOrder` it covers the relayer fee plus the trigger bounty the order carries (the fee is pulled first, so one permit serves both); for `cancelOrders`, `amendOrders`, `requestInsuranceWithdrawal` and the locking `executeInsuranceWithdrawal` call it covers the relayer fee alone, so a trader who onboarded through a permit and holds no ETH can still trade, amend and cancel gaslessly, and an LP can request and lock an exit the same way. The paying `executeInsuranceWithdrawal` call needs no permit, since its fee comes out of the payout. A failed permit emits `PermitExecutionFailed` and falls through to the normal allowance path (so a griefed permit can't block a call that would succeed anyway).
+The functions that take a `permitData` execute it best-effort before the pull — approval and action in one signature.
+
+- **Deposits.** For the deposits the permit covers the deposit plus fee.
+- **`createOrder`.** For `createOrder` it covers the relayer fee plus the trigger bounty the order carries (the fee is pulled first, so one permit serves both).
+- **Fee-only calls.** For `cancelOrders`, `amendOrders`, `requestInsuranceWithdrawal` and the locking `executeInsuranceWithdrawal` call it covers the relayer fee alone, so a trader who onboarded through a permit and holds no ETH can still trade, amend and cancel gaslessly, and an LP can request and lock an exit the same way.
+- **No permit needed.** The paying `executeInsuranceWithdrawal` call needs no permit, since its fee comes out of the payout.
+- **A failed permit** emits `PermitExecutionFailed` and falls through to the normal allowance path (so a griefed permit can't block a call that would succeed anyway).
